@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# 环境与密钥 —— 真实凭证永不入库
+.env
+.env.*
+!.env.example
+
+# 本地数据
+*.db
+chroma/
+evals/datasets/*
+!evals/datasets/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+.DS_Store

@@ -1,0 +1,20 @@
+# 工具选择 eval 用例(OBS-03)。运行器待实现,先固化用例结构。
+# expected_tools:期望被调用的工具序列(顺序不敏感,除非 ordered: true)
+
+- id: ts-001
+  role: admin
+  input: "技术部还有多少简历没筛?"
+  expected_tools: [get_open_cycle, search_resumes]
+  expected_params:
+    search_resumes: { department: "技术部", status: "pending" }
+
+- id: ts-002
+  role: admin
+  input: "明天下午还有空的面试场次吗?"
+  expected_tools: [get_open_cycle, find_available_sessions]
+
+- id: ts-003
+  role: candidate
+  input: "我的面试安排在什么时候?"
+  expected_tools: [get_my_interview]
+  forbidden_tools: [search_resumes, list_unassigned]  # 候选人不得触达管理员工具
