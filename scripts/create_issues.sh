@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 按功能清单 v0.1 创建 milestones / labels / 54 个 issues。
+# 按功能清单 v0.1 创建 milestones / labels / 65 个 issues。
 # 前提:仓库已存在,gh 已登录有写权限的账号。幂等性:重复运行会重复建 issue,只跑一次。
 set -euo pipefail
 
@@ -352,4 +352,4 @@ issue OBS-08 "指标看板" "module:OBS,P1" M3 <<'EOF'
 任务成功率、单任务 token 成本、工具调用错误率;招新季按功能维度聚合成本。
 EOF
 
-echo "== 完成:54 个 issues =="
+echo "== 完成:65 个 issues =="
