@@ -32,3 +32,13 @@ uv run python -m evals  # eval 集(需要模型 API key,CI 中作为门禁)
 
 Issues 按模块编号:INF(基础设施)/ TOOL(工具层)/ GRA(编排)/ EVA(评估流水线)/
 COP(Copilot)/ MEM(记忆)/ SEC(安全)/ OBS(观测评估)。提交信息引用编号。
+
+## Agent skills
+
+### Issue tracker
+
+Issues 在 upstream 仓库 `Boyuan-IT-Club/Official_Web_Agent` 的 GitHub Issues(fork 的 origin 未启用 Issues,`gh` 命令一律加 `-R Boyuan-IT-Club/Official_Web_Agent`)。见 `docs/agents/issue-tracker.md`。
+
+### Domain docs
+
+Single-context:共享词汇表在工作区根 `../CONTEXT.md`,ADR 在 `../docs/adr/`。见 `docs/agents/domain.md`。

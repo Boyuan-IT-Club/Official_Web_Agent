@@ -1,0 +1,1690 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="2026-08-24 Official_Web_Agent 架构评审(grill,穷举式追问)会话全记录:今日决策总览、新增设计、对原设计的改进、优化与契约细化、待讨论项、缺漏扫描情要、今晚同步议程。每一项决策含结论/背景/分析/利弊/状态/出处,配 9 幅手写 SVG 架构图。">
+<title>Official_Web_Agent · 架构评审(grill)会话全记录 2026-08-24</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@500;700;900&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#f5f0e4;
+  --surface:#fbf8ef;
+  --ink:#2b2923;
+  --ink-2:#57534a;
+  --ink-3:#8a8372;
+  --rule:#dcd3bd;
+  --rule-2:#c9bfa4;
+  --accent:#1e3a5f;
+  --accent-2:#3c5a82;
+  --accent-bg:#e7ecf3;
+  --ok:#2f6f4f;
+  --ok-bg:#e4efe7;
+  --warn:#8a5a08;
+  --warn-bg:#f5ead2;
+  --warn-line:#b07d1f;
+  --danger:#9a3412;
+  --danger-bg:#f7e4da;
+  --danger-line:#c0533a;
+  --serif:"Noto Serif SC","Source Han Serif SC","Songti SC","STSong","SimSun",serif;
+  --sans:"Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --mono:"JetBrains Mono","SFMono-Regular",Consolas,"Liberation Mono","Courier New",monospace;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+body{
+  margin:0;
+  background:var(--paper);
+  color:var(--ink);
+  font-family:var(--sans);
+  font-size:16px;
+  line-height:1.78;
+}
+::selection{background:var(--accent-bg)}
+a{color:var(--accent);text-decoration:none;border-bottom:1px solid var(--rule-2)}
+a:hover{color:var(--accent-2);border-bottom-color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+.layout{
+  max-width:1180px;
+  margin:0 auto;
+  padding:0 28px 96px;
+  display:grid;
+  grid-template-columns:224px minmax(0,1fr);
+  gap:56px;
+}
+
+/* ============ 侧栏导航 ============ */
+.toc{position:sticky;top:0;align-self:start;padding-top:44px;font-size:13px}
+.toc .toc-title{
+  font-family:var(--mono);
+  font-size:11px;
+  letter-spacing:.14em;
+  color:var(--ink-3);
+  text-transform:uppercase;
+  margin-bottom:10px;
+}
+.toc ol{list-style:none;margin:0;padding:0}
+.toc li{margin:0}
+.toc a{
+  display:flex;gap:8px;align-items:baseline;
+  padding:5px 0;
+  color:var(--ink-2);
+  border-bottom:none;
+  line-height:1.5;
+}
+.toc a .n{font-family:var(--mono);font-size:11px;color:var(--ink-3);min-width:20px}
+.toc a:hover{color:var(--accent)}
+.toc .toc-note{margin-top:22px;font-size:11.5px;color:var(--ink-3);line-height:1.7}
+.toc .toc-badges{margin-top:8px}
+.badge{display:inline-block;font-family:var(--mono);font-size:10.5px;line-height:1;padding:4px 8px;border-radius:999px;margin:2px 2px 0 0;white-space:nowrap}
+.b-done{color:var(--ok);background:var(--ok-bg);border:1px solid #b9d4c2}
+.b-sync{color:var(--warn);background:var(--warn-bg);border:1px solid var(--warn-line)}
+.b-pend{color:var(--danger);background:var(--danger-bg);border:1px solid var(--danger-line)}
+
+@media (max-width:1020px){
+  .layout{grid-template-columns:minmax(0,1fr);gap:8px;padding:0 18px 72px}
+  .toc{position:static;padding-top:18px}
+  .toc ol{display:flex;flex-wrap:wrap;gap:2px 14px}
+  .toc li{margin:0}
+  .toc .toc-note,.toc .toc-badges{display:none}
+}
+
+/* ============ 页头 ============ */
+.masthead{padding:64px 0 8px;scroll-margin-top:20px}
+.kicker{
+  font-family:var(--mono);
+  font-size:12px;
+  letter-spacing:.16em;
+  color:var(--accent);
+  margin:0 0 14px;
+}
+h1{
+  font-family:var(--serif);
+  font-size:46px;
+  font-weight:900;
+  line-height:1.15;
+  margin:0 0 18px;
+  letter-spacing:.01em;
+}
+h1 .sub{display:block;font-size:26px;font-weight:700;color:var(--accent);margin-top:6px}
+.lede{
+  font-size:19px;
+  line-height:1.7;
+  color:var(--ink-2);
+  max-width:72ch;
+  margin:0 0 28px;
+}
+.lede code{font-family:var(--mono);font-size:.86em;color:var(--ink)}
+.stack{list-style:none;display:flex;flex-wrap:wrap;gap:8px;padding:0;margin:0 0 34px;max-width:820px}
+.stack li{
+  font-family:var(--mono);
+  font-size:12px;
+  color:var(--accent);
+  background:var(--accent-bg);
+  border:1px solid var(--rule-2);
+  padding:3px 10px;
+  border-radius:999px;
+}
+.metrics{
+  display:flex;flex-wrap:wrap;
+  border-top:1px solid var(--rule-2);
+  border-bottom:1px solid var(--rule-2);
+  margin:0 0 30px;
+}
+.metric{padding:20px 30px 18px 0;margin-right:30px;border-right:1px solid var(--rule)}
+.metric:last-child{border-right:none;margin-right:0}
+.metric .num{
+  font-family:var(--serif);
+  font-size:36px;
+  font-weight:900;
+  color:var(--accent);
+  line-height:1.1;
+  display:block;
+}
+.metric .lbl{
+  font-family:var(--mono);
+  font-size:11px;
+  color:var(--ink-3);
+  letter-spacing:.08em;
+}
+.docmeta{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);margin:0 0 8px}
+
+/* ============ 章节 ============ */
+section{scroll-margin-top:26px;padding-top:44px;border-top:1px solid var(--rule)}
+section.sp-lg{padding-top:72px}
+.sec-no{font-family:var(--mono);font-size:13px;letter-spacing:.1em;color:var(--accent)}
+h2{
+  font-family:var(--serif);
+  font-size:31px;
+  font-weight:700;
+  margin:8px 0 10px;
+  line-height:1.25;
+}
+.sec-lede{color:var(--ink-2);max-width:72ch;margin:0 0 26px}
+h3{font-family:var(--serif);font-size:19px;font-weight:700;margin:0 0 6px}
+h4{font-family:var(--serif);font-size:15.5px;font-weight:700;margin:18px 0 6px}
+p{margin:0 0 14px}
+.note{font-size:13px;color:var(--ink-3)}
+.mono{font-family:var(--mono);font-size:.9em}
+code{
+  font-family:var(--mono);
+  font-size:.88em;
+  background:rgba(30,58,95,.06);
+  border:1px solid var(--rule);
+  border-radius:3px;
+  padding:1px 5px;
+  color:var(--ink);
+}
+code.plain{background:none;border:none;padding:0}
+pre{
+  font-family:var(--mono);
+  font-size:13px;
+  line-height:1.75;
+  background:var(--surface);
+  border:1px solid var(--rule);
+  border-left:3px solid var(--accent);
+  padding:14px 18px;
+  overflow-x:auto;
+  margin:0 0 14px;
+  white-space:pre;
+}
+pre .cmt{color:var(--ink-3)}
+
+/* ============ 折叠块 ============ */
+details.fold{
+  border:1px solid var(--rule);
+  border-left:3px solid var(--rule-2);
+  background:var(--surface);
+  padding:14px 18px;
+  margin:12px 0;
+}
+details.fold[open]{border-left-color:var(--accent)}
+details.fold summary{
+  cursor:pointer;
+  font-weight:600;
+  color:var(--ink);
+  list-style:none;
+}
+details.fold summary::-webkit-details-marker{display:none}
+details.fold summary::before{content:"▸ ";color:var(--accent)}
+details.fold[open] summary::before{content:"▾ "}
+details.fold .fold-body{margin-top:12px;font-size:14.5px;color:var(--ink-2)}
+details.fold .fold-body p{margin:0 0 10px}
+
+/* ============ 表格 ============ */
+table{width:100%;border-collapse:collapse;font-size:14px;margin:18px 0 8px}
+th{
+  font-family:var(--mono);
+  font-size:11.5px;
+  letter-spacing:.05em;
+  text-align:left;
+  color:var(--ink-3);
+  border-bottom:2px solid var(--ink-2);
+  padding:8px 10px;
+  white-space:nowrap;
+}
+td{border-bottom:1px solid var(--rule);padding:10px;vertical-align:top}
+tbody tr:last-child td{border-bottom:none}
+tr.drift td{background:var(--warn-bg)}
+tr.drift td:first-child{box-shadow:inset 3px 0 0 var(--warn-line)}
+tr.sev-p0 td{background:var(--danger-bg)}
+tr.sev-p0 td:first-child{box-shadow:inset 3px 0 0 var(--danger-line)}
+tr.sev-p1 td{background:var(--warn-bg)}
+tr.sev-p1 td:first-child{box-shadow:inset 3px 0 0 var(--warn-line)}
+td code{white-space:nowrap}
+.tag-ok{color:var(--ok);font-weight:600}
+.tag-drift{color:var(--danger);font-weight:600;font-family:var(--mono);font-size:11.5px}
+.tbl-note{font-size:12.5px;color:var(--ink-3);margin:6px 2px 0}
+
+/* ============ 决策条目卡片 ============ */
+.dcard{
+  border:1px solid var(--rule);
+  border-left:4px solid var(--accent);
+  background:var(--surface);
+  padding:20px 24px 12px;
+  margin:22px 0;
+}
+.dcard.pend{border-left-color:var(--danger-line)}
+.dcard.sync{border-left-color:var(--warn-line)}
+.dcard .d-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px;margin:0 0 4px}
+.dcard .d-head h3{margin:0;font-size:18.5px}
+.dcard .d-rows{margin-top:10px}
+.dcard .d-row{display:grid;grid-template-columns:86px minmax(0,1fr);gap:4px 14px;padding:5px 0;border-top:1px dashed var(--rule)}
+.dcard .d-row:first-child{border-top:none}
+.dcard .d-row .k{font-family:var(--mono);font-size:11.5px;color:var(--accent);letter-spacing:.04em;padding-top:1px;white-space:nowrap}
+.dcard .d-row .v{font-size:14.5px;color:var(--ink)}
+.dcard .d-row .v p{margin:0 0 8px}
+.dcard .d-row .v p:last-child{margin-bottom:0}
+.dcard .d-row .v ul,.dcard .d-row .v ol{margin:0 0 8px;padding-left:22px}
+.dcard .d-row .v li{margin:0 0 3px}
+.dcard .proscons{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:2px}
+.dcard .pros,.dcard .cons{
+  border:1px solid var(--rule);
+  background:var(--surface);
+  padding:10px 14px 8px;
+  font-size:13.5px;
+}
+.dcard .pros{border-left:3px solid var(--ok)}
+.dcard .cons{border-left:3px solid var(--danger-line)}
+.dcard .pros .pc-t,.dcard .cons .pc-t{font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;display:block;margin-bottom:4px}
+.dcard .pros .pc-t{color:var(--ok)}
+.dcard .cons .pc-t{color:var(--danger)}
+.dcard .pros ul,.dcard .cons ul{margin:0;padding-left:18px}
+.dcard .pros li,.dcard .cons li{margin:0 0 3px}
+.dcard .d-src{font-family:var(--mono);font-size:12px;color:var(--ink-3);margin-top:12px;padding-top:8px;border-top:1px solid var(--rule)}
+.dcard .d-src code{font-size:.95em}
+@media (max-width:1020px){.dcard .proscons{grid-template-columns:1fr}}
+
+/* ============ 状态徽章 ============ */
+.st-badge{font-family:var(--mono);font-size:11.5px;white-space:nowrap;padding:3px 9px;border-radius:999px}
+.st-done{color:var(--ok);background:var(--ok-bg);border:1px solid #b9d4c2}
+.st-sync{color:var(--warn);background:var(--warn-bg);border:1px solid var(--warn-line)}
+.st-pend{color:var(--danger);background:var(--danger-bg);border:1px solid var(--danger-line)}
+.st-cat{font-family:var(--mono);font-size:11px;color:var(--ink-2);border:1px solid var(--rule-2);border-radius:999px;padding:2px 8px;white-space:nowrap}
+
+/* ============ 图 ============ */
+.diagram{
+  background:var(--surface);
+  border:1px solid var(--rule);
+  padding:16px 14px 10px;
+  margin:20px 0 4px;
+  overflow-x:auto;
+}
+.diagram svg{display:block;max-width:100%;height:auto}
+.figcap{font-family:var(--mono);font-size:12px;color:var(--ink-3);margin:6px 2px 0}
+svg text{font-family:var(--sans)}
+.sv-t{font-weight:600;fill:var(--ink)}
+.sv-m{font-family:var(--mono)}
+.sv-s{font-size:11.5px;fill:var(--ink-2)}
+.sv-ss{font-size:10.5px;fill:var(--ink-3)}
+.box{fill:var(--surface);stroke:var(--accent);stroke-width:1.3}
+.box-lite{fill:var(--surface);stroke:var(--ink-3);stroke-width:1.1}
+.box-dash{fill:#f3eddd;stroke:var(--ink-3);stroke-width:1.1;stroke-dasharray:5 4}
+.box-ok{fill:var(--ok-bg);stroke:var(--ok);stroke-width:1.2}
+.box-warn{fill:var(--warn-bg);stroke:var(--warn-line);stroke-width:1.2}
+.box-danger{fill:var(--danger-bg);stroke:var(--danger-line);stroke-width:1.2}
+.edge{stroke:var(--ink-3);stroke-width:1.4;fill:none}
+.edge-dash{stroke:var(--ink-3);stroke-width:1.2;fill:none;stroke-dasharray:4 4}
+.edge-red{stroke:var(--danger-line);stroke-width:1.4;fill:none}
+.edge-ok{stroke:var(--ok);stroke-width:1.4;fill:none}
+.edge-warn{stroke:var(--warn-line);stroke-width:1.4;fill:none}
+
+/* ============ 流程链 ============ */
+.chain{
+  display:flex;flex-wrap:wrap;align-items:stretch;gap:0;
+  font-family:var(--mono);font-size:13px;
+  margin:16px 0;
+}
+.chain .node{
+  border:1px solid var(--rule-2);
+  background:var(--surface);
+  padding:8px 14px;
+  white-space:nowrap;
+}
+.chain .arrow{color:var(--accent);padding:8px 10px;font-size:14px}
+.chain .node.curr{border-color:var(--accent);color:var(--accent);font-weight:600}
+
+/* ============ 红线 / 风险 ============ */
+.redline{
+  display:flex;gap:14px;align-items:baseline;
+  border-left:3px solid var(--danger-line);
+  background:var(--danger-bg);
+  padding:11px 16px;
+  margin:10px 0;
+}
+.redline .tag{font-family:var(--mono);font-size:12px;color:var(--danger);white-space:nowrap;font-weight:600}
+.redline p{margin:0;font-size:14.5px;color:var(--ink)}
+.callout{
+  border:1px solid var(--accent);
+  border-left:4px solid var(--accent);
+  background:var(--accent-bg);
+  padding:14px 18px;
+  margin:18px 0;
+  font-size:14.5px;
+}
+.callout .t{font-family:var(--mono);font-size:12px;color:var(--accent);letter-spacing:.06em;display:block;margin-bottom:4px}
+.callout.warn{border-color:var(--warn-line);border-left-color:var(--warn-line);background:var(--warn-bg)}
+.callout.warn .t{color:var(--warn)}
+.callout.danger{border-color:var(--danger-line);border-left-color:var(--danger-line);background:var(--danger-bg)}
+.callout.danger .t{color:var(--danger)}
+
+/* ============ 双栏 ============ */
+.split{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:16px 0}
+.split .panel{border:1px solid var(--rule);background:var(--surface);padding:16px 20px 10px;font-size:14px}
+.split .panel h4{margin:0 0 8px}
+.split .panel ul{margin:0;padding-left:18px}
+.split .panel li{margin:0 0 5px}
+@media (max-width:1020px){.split{grid-template-columns:1fr}}
+
+footer{
+  margin-top:72px;
+  padding-top:20px;
+  border-top:1px solid var(--rule-2);
+  font-size:12.5px;
+  color:var(--ink-3);
+  line-height:1.9;
+}
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav class="toc" aria-label="目录">
+  <p class="toc-title">目录 Contents</p>
+  <ol>
+    <li><a href="#top"><span class="n">00</span>今日决策总览</a></li>
+    <li><a href="#new-thread"><span class="n">01</span>新增·thread 生命周期</a></li>
+    <li><a href="#new-guardrail"><span class="n">02</span>新增·护栏四段</a></li>
+    <li><a href="#new-pii"><span class="n">03</span>新增·PII 四道闸</a></li>
+    <li><a href="#new-identity"><span class="n">04</span>新增·身份三件套+审计</a></li>
+    <li><a href="#new-rag"><span class="n">05</span>新增·RAG 形接口</a></li>
+    <li><a href="#new-remote"><span class="n">06</span>新增·B 遥控器</a></li>
+    <li><a href="#new-review"><span class="n">07</span>新增·评审确认+分数卡</a></li>
+    <li><a href="#new-tool"><span class="n">08</span>新增·工具准入五条</a></li>
+    <li><a href="#new-verify"><span class="n">09</span>新增·证据核验节点</a></li>
+    <li><a href="#new-eval"><span class="n">10</span>新增·eval 可执行性</a></li>
+    <li><a href="#improvements"><span class="n">11</span>对原设计的改进</a></li>
+    <li><a href="#optimizations"><span class="n">12</span>优化与契约细化</a></li>
+    <li><a href="#open-questions"><span class="n">13</span>待讨论 / 待拍板</a></li>
+    <li><a href="#gap-scan"><span class="n">14</span>缺漏扫描情要</a></li>
+    <li><a href="#tonight-sync"><span class="n">15</span>今晚同步议程</a></li>
+  </ol>
+  <p class="toc-note">单文件自包含 · 可离线阅读 · 零外部 JS<br>图例:🔄 待同步 · ❓ 待拍板</p>
+  <p class="toc-badges">
+    <span class="badge b-sync">🔄 待同步 22</span>
+    <span class="badge b-pend">❓ 待拍板 12</span>
+  </p>
+</nav>
+
+<main>
+
+<header class="masthead" id="top">
+  <p class="kicker">博远招新系统 · AI Agent 层 · 架构决策深谈</p>
+  <h1>Grill 会话全记录<span class="sub">2026-08-24 · Official_Web_Agent 架构同步底稿</span></h1>
+  <p class="lede">
+    对 Official_Web_Agent 原设计(<strong>Router 主图 + 四子图 + MCP 工具层</strong>)做了一整天架构评审(grill,穷举式追问):
+    产出 ADR-0003~0007 五份决策、4 个并行调研子代理(scout)的缺漏扫描(gap-scan,7 组缺口 + 12 条工具↔端点漂移 + 9 项待拍板)、
+    与原设计者的同步议程(sync-agenda,7 分歧 + 4 事实修正 + 4 共同空白 + thread 五点)。
+    本文档是全部产出的<strong>单文件深度底稿</strong>:每一项决策都有结论、背景、分析、利弊、状态与出处,
+    供项目所有者复盘,并作为今晚与原设计者对齐的谈判底稿。
+  </p>
+  <ul class="stack" aria-label="会话主题">
+    <li>入口编排</li><li>上下文工程</li><li>确认令牌</li><li>代理身份</li>
+    <li>Checkpointer</li><li>PII 边界</li><li>审计归因</li><li>同步议程</li>
+  </ul>
+  <dl class="metrics">
+    <div class="metric"><dt class="lbl">决策条目</dt><dd class="num">32</dd></div>
+    <div class="metric"><dt class="lbl">ADR</dt><dd class="num">5</dd></div>
+    <div class="metric"><dt class="lbl">手写 SVG 图</dt><dd class="num">9</dd></div>
+    <div class="metric"><dt class="lbl">缺口簇</dt><dd class="num">7</dd></div>
+    <div class="metric"><dt class="lbl">待拍板</dt><dd class="num">9</dd></div>
+    <div class="metric"><dt class="lbl">章节</dt><dd class="num">16</dd></div>
+  </dl>
+  <p class="docmeta">技术文档 · 架构评审(grill)会话全记录 · 生成于 2026-08-24 · 事实来源:docs/adr/0003~0007 · docs/gap-scan-2026-08-24.md · docs/sync-agenda-2026-08-24.md · CONTEXT.md · Official_Web_Agent/{CLAUDE.md,README.md}</p>
+</header>
+
+<!-- ================================================================ 00 总览 -->
+<section id="overview">
+  <div class="sec-no">00 / 今日决策总览</div>
+  <h2>32 项决策一览:全文导航</h2>
+  <p class="sec-lede">按「新增 / 改进 / 优化 / 待讨论 / 事实修正 / 信息」六类归组。状态徽章:🔄 待同步(评审会话形成的方向,今晚与原设计者确认后生效) · ❓ 待拍板(方向未定,需共同决定)。点击条目名跳转对应章节。</p>
+  <table>
+    <thead>
+      <tr><th>#</th><th>条目</th><th>类别</th><th>状态</th><th>一句话结论</th><th>出处</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>01</td><td><a href="#new-thread">thread 生命周期五阶段契约</a></td><td><span class="st-cat">新增</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>命名=入口:用户:随机段;属主校验在恢复路径;同 thread 串行化;TTL 对齐留存;跨入口 v1 新开</td><td>sync-agenda §三 · 会话管理缺口</td></tr>
+      <tr><td>02</td><td><a href="#new-guardrail">护栏四段模块</a></td><td><span class="st-cat">新增</span></td><td><span class="st-badge st-pend">❓ 待拍板</span></td><td>输入/行为/输出/部署四段管道,方向已定;限流键与预算超限行为未定</td><td>护栏细节缺口</td></tr>
+      <tr><td>03</td><td><a href="#new-pii">PII 分层边界四道闸</a></td><td><span class="st-cat">新增</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>脱敏从「进模型前的节点」升级为「边界」:工具返回/输出/trace/持久四道闸</td><td>隐私边界缺口</td></tr>
+      <tr><td>04</td><td><a href="#new-identity">代理身份三件套 + 审计五字段</a></td><td><span class="st-cat">新增</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>最小权限服务账号 + X-On-Behalf-Of + GET /api/auth/me;审计五字段全量落点</td><td>ADR-0006 · 审计链缺口</td></tr>
+      <tr><td>05</td><td><a href="#new-rag">RAG 形知识接口</a></td><td><span class="st-cat">新增</span></td><td><span class="st-badge st-pend">❓ 待拍板</span></td><td>Day1 接口化:RAG 形接口 + 小语料实现,后端可换</td><td>同步议程 分歧6 · 待拍板清单第 6 项</td></tr>
+      <tr><td>06</td><td><a href="#new-remote">B 遥控器触发工具</a></td><td><span class="st-cat">新增</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>trigger_evaluation 入队即回执 + get_evaluation_progress 查进度;对话是遥控器不是流水线</td><td>ADR-0003 · A5 · 待拍板清单第 2 项</td></tr>
+      <tr><td>07</td><td><a href="#new-review">评审确认语义 + 分数卡 schema</a></td><td><span class="st-cat">新增</span></td><td><span class="st-badge st-pend">❓ 待拍板</span></td><td>批量写回前逐条/批量批准,与对话确认两套机制;量规/prompt 版本绑定评分</td><td>CONTEXT 词条 · 评分流水线账本缺口</td></tr>
+      <tr><td>08</td><td><a href="#new-tool">工具生命周期五条准入清单</a></td><td><span class="st-cat">新增</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>docstring 契约 / 确认令牌 / 审计 / eval / 端点核对,五条缺一不合入</td><td>CLAUDE.md · ADR-0003/05/06 · 漂移表</td></tr>
+      <tr><td>09</td><td><a href="#new-verify">证据核验节点重定义</a></td><td><span class="st-cat">新增</span></td><td><span class="st-badge st-pend">❓ 待拍板</span></td><td>代码核依据引用真实性(脱敏文本内)+ 模型核维度矛盾;纯自省无新信息</td><td>同步议程 分歧7 · 待拍板清单第 7 项</td></tr>
+      <tr><td>10</td><td><a href="#new-eval">eval 可执行性修复</a></td><td><span class="st-cat">新增</span></td><td><span class="st-badge st-pend">❓ 待拍板</span></td><td>数据集分发 / secrets 方案 / 基线流程 / judge 校准四件套</td><td>评测可执行性缺口 · 待拍板清单第 8 项</td></tr>
+      <tr><td>11</td><td><a href="#improve-gra02">GRA-02 意图分类砍除</a></td><td><span class="st-cat">改进</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>A 走 ReAct 单循环,意图由工具选择隐式表达;分类安全价值被装配覆盖</td><td>ADR-0003 · A1</td></tr>
+      <tr><td>12</td><td><a href="#improve-b">B 移出聊天路由</a></td><td><span class="st-cat">改进</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>B 是定时批处理无对话语义;调度器直连 evaluation 图,对话仅遥控器</td><td>ADR-0003 · A5</td></tr>
+      <tr><td>13</td><td><a href="#improve-mcp">工具进程内直连</a></td><td><span class="st-cat">改进</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>agent 进程内绑 Python 函数,MCP server 纯对外;TOOL-07 描述作废</td><td>ADR-0003</td></tr>
+      <tr><td>14</td><td><a href="#improve-c">C 宿主改官网前端</a></td><td><span class="st-cat">改进</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>管理端面试页直连 copilot 图,界面即路由;卡片 schema 需重规格</td><td>ADR-0003</td></tr>
+      <tr><td>15</td><td><a href="#improve-eva05">EVA-05 批判回炉 → 证据核验</a></td><td><span class="st-cat">改进</span></td><td><span class="st-badge st-pend">❓ 待拍板</span></td><td>纯「再想想」自省无新信息;改为核验引用真实性 + 维度矛盾,悖论分工见 §09/§11</td><td>同步议程 分歧7</td></tr>
+      <tr><td>16</td><td><a href="#improve-memory">记忆路线 v1 = checkpointer only</a></td><td><span class="st-cat">改进</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>MEM-02..06 延后,等第一个真实需求再启;RAG 倾向 Day1 接口化</td><td>同步议程 分歧6</td></tr>
+      <tr><td>17</td><td><a href="#improve-move">move_interview 拟砍</a></td><td><span class="st-cat">改进</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>依据是后端事实:端点已 deprecated 下线;重排替代端点未包装</td><td>ADR-0005 · A2 · 漂移表</td></tr>
+      <tr><td>18</td><td><a href="#opt-context">四段上下文组装 + 双 cache 断点</a></td><td><span class="st-cat">优化</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>静态前缀 / 稳定块 / 轨迹 / 易变块,断点 1 跨会话共享、断点 2 失效范围仅自身</td><td>ADR-0004</td></tr>
+      <tr><td>19</td><td><a href="#opt-prompt">prompt 版本化 frontmatter</a></td><td><span class="st-cat">优化</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>prompts/&lt;graph&gt;/&lt;node&gt;.md,frontmatter 记 version/model_tier/cache_prefix;文件为唯一权威</td><td>ADR-0004</td></tr>
+      <tr><td>20</td><td><a href="#opt-routing">模型路由分档</a></td><td><span class="st-cat">优化</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>strong 默认;light 仅内部模式化步骤且须 eval 证明不掉分;脱敏裁剪永远用代码</td><td>ADR-0004 (GRA-08)</td></tr>
+      <tr><td>21</td><td><a href="#opt-errors">错误三段式 + fail-open / fail-closed</a></td><td><span class="st-cat">优化</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>工具错→可行动文案;模型错→退避重试≤3;系统错→观测 open、写路径 closed</td><td>ADR-0005</td></tr>
+      <tr><td>22</td><td><a href="#opt-redis-pg">Checkpointer:Redis vs Postgres</a></td><td><span class="st-cat">待讨论</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>倾向 PG:延迟优势归零、持久性是分水岭、PG 已在部署图;若留 Redis 需底线三件套</td><td>ADR-0007 · 附录</td></tr>
+      <tr><td>23</td><td><a href="#open-disputes">七大分歧 A1-A7</a></td><td><span class="st-cat">待讨论</span></td><td><span class="st-badge st-pend">❓ 待拍板</span></td><td>意图分类 / move_interview / checkpointer / 飞书范围 / B 触发 / 记忆 / EVA-05</td><td>sync-agenda §二·A</td></tr>
+      <tr><td>24</td><td><a href="#open-disputes">事实修正 4 项</a></td><td><span class="st-cat">待讨论</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>漂移 12 条、MCP 文档残留、README 漂移、未注册 MCP——非偏好分歧,建议直接修</td><td>sync-agenda §二·B</td></tr>
+      <tr><td>25</td><td><a href="#open-disputes">共同空白 4 项</a></td><td><span class="st-cat">待讨论</span></td><td><span class="st-badge st-pend">❓ 待拍板</span></td><td>thread 五点 / PII 边界 / SEC-01 清单 / 设计方案 §05 入库</td><td>sync-agenda §二·C</td></tr>
+      <tr><td>26</td><td><a href="#open-gap9">9 项待拍板清单</a></td><td><span class="st-cat">待讨论</span></td><td><span class="st-badge st-pend">❓ 待拍板</span></td><td>trace PII 边界、B 触发仲裁、审计权威存储、thread 契约、评审确认、RAG、EVA-05、eval 流程、SEC-01 清单</td><td>gap-scan §三</td></tr>
+      <tr><td>27</td><td><a href="#open-sec01">SEC-01 谈判清单终版</a></td><td><span class="st-cat">待讨论</span></td><td><span class="st-badge st-pend">❓ 待拍板</span></td><td>三件套 + 审计写入端点 + B 草稿/评审端点 + score 依据落库,合并一次谈</td><td>ADR-0006 · 待拍板清单第 9 项</td></tr>
+      <tr><td>28</td><td><a href="#open-suspended">悬置项</a></td><td><span class="st-cat">待讨论</span></td><td><span class="st-badge st-pend">❓ 待拍板</span></td><td>飞书范围(INF 收缩?)/ RAG 最终确认 / EVA-05 拍板</td><td>ADR-0003 · A4/A6/A7</td></tr>
+      <tr><td>29</td><td><a href="#gap-drift">工具↔端点漂移 12 条</a></td><td><span class="st-cat">事实修正</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>幽灵端点×2、方法漂移×4、签名缺 cycleId×2、类型漂移×1…全量核对 openapi</td><td>gap-scan §二</td></tr>
+      <tr><td>30</td><td><a href="#gap-eval">eval 不可执行四卡点</a></td><td><span class="st-cat">事实修正</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>fork PR 无 secrets、标注集不入库、基线流程缺、judge 同源+成本无归属</td><td>评测可执行性缺口</td></tr>
+      <tr><td>31</td><td><a href="#gap-scan">缺漏扫描汇总</a></td><td><span class="st-cat">信息</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>3 个 P0(thread / PII / B 数据面)+ 待清理项冻结 + 审计断裂 + eval + 护栏</td><td>gap-scan §一</td></tr>
+      <tr><td>32</td><td><a href="#sync-ownership">归属地图</a></td><td><span class="st-cat">信息</span></td><td><span class="st-badge st-sync">🔄 待同步</span></td><td>骨架归原设计者(冻结不动);ADR-0003/0005 含对原设计的变更,尚未同步</td><td>sync-agenda §一</td></tr>
+    </tbody>
+  </table>
+  <p class="tbl-note">类别说明:新增=原设计不存在、今天新建;改进=改动原设计者方案;优化=契约细化(与原设计不冲突,建议采纳);待讨论=需与原设计者或下一轮 grill 拍板;事实修正=非偏好分歧,建议直接修;信息=会话事实而非决策。</p>
+</section>
+
+<!-- ================================================================ 01 thread -->
+<section id="new-thread">
+  <div class="sec-no">01 / 新增设计</div>
+  <h2>thread 生命周期五阶段契约</h2>
+  <p class="sec-lede">先说 thread 是什么:LangGraph 里每段会话都有一个存档编号(thread_id),checkpointer 以它为键,存这段对话的全部状态——消息历史、用户身份、悬而未决的写确认。「多轮对话记得住」和「写操作挂起、人工确认后恢复」两个能力都落在它身上。缺漏扫描把它判为全架构最大空白(P0,「上线即撞」):五个阶段(诞生/属主/并发/终结/跨入口)各自缺规则。本节把 thread 从「隐式存在」升级为显式契约;原则由 Zewang 提出:每个用户只能控制/访问自己的信息,权限校验在恢复路径,不在仅创建路径。</p>
+
+  <figure class="diagram">
+  <svg viewBox="0 0 880 470" role="img" aria-label="thread 生命周期五阶段:诞生、属主、并发、终结、跨入口" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arT" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6b655a"/></marker>
+      <marker id="arTr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c0533a"/></marker>
+    </defs>
+
+    <text x="30" y="28" class="sv-t">五阶段 · thread 生命周期契约</text>
+
+    <!-- 五阶段框 -->
+    <rect class="box" x="30" y="44" width="152" height="150" rx="2"/>
+    <text x="106" y="68" text-anchor="middle" class="sv-t">① 诞生</text>
+    <text x="106" y="88" text-anchor="middle" class="sv-s sv-m">thread_id =</text>
+    <text x="106" y="106" text-anchor="middle" class="sv-s sv-m">入口:用户:随机段</text>
+    <text x="106" y="130" text-anchor="middle" class="sv-ss">防猜防跨入口互踩</text>
+    <text x="106" y="150" text-anchor="middle" class="sv-ss">命名规则统一约定</text>
+    <text x="106" y="170" text-anchor="middle" class="sv-ss sv-m">(会话管理缺口)</text>
+
+    <rect class="box" x="200" y="44" width="152" height="150" rx="2"/>
+    <text x="276" y="68" text-anchor="middle" class="sv-t">② 属主</text>
+    <text x="276" y="88" text-anchor="middle" class="sv-s">恢复 / 读取必须</text>
+    <text x="276" y="106" text-anchor="middle" class="sv-s">校验 thread 属主</text>
+    <text x="276" y="130" text-anchor="middle" class="sv-ss">否则可枚举翻他人会话</text>
+    <text x="276" y="150" text-anchor="middle" class="sv-ss">= PII 泄露面</text>
+    <text x="276" y="170" text-anchor="middle" class="sv-ss sv-m">(会话管理缺口)</text>
+
+    <rect class="box" x="370" y="44" width="152" height="150" rx="2"/>
+    <text x="446" y="68" text-anchor="middle" class="sv-t">③ 并发</text>
+    <text x="446" y="88" text-anchor="middle" class="sv-s">同 thread 消息</text>
+    <text x="446" y="106" text-anchor="middle" class="sv-s">串行化(锁/队列)</text>
+    <text x="446" y="130" text-anchor="middle" class="sv-ss">防 checkpointer 冲突</text>
+    <text x="446" y="150" text-anchor="middle" class="sv-ss">防确认令牌错配</text>
+    <text x="446" y="170" text-anchor="middle" class="sv-ss sv-m">(会话管理缺口)</text>
+
+    <rect class="box" x="540" y="44" width="152" height="150" rx="2"/>
+    <text x="616" y="68" text-anchor="middle" class="sv-t">④ 终结</text>
+    <text x="616" y="88" text-anchor="middle" class="sv-s">TTL 与 SEC-06</text>
+    <text x="616" y="106" text-anchor="middle" class="sv-s">留存对齐</text>
+    <text x="616" y="130" text-anchor="middle" class="sv-ss">挂起确认载荷按 PII 处理</text>
+    <text x="616" y="150" text-anchor="middle" class="sv-ss">速记比简历更敏感</text>
+    <text x="616" y="170" text-anchor="middle" class="sv-ss sv-m">(隐私边界缺口)</text>
+
+    <rect class="box" x="710" y="44" width="152" height="150" rx="2"/>
+    <text x="786" y="68" text-anchor="middle" class="sv-t">⑤ 跨入口</text>
+    <text x="786" y="88" text-anchor="middle" class="sv-s">换入口接旧 thread</text>
+    <text x="786" y="106" text-anchor="middle" class="sv-s">还是新开?</text>
+    <text x="786" y="130" text-anchor="middle" class="sv-ss sv-m">v1 建议:新开</text>
+    <text x="786" y="150" text-anchor="middle" class="sv-ss">避免跨入口状态语义</text>
+    <text x="786" y="170" text-anchor="middle" class="sv-ss">不清(待拍板)</text>
+
+    <line class="edge" x1="182" y1="119" x2="196" y2="119" marker-end="url(#arT)"/>
+    <line class="edge" x1="352" y1="119" x2="366" y2="119" marker-end="url(#arT)"/>
+    <line class="edge" x1="522" y1="119" x2="536" y2="119" marker-end="url(#arT)"/>
+    <line class="edge" x1="692" y1="119" x2="706" y2="119" marker-end="url(#arT)"/>
+
+    <!-- 风险带 -->
+    <rect class="box-danger" x="30" y="230" width="832" height="62" rx="2"/>
+    <text x="52" y="254" class="sv-t">三个 P0 现场(会话管理缺口)</text>
+    <text x="52" y="278" class="sv-s sv-m">飞书连发两条 → checkpointer 冲突 / 确认令牌错配 · CLI --session dev 与官网 SSE 同 thread 互踩 · SSE「确认/拒绝」上行端点不存在 → ADR-0005 令牌机制在官网/CLI 侧无载体</text>
+
+    <!-- 落地约束 -->
+    <rect class="box-warn" x="30" y="308" width="832" height="62" rx="2"/>
+    <text x="52" y="332" class="sv-t">暂缓项(项目所有者 2026-08-24)</text>
+    <text x="52" y="356" class="sv-s sv-m">SSE 断线重连 / 心跳 / nginx 长连接调优 → 暂缓,M5 前再定 · 「确认上行端点」不暂缓,仍属 M5 必做 · C 的 thread 切分(面试官×场次 vs 候选人)未定,三态机/卡片/速记隔离悬空</text>
+
+    <!-- 原则 -->
+    <rect class="box-ok" x="30" y="386" width="832" height="64" rx="2"/>
+    <text x="52" y="410" class="sv-t">原则(Zewang)</text>
+    <text x="52" y="434" class="sv-s">每个用户只能控制 / 访问自己的信息;权限校验在「恢复路径」,不在「仅创建路径」</text>
+  </svg>
+  </figure>
+  <p class="figcap">图 7 · thread 生命周期五阶段 + 三个 P0 现场 + 暂缓项 + 属主原则</p>
+
+  <div class="dcard sync">
+    <div class="d-head"><h3>thread 生命周期五阶段契约</h3><span class="st-badge st-sync">🔄 待同步</span><span class="st-cat">新增</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">结论</span><span class="v">thread 是显式一等公民。①诞生:thread_id 命名规则 = <code>入口:用户:随机段</code>(防猜防跨入口互踩);②属主:恢复/读取必须校验 thread 属主,否则可枚举翻别人会话(PII);③并发:同 thread 消息串行化(锁/队列),防 checkpointer 冲突与确认令牌错配;④终结:TTL 与 SEC-06 留存对齐,挂起确认载荷按 PII 处理;⑤跨入口:同一用户换入口接旧 thread 还是新开——v1 建议新开。原则:每个用户只能控制/访问自己的信息,权限校验在恢复路径,不在仅创建路径。</span></div>
+      <div class="d-row"><span class="k">背景</span><span class="v"><p>会话管理缺口 的四个独立命中把它顶成 P0:同 thread 并发消息无串行化(,飞书连发两条→checkpointer 冲突/确认令牌错配);SSE「确认/拒绝」上行端点不存在(,ADR-0005 令牌机制在官网/CLI 侧无载体,拒绝后续流协议未定义);thread_id 命名规则/属主校验缺失(,CLI <code>--session dev</code> 与官网 SSE 同 thread 互踩,可枚举=PII 泄露);C 的 thread 切分未定(,三态机/卡片/速记隔离全悬空)。</p><p>暂缓项:SSE 断线重连/心跳/nginx 长连接调优由项目所有者 2026-08-24 暂缓,M5 前再定;「确认上行端点」不暂缓,仍属 M5 必做。</p></span></div>
+      <div class="d-row"><span class="k">分析与理由</span><span class="v"><p>确认令牌机制(ADR-0005)依赖 interrupt 恢复路径,而恢复路径以 thread 为载体——thread 不显式,令牌就没有安全落点。命名规则解决「互踩」与「可枚举」两个独立问题:随机段防猜,入口+用户前缀防跨入口语义混乱。属主校验放恢复路径而不是创建路径,是因为创建路径无法防御「知道了别人 thread_id 就来恢复」的枚举攻击,只有每次恢复/读取都校验才能关闭。</p></span></div>
+      <div class="d-row"><span class="k">利弊</span><span class="v"><div class="proscons"><div class="pros"><span class="pc-t">利</span><ul><li>确认令牌在官网/CLI 侧有载体(SSE 上行端点)</li><li>可枚举翻会话的 PII 泄露面关闭</li><li>并发错配(令牌张冠李戴)消除</li><li>TTL 与留存对齐,挂起载荷不再无限驻留</li></ul></div><div class="cons"><span class="pc-t">弊</span><ul><li>新增锁/队列基础设施与清理 job</li><li>SSE 上行端点 = M5 必做的新增后端面</li><li>v1 跨入口新开会牺牲会话连续性(用户换入口即失忆)</li></ul></div></div></span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-sync">🔄 待同步</span> 双方共建空白,今晚与设计者共同细化。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">sync-agenda-2026-08-24 §三(thread 五点);gap-scan-2026-08-24 会话管理缺口(///);ADR-0005(令牌依赖恢复路径)。</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 02 护栏 -->
+<section id="new-guardrail">
+  <div class="sec-no">02 / 新增设计</div>
+  <h2>护栏四段模块:输入 · 行为 · 输出 · 部署</h2>
+  <p class="sec-lede">护栏细节缺口:护栏/限流「方向已定,键与行为未定」。护栏按管道四段部署,方向已确认;但限流键、预算超限行为、循环检测/输出段/部署段护栏均无对应 issue 承接。</p>
+
+  <figure class="diagram">
+  <svg viewBox="0 0 880 420" role="img" aria-label="护栏四段管道:输入段、行为段、输出段、部署段" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6b655a"/></marker>
+    </defs>
+
+    <text x="30" y="28" class="sv-t">护栏四段管道 · 方向已定,键与行为未定(护栏细节缺口)</text>
+
+    <!-- 管道背景 -->
+    <rect class="box-dash" x="30" y="48" width="820" height="300" rx="2"/>
+
+    <!-- 段 1 输入 -->
+    <rect class="box" x="52" y="70" width="186" height="256" rx="2"/>
+    <text x="145" y="96" text-anchor="middle" class="sv-t">段 1 · 输入</text>
+    <line x1="60" y1="106" x2="230" y2="106" stroke="var(--rule-2)" stroke-width="1"/>
+    <text x="145" y="128" text-anchor="middle" class="sv-s">限流键(已定)</text>
+    <text x="145" y="148" text-anchor="middle" class="sv-ss sv-m">飞书 → open_id</text>
+    <text x="145" y="166" text-anchor="middle" class="sv-ss sv-m">(IP 是飞书服务器)</text>
+    <text x="145" y="186" text-anchor="middle" class="sv-ss sv-m">游客 → IP</text>
+    <text x="145" y="206" text-anchor="middle" class="sv-ss sv-m">B 批处理 → 独立池</text>
+    <text x="145" y="232" text-anchor="middle" class="sv-s">输入校验 / 脱敏</text>
+    <text x="145" y="252" text-anchor="middle" class="sv-ss">PII 边界第一闸入口</text>
+    <text x="145" y="278" text-anchor="middle" class="sv-ss sv-m">❓ 预算超限行为</text>
+    <text x="145" y="296" text-anchor="middle" class="sv-ss sv-m">(掐断/降light/只读/文案)</text>
+    <text x="145" y="314" text-anchor="middle" class="sv-ss sv-m">未定</text>
+
+    <!-- 段 2 行为 -->
+    <rect class="box" x="258" y="70" width="186" height="256" rx="2"/>
+    <text x="351" y="96" text-anchor="middle" class="sv-t">段 2 · 行为</text>
+    <line x1="266" y1="106" x2="436" y2="106" stroke="var(--rule-2)" stroke-width="1"/>
+    <text x="351" y="128" text-anchor="middle" class="sv-s">循环检测</text>
+    <text x="351" y="148" text-anchor="middle" class="sv-ss">ReAct 死循环熔断</text>
+    <text x="351" y="168" text-anchor="middle" class="sv-ss">❓ 无对应 issue</text>
+    <text x="351" y="196" text-anchor="middle" class="sv-s">预算 / 限流执行</text>
+    <text x="351" y="216" text-anchor="middle" class="sv-ss">按会话与池计数</text>
+    <text x="351" y="236" text-anchor="middle" class="sv-ss">❓ 超限行为未定</text>
+    <text x="351" y="264" text-anchor="middle" class="sv-s">写操作令牌</text>
+    <text x="351" y="284" text-anchor="middle" class="sv-ss">interrupt + 指纹校验</text>
+    <text x="351" y="304" text-anchor="middle" class="sv-ss">(ADR-0005)</text>
+
+    <!-- 段 3 输出 -->
+    <rect class="box" x="464" y="70" width="186" height="256" rx="2"/>
+    <text x="557" y="96" text-anchor="middle" class="sv-t">段 3 · 输出</text>
+    <line x1="472" y1="106" x2="642" y2="106" stroke="var(--rule-2)" stroke-width="1"/>
+    <text x="557" y="128" text-anchor="middle" class="sv-s">PII 输出守卫</text>
+    <text x="557" y="148" text-anchor="middle" class="sv-ss">面试题/报告禁复述</text>
+    <text x="557" y="168" text-anchor="middle" class="sv-ss">手机号/QQ(隐私边界缺口)</text>
+    <text x="557" y="196" text-anchor="middle" class="sv-s">输出校验</text>
+    <text x="557" y="216" text-anchor="middle" class="sv-ss">❓ 无对应 issue</text>
+    <text x="557" y="244" text-anchor="middle" class="sv-s">占位符还原检查</text>
+    <text x="557" y="264" text-anchor="middle" class="sv-ss">泄漏占位符=缺陷</text>
+    <text x="557" y="284" text-anchor="middle" class="sv-ss">(隐私边界缺口)</text>
+
+    <!-- 段 4 部署 -->
+    <rect class="box" x="670" y="70" width="158" height="256" rx="2"/>
+    <text x="749" y="96" text-anchor="middle" class="sv-t">段 4 · 部署</text>
+    <line x1="678" y1="106" x2="820" y2="106" stroke="var(--rule-2)" stroke-width="1"/>
+    <text x="749" y="128" text-anchor="middle" class="sv-s">凭证管理</text>
+    <text x="749" y="148" text-anchor="middle" class="sv-ss">真实凭证仅 .env</text>
+    <text x="749" y="176" text-anchor="middle" class="sv-s">fail-closed 依赖</text>
+    <text x="749" y="196" text-anchor="middle" class="sv-ss">checkpointer 不可用</text>
+    <text x="749" y="214" text-anchor="middle" class="sv-ss">= 拒绝一切写</text>
+    <text x="749" y="242" text-anchor="middle" class="sv-s">可观测</text>
+    <text x="749" y="262" text-anchor="middle" class="sv-ss">Langfuse 观测</text>
+    <text x="749" y="282" text-anchor="middle" class="sv-ss">fail-open(只丢 trace)</text>
+
+    <!-- 段间箭头 -->
+    <line class="edge" x1="238" y1="198" x2="254" y2="198" marker-end="url(#arG)"/>
+    <line class="edge" x1="444" y1="198" x2="460" y2="198" marker-end="url(#arG)"/>
+    <line class="edge" x1="650" y1="198" x2="666" y2="198" marker-end="url(#arG)"/>
+
+    <!-- 底注 -->
+    <text x="52" y="380" class="sv-ss">❓ 待拍板:限流键已定,预算超限行为未定;循环检测/输出段/部署段护栏无对应 issue——四段各需一个 issue 承接。</text>
+  </svg>
+  </figure>
+  <p class="figcap">图 8 · 护栏四段管道:输入(限流+校验)/ 行为(循环+预算+令牌)/ 输出(PII 守卫)/ 部署(凭证+依赖+观测)</p>
+
+  <div class="dcard pend">
+    <div class="d-head"><h3>护栏四段模块</h3><span class="st-badge st-pend">❓ 待拍板</span><span class="st-cat">新增</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">结论</span><span class="v">护栏按管道四段部署:输入段(限流+输入校验)、行为段(循环检测+预算+写操作令牌)、输出段(PII 守卫+输出校验)、部署段(凭证管理+fail-closed 依赖+可观测)。方向已定;限流键已定,预算超限行为与循环检测细节未定,四段均无 issue 承接。</span></div>
+      <div class="d-row"><span class="k">背景</span><span class="v">护栏细节缺口 定位为「方向已定,键与行为未定」。已定部分:限流键——飞书按 open_id(IP 是飞书服务器,不能按 IP),游客按 IP,B 批处理独立池。未定部分:预算超限行为(掐断/降 light/只读/文案四选一)无结论;循环检测、输出段、部署段护栏无对应 issue。</span></div>
+      <div class="d-row"><span class="k">分析与理由</span><span class="v">护栏的核心理念与 CLAUDE.md 安全红线一致:权限与约束在确定性层(工具装配/代码),不靠 prompt 约束、不靠模型自觉。四段管道把「护栏」从一句口号拆成可各自验收的模块:输入段在请求进入前挡(限流、校验、脱敏);行为段在循环运行中挡(死循环熔断、预算、写令牌);输出段在结果出图前挡(PII 复述、占位符泄漏);部署段在环境层挡(凭证、依赖可用性、观测)。</span></div>
+      <div class="d-row"><span class="k">利弊</span><span class="v"><div class="proscons"><div class="pros"><span class="pc-t">利</span><ul><li>护栏全部落在确定性层,可单测可审计</li><li>四段职责互不重叠,各自可验收</li><li>限流键语义明确(飞书 IP 无意义)</li></ul></div><div class="cons"><span class="pc-t">弊</span><ul><li>四段均缺 issue 承接,落地需要补写</li><li>预算超限行为未定,行为段无法实现</li><li>输出段守卫需要额外的模型/规则成本</li></ul></div></div></span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-pend">❓ 待拍板</span> 方向已共识;键与行为待拍板,issue 承接待创建。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">gap-scan-2026-08-24 护栏细节缺口(/);关联:ADR-0005 失败哲学(fail-open/fail-closed 是部署段与行为段的依据)。</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 03 PII -->
+<section id="new-pii">
+  <div class="sec-no">03 / 新增设计</div>
+  <h2>PII 分层边界:四道闸</h2>
+  <p class="sec-lede">隐私边界缺口 是 P0·红线级:原设计只在「进模型前」有一个脱敏节点,而 trace 在脱敏前就记录了原始 PII。grill 把脱敏从「节点」升级为「边界」,贯穿工具返回层 / 输出层 / trace 层 / 持久层四道闸。</p>
+
+  <figure class="diagram">
+  <svg viewBox="0 0 880 480" role="img" aria-label="PII 分层边界四道闸:工具返回层、输出层、trace 层、持久层" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arP" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6b655a"/></marker>
+    </defs>
+
+    <text x="30" y="28" class="sv-t">PII 四道闸 · 脱敏从「节点」升级为「边界」</text>
+
+    <!-- 数据流主线 -->
+    <rect class="box-lite" x="30" y="52" width="170" height="52" rx="2"/>
+    <text x="115" y="73" text-anchor="middle" class="sv-s">后端 REST 返回</text>
+    <text x="115" y="92" text-anchor="middle" class="sv-ss sv-m">含完整简历(原始 PII)</text>
+
+    <!-- 闸 1 工具返回层 -->
+    <rect class="box-ok" x="220" y="44" width="190" height="68" rx="2"/>
+    <text x="315" y="66" text-anchor="middle" class="sv-t">闸 1 · 工具返回层</text>
+    <text x="315" y="86" text-anchor="middle" class="sv-s">脱敏下沉 / 投影裁剪</text>
+    <text x="315" y="104" text-anchor="middle" class="sv-ss sv-m">❓ 待拍板:下沉 vs 采集点二次脱敏</text>
+
+    <line class="edge" x1="200" y1="78" x2="216" y2="78" marker-end="url(#arP)"/>
+
+    <rect class="box-lite" x="430" y="52" width="170" height="52" rx="2"/>
+    <text x="515" y="73" text-anchor="middle" class="sv-s">模型输入(已脱敏)</text>
+    <text x="515" y="92" text-anchor="middle" class="sv-ss">占位符映射契约待定</text>
+
+    <line class="edge" x1="410" y1="78" x2="426" y2="78" marker-end="url(#arP)"/>
+
+    <!-- 闸 2 输出层 -->
+    <rect class="box-ok" x="620" y="44" width="230" height="68" rx="2"/>
+    <text x="735" y="66" text-anchor="middle" class="sv-t">闸 2 · 输出层</text>
+    <text x="735" y="86" text-anchor="middle" class="sv-s">模型输出 PII 守卫</text>
+    <text x="735" y="104" text-anchor="middle" class="sv-ss">面试题/报告禁复述手机号/QQ</text>
+
+    <line class="edge" x1="600" y1="78" x2="616" y2="78" marker-end="url(#arP)"/>
+
+    <!-- 闸 3 trace 层 -->
+    <rect class="box-danger" x="220" y="170" width="290" height="72" rx="2"/>
+    <text x="365" y="192" text-anchor="middle" class="sv-t">闸 3 · trace 层(红线现场)</text>
+    <text x="365" y="212" text-anchor="middle" class="sv-s">Langfuse 采集点二次脱敏</text>
+    <text x="365" y="230" text-anchor="middle" class="sv-ss sv-m">+ payload 禁入清单(trace 不携带原始 PII)</text>
+
+    <rect class="box-lite" x="530" y="170" width="320" height="72" rx="2"/>
+    <text x="690" y="192" text-anchor="middle" class="sv-t">红线现场</text>
+    <text x="690" y="212" text-anchor="middle" class="sv-s">get_resume_detail 返回完整简历</text>
+    <text x="690" y="230" text-anchor="middle" class="sv-ss">脱敏节点在其后 → 原始 PII 直落 Langfuse</text>
+
+    <line class="edge" x1="365" y1="118" x2="365" y2="166" marker-end="url(#arP)" stroke-dasharray="4 4"/>
+    <line class="edge" x1="690" y1="118" x2="690" y2="166" marker-end="url(#arP)" stroke-dasharray="4 4"/>
+
+    <!-- 闸 4 持久层 -->
+    <rect class="box-danger" x="220" y="290" width="290" height="104" rx="2"/>
+    <text x="365" y="312" text-anchor="middle" class="sv-t">闸 4 · 持久层</text>
+    <text x="365" y="332" text-anchor="middle" class="sv-s">checkpointer 挂起载荷</text>
+    <text x="365" y="350" text-anchor="middle" class="sv-ss">TTL 与 SEC-06 留存对齐</text>
+    <text x="365" y="368" text-anchor="middle" class="sv-ss">挂起确认按 PII 处理(thread 契约④)</text>
+    <text x="365" y="386" text-anchor="middle" class="sv-ss">速记比简历更敏感</text>
+
+    <rect class="box-danger" x="530" y="290" width="320" height="104" rx="2"/>
+    <text x="690" y="312" text-anchor="middle" class="sv-t">未声明 PII 仓库</text>
+    <text x="690" y="332" text-anchor="middle" class="sv-s">「往年摘要库」承载跨年查重(EVA-10)</text>
+    <text x="690" y="350" text-anchor="middle" class="sv-ss">依赖被脱敏抹掉的身份键</text>
+    <text x="690" y="368" text-anchor="middle" class="sv-ss">留存策略未含速记主观评价</text>
+    <text x="690" y="386" text-anchor="middle" class="sv-ss">需要声明 + 留存策略</text>
+
+    <line class="edge" x1="365" y1="242" x2="365" y2="286" marker-end="url(#arP)"/>
+
+    <!-- 底部结论 -->
+    <rect class="box" x="30" y="416" width="820" height="48" rx="2"/>
+    <text x="440" y="440" text-anchor="middle" class="sv-t">待拍板 #1:闸 1 下沉脱敏 vs 闸 3 采集点二次脱敏 + 禁入清单 —— 决定两闸分工</text>
+  </svg>
+  </figure>
+  <p class="figcap">图 5 · PII 四道闸:工具返回层(脱敏入口)· 输出层(复述守卫)· trace 层(采集点二次脱敏)· 持久层(留存对齐)</p>
+
+  <div class="dcard sync">
+    <div class="d-head"><h3>PII 分层边界四道闸</h3><span class="st-badge st-sync">🔄 待同步</span><span class="st-cat">新增</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">结论</span><span class="v">脱敏从「进模型前的单一节点」升级为「贯穿全链路的边界」:闸 1 工具返回层(脱敏下沉或采集点二次脱敏,路线待拍板)、闸 2 输出层(模型输出禁复述 PII)、闸 3 trace 层(Langfuse 采集点二次脱敏 + payload 禁入清单)、闸 4 持久层(checkpointer 挂起载荷 TTL 对齐 SEC-06;未声明摘要库补声明)。</span></div>
+      <div class="d-row"><span class="k">背景</span><span class="v"><p>隐私边界缺口 P0·红线级,六个独立命中: trace 记录脱敏前原始 PII(get_resume_detail 返回完整简历,脱敏节点在其后,叠加 OBS-01 全图上报 + ADR-0006「trace 全量」→ 原始 PII 直落 Langfuse); 输出侧无守卫(模型生成的面试题/报告可能复述简历里的手机号/QQ); 占位符映射契约缺失(存哪/是否确定性/还原白名单——影子运行对不上、面试题可能泄漏占位符); checkpointer 挂起载荷(含姓名/时间/原因)TTL 与 SEC-06 留存无对齐; 速记比简历更敏感(面试官主观评价),留存策略未含; 跨年查重(EVA-10)依赖被脱敏抹掉的身份键,且「往年摘要库」是未声明的 PII 仓库。</p></span></div>
+      <div class="d-row"><span class="k">分析与理由</span><span class="v">单一脱敏节点的假设是「PII 只出现在模型输入这一条路上」,但审计与观测需求(ADR-0006 trace 全量)天然把数据复制到 Langfuse,持久化需求(interrupt 挂起载荷)把数据复制到 checkpointer——每条复制路径都是新的泄露面。四道闸的本质是「谁接触 PII,谁负责脱敏」:工具返回层是唯一知道 PII 长什么样的地方(确定性),输出层守卫防模型复述(规则+抽查),trace 层用禁入清单+二次脱敏兜底,持久层用 TTL 与留存策略限时存在。占位符契约必须确定性(可还原、白名单),否则影子运行对不上。</span></div>
+      <div class="d-row"><span class="k">利弊</span><span class="v"><div class="proscons"><div class="pros"><span class="pc-t">利</span><ul><li>单一节点失效即全链路泄露的风险关闭</li><li>审计 trace 与 PII 合规可共存</li><li>挂起确认载荷有明确生命周期</li></ul></div><div class="cons"><span class="pc-t">弊</span><ul><li>四道闸分散实现,成本高</li><li>需先拍板「权威脱敏层」,否则重复/矛盾</li><li>输出守卫是概率性防御(模型输出不可穷举)</li></ul></div></div></span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-sync">🔄 待同步</span> 共同空白(PII 边界);路线分工待拍板(待拍板清单第 1 项)。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">gap-scan-2026-08-24 隐私边界缺口(/////);sync-agenda-2026-08-24 共同空白节;ADR-0006(trace 全量条款)。</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 04 身份审计 -->
+<section id="new-identity">
+  <div class="sec-no">04 / 新增设计</div>
+  <h2>代理身份三件套 + 审计五字段</h2>
+  <p class="sec-lede">原设计下 agent 全程持单一服务账号 JWT 调后端:后端视角所有请求都是服务账号,权限判定与审计均丢失最终用户归因,工具装配层成为唯一防线(单防线)。项目要求:所有经 agent 执行的行为必须可审计、可回溯,且记录是哪个 agent(模块/图)执行的。</p>
+
+  <figure class="diagram">
+  <svg viewBox="0 0 880 560" role="img" aria-label="写确认全流程:interrupt 挂起、批准/拒绝恢复、令牌指纹校验、审计五字段落点" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arI" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6b655a"/></marker>
+      <marker id="arIr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c0533a"/></marker>
+    </defs>
+
+    <text x="30" y="28" class="sv-t">写确认全流程(ADR-0005)+ 审计五字段落点(ADR-0006)</text>
+
+    <!-- 主链 -->
+    <rect class="box" x="30" y="50" width="150" height="64" rx="2"/>
+    <text x="105" y="74" text-anchor="middle" class="sv-t">图到写工具</text>
+    <text x="105" y="94" text-anchor="middle" class="sv-ss sv-m">submit_resume_score 等</text>
+
+    <line class="edge" x1="180" y1="82" x2="210" y2="82" marker-end="url(#arI)"/>
+
+    <rect class="box-warn" x="214" y="50" width="190" height="64" rx="2"/>
+    <text x="309" y="74" text-anchor="middle" class="sv-t">interrupt 挂起</text>
+    <text x="309" y="94" text-anchor="middle" class="sv-ss">携带操作摘要 + 指纹(工具+参数 hash)</text>
+
+    <line class="edge" x1="404" y1="82" x2="434" y2="82" marker-end="url(#arI)"/>
+
+    <rect class="box" x="438" y="50" width="180" height="64" rx="2"/>
+    <text x="528" y="74" text-anchor="middle" class="sv-t">用户在聊天批准/拒绝</text>
+    <text x="528" y="94" text-anchor="middle" class="sv-ss sv-m">Command(resume=...) 恢复,恢复值即令牌</text>
+
+    <line class="edge" x1="618" y1="82" x2="648" y2="82" marker-end="url(#arI)"/>
+
+    <rect class="box" x="652" y="50" width="198" height="64" rx="2"/>
+    <text x="751" y="74" text-anchor="middle" class="sv-t">令牌校验(指纹比对)</text>
+    <text x="751" y="94" text-anchor="middle" class="sv-ss">令牌对应操作 == 本次调用?</text>
+
+    <!-- 校验分支 -->
+    <rect class="box-ok" x="652" y="160" width="198" height="66" rx="2"/>
+    <text x="751" y="184" text-anchor="middle" class="sv-t">一致 → 执行写</text>
+    <text x="751" y="204" text-anchor="middle" class="sv-ss">一次性:执行即作废</text>
+    <text x="751" y="222" text-anchor="middle" class="sv-ss">不落库、不跨 thread、不可重放</text>
+
+    <line class="edge" x1="751" y1="114" x2="751" y2="156" marker-end="url(#arI)"/>
+
+    <rect class="box-danger" x="652" y="250" width="198" height="66" rx="2"/>
+    <text x="751" y="274" text-anchor="middle" class="sv-t">不一致 → 拒绝</text>
+    <text x="751" y="294" text-anchor="middle" class="sv-ss">模型自编字符串无法绕过</text>
+    <text x="751" y="312" text-anchor="middle" class="sv-ss">(write.py _require_token 升级)</text>
+
+    <line class="edge" x1="751" y1="114" x2="751" y2="246" marker-end="url(#arIr)"/>
+
+    <!-- 拒绝路径 -->
+    <rect class="box-danger" x="214" y="170" width="190" height="66" rx="2"/>
+    <text x="309" y="194" text-anchor="middle" class="sv-t">用户拒绝 → 也是恢复</text>
+    <text x="309" y="214" text-anchor="middle" class="sv-ss">拒绝结果作为工具结果</text>
+    <text x="309" y="232" text-anchor="middle" class="sv-ss">回喂轨迹,模型重新规划</text>
+    <line class="edge-dash" x1="528" y1="100" x2="309" y2="166" marker-end="url(#arIr)"/>
+
+    <!-- 审计落点 -->
+    <rect class="box" x="30" y="170" width="170" height="250" rx="2"/>
+    <text x="115" y="194" text-anchor="middle" class="sv-t">审计行 · 五字段</text>
+    <line x1="38" y1="204" x2="192" y2="204" stroke="var(--rule-2)" stroke-width="1"/>
+    <text x="115" y="228" text-anchor="middle" class="sv-m sv-s">acting_user_id</text>
+    <text x="115" y="248" text-anchor="middle" class="sv-ss">X-On-Behalf-Of 最终用户</text>
+    <text x="115" y="274" text-anchor="middle" class="sv-m sv-s">agent</text>
+    <text x="115" y="294" text-anchor="middle" class="sv-ss">assistant/evaluation/copilot</text>
+    <text x="115" y="312" text-anchor="middle" class="sv-ss">+ 节点 + prompt 版本</text>
+    <text x="115" y="338" text-anchor="middle" class="sv-m sv-s">action</text>
+    <text x="115" y="358" text-anchor="middle" class="sv-ss">工具+参数+操作指纹(同令牌指纹)</text>
+    <text x="115" y="384" text-anchor="middle" class="sv-m sv-s">decision</text>
+    <text x="115" y="402" text-anchor="middle" class="sv-ss">谁批准/拒绝(恢复记录)</text>
+    <text x="115" y="418" text-anchor="middle" class="sv-m sv-s">result / trace_id / ts</text>
+
+    <line class="edge" x1="751" y1="226" x2="204" y2="340" marker-end="url(#arI)" stroke-dasharray="4 4"/>
+
+    <!-- 后端三件套 -->
+    <rect class="box" x="30" y="440" width="820" height="104" rx="2"/>
+    <text x="52" y="464" class="sv-t">SEC-01 后端增量三件套(一次 PR 谈判,ADR-0006)</text>
+    <text x="52" y="488" class="sv-s sv-m">① 最小权限服务账号(agent 专用)  ② X-On-Behalf-Of: &lt;user_id&gt; 请求头(后端按最终用户判权限+记审计;防线 1→2 层)  ③ GET /api/auth/me(JWT→用户+角色;agent 验官网 token 无需 JWT_SECRET;即 GRA-01 官网身份解析)</text>
+    <text x="52" y="512" class="sv-ss">退路:后端拒绝增量 → agent 进程内单防线(管理工具执行前二次校验会话 role,审计仍记 acting user,明写「单防线、风险自负」)</text>
+    <text x="52" y="532" class="sv-ss">badcase 回流(OBS-06)以 trace_id 串联审计行与 Langfuse trace;GET /api/auth/me 落地前官网入口身份解析无实现路径(SEC-01 是 TOOL-01 前置)</text>
+  </svg>
+  </figure>
+  <p class="figcap">图 3 · 写确认全流程(含拒绝路径)+ 审计五字段落点 + SEC-01 后端三件套</p>
+
+  <div class="dcard sync">
+    <div class="d-head"><h3>代理身份三件套 + 审计五字段</h3><span class="st-badge st-sync">🔄 待同步</span><span class="st-cat">新增</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">结论</span><span class="v"><p>SEC-01 后端增量三件套:①最小权限服务账号(agent 专用);②<code>X-On-Behalf-Of: &lt;user_id&gt;</code> 请求头——后端按最终用户身份判权限并记审计,防线从一层(工具装配)变两层(装配+后端判定);③<code>GET /api/auth/me</code>——JWT→用户+角色,一石二鸟:agent 验官网 token 无需接触 JWT_SECRET(现为 HS256 共享密钥,持有即具备签发能力),同时就是 GRA-01 官网入口身份解析的实现;RS256/JWKS 缓到 v2。</p><p>审计行(写操作必备)五字段:<code>acting_user_id</code>(谁授意)/ <code>agent</code>(哪个模块/图执行,含节点与 prompt 版本)/ <code>action</code>(工具+参数+操作指纹,与确认令牌绑定同一指纹)/ <code>decision</code>(谁批准/拒绝)/ <code>result / trace_id / timestamp</code>。trace 全量:一切工具调用(读+写)进 Langfuse,trace_id 全链路透传;badcase 回流以 trace_id 串联。</p></span></div>
+      <div class="d-row"><span class="k">背景</span><span class="v">后端授权只认 bearer JWT 的 permissionCodes,且无任何 introspection 端点(openapi 的 /api/auth/ 下仅 register/login/reset-password/发码/logout)。agent 全程持单一服务账号 JWT 调后端 → 后端视角所有请求都是服务账号:权限判定与审计均丢失最终用户归因,工具装配层成为唯一防线(单防线)。项目要求(2026-08-24 所有者确认):所有经 agent 执行的行为必须可审计、可回溯,且审计不止记录用户身份,还要记录是哪个 agent(模块/图)执行的。</span></div>
+      <div class="d-row"><span class="k">分析与理由</span><span class="v">单防线=工具装配层一旦有 bug(如权限判断漏分支),后端无从兜底,且审计里只有「服务账号做了 X」,追不到人。三件套的每一件都独立成立:服务账号砍掉「agent=超管」的隐性风险;X-On-Behalf-Of 把最终用户身份带进后端判定与审计,防线变两层;GET /api/auth/me 解决 JWT_SECRET 共享密钥的信任问题——agent 永远不该持有能签发 token 的密钥。审计五字段与确认令牌共享同一操作指纹(ADR-0005),保证「批准了什么」与「执行了什么」逐字节对应。</span></div>
+      <div class="d-row"><span class="k">利弊</span><span class="v"><div class="proscons"><div class="pros"><span class="pc-t">利</span><ul><li>后端审计从「服务账号做了 X」变为「用户 U 经 agent-A 节点 N 做了 X,由 U 确认」</li><li>防线双层,单点失效可兜底</li><li>agent 永不持有 JWT_SECRET,签发能力归零</li></ul></div><div class="cons"><span class="pc-t">弊</span><ul><li>需要后端配合,是一次跨仓谈判(SEC-01)</li><li>GET /api/auth/me 落地前官网入口身份解析无实现路径</li><li>后端若拒绝增量,只能退守「单防线、风险自负」</li></ul></div></div></span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-sync">🔄 待同步</span> agent 侧契约已定;后端增量待 SEC-01 与后端负责人谈判确认(ADR-0006 Status:Proposed)。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">ADR-0006;关联:ADR-0005(同指纹)、ADR-0003(GRA-01 身份解析依赖 /api/auth/me)、gap-scan 审计链缺口(// 审计链断裂)。</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 05 RAG -->
+<section id="new-rag">
+  <div class="sec-no">05 / 新增设计</div>
+  <h2>RAG 形知识接口:Day1 接口化,小语料实现,后端可换</h2>
+  <p class="sec-lede">上轮悬置项。记忆路线分歧(同步议程 分歧6)收敛出倾向:Day1 先定义 RAG 形接口,实现分两步走——小语料实现先上,后端可换(pgvector 等),业务代码不感知。</p>
+
+  <div class="dcard pend">
+    <div class="d-head"><h3>RAG 形知识接口</h3><span class="st-badge st-pend">❓ 待拍板</span><span class="st-cat">新增</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">结论</span><span class="v">Day1 接口化:RAG 形接口(知识检索接口)+ 小语料实现(规则/关键词/轻量向量皆可),后端可换。业务代码只面向接口,不感知底层是规则检索还是 pgvector。</span></div>
+      <div class="d-row"><span class="k">背景</span><span class="v">上轮悬置「RAG 接口」;本轮记忆路线分歧(A6:原设计 MEM-01..06 全排期 vs grill v1=checkpointer only)后,倾向「Day1 接口化 + 实现分两步」——先定契约,实现按真实需求演进。待拍板清单第 6 项 原文:「RAG 形接口 Day1 + 实现分两步」。</span></div>
+      <div class="d-row"><span class="k">分析与理由</span><span class="v">接口先行让知识检索成为依赖倒置点:小语料阶段(招新问答库、量规、FAQ)用确定性规则或轻量检索就能覆盖,成本低、可单测;未来语料膨胀需要 pgvector(部署图已有 M4)时,只换实现不换调用方。这与「确定性/概率性分层」哲学一致——能确定的检索先用代码。</span></div>
+      <div class="d-row"><span class="k">利弊</span><span class="v"><div class="proscons"><div class="pros"><span class="pc-t">利</span><ul><li>契约先行,后续换后端零重写</li><li>小语料实现成本低、可单测</li><li>与记忆路线 v1 兼容(不为未来过度投资)</li></ul></div><div class="cons"><span class="pc-t">弊</span><ul><li>若长期只有小语料,接口是潜在过度设计</li><li>接口抽象需要先定义检索语义(排序/过滤/引用格式)</li><li>最终确认仍悬置(见 §13)</li></ul></div></div></span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-pend">❓ 待拍板</span> 方向倾向已明,最终确认悬置。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">sync-agenda-2026-08-24 A6;gap-scan-2026-08-24 待拍板清单第 6 项。</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 06 B 遥控器 -->
+<section id="new-remote">
+  <div class="sec-no">06 / 新增设计</div>
+  <h2>B 遥控器触发工具:对话是遥控器,不是流水线本身</h2>
+  <p class="sec-lede">EVA-07「管理员在对话中触发」与「B 不经聊天路由」冲突,仲裁为遥控器模式:聊天中提供入队与查进度两个工具,对话只发指令、不持状态;流水线本体固化为 graph+调度队列。</p>
+
+  <figure class="diagram">
+  <svg viewBox="0 0 880 470" role="img" aria-label="B 流水线 graph 与四个触发面汇入同一队列" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6b655a"/></marker>
+    </defs>
+
+    <text x="30" y="28" class="sv-t">B 流水线 graph + 四触发面 → 同一队列(共识底线,ADR-0003 / 同步议程 分歧5)</text>
+
+    <!-- 四触发面 -->
+    <rect class="box" x="30" y="48" width="186" height="58" rx="2"/>
+    <text x="123" y="70" text-anchor="middle" class="sv-t">① 对话遥控器</text>
+    <text x="123" y="90" text-anchor="middle" class="sv-ss sv-m">trigger_evaluation(cycle_id)</text>
+
+    <rect class="box" x="236" y="48" width="186" height="58" rx="2"/>
+    <text x="329" y="70" text-anchor="middle" class="sv-t">② 管理端按钮</text>
+    <text x="329" y="90" text-anchor="middle" class="sv-ss sv-m">简历导入后「开始审核」</text>
+
+    <rect class="box" x="442" y="48" width="186" height="58" rx="2"/>
+    <text x="535" y="70" text-anchor="middle" class="sv-t">③ cron 调度</text>
+    <text x="535" y="90" text-anchor="middle" class="sv-ss sv-m">定时批处理(EVA-07 原案)</text>
+
+    <rect class="box" x="648" y="48" width="202" height="58" rx="2"/>
+    <text x="749" y="70" text-anchor="middle" class="sv-t">④ 后端事件</text>
+    <text x="749" y="90" text-anchor="middle" class="sv-ss sv-m">简历入库事件驱动(未来)</text>
+
+    <!-- 汇入队列 -->
+    <line class="edge" x1="123" y1="106" x2="123" y2="140" marker-end="url(#arB)"/>
+    <line class="edge" x1="329" y1="106" x2="329" y2="140" marker-end="url(#arB)"/>
+    <line class="edge" x1="535" y1="106" x2="535" y2="140" marker-end="url(#arB)"/>
+    <line class="edge" x1="749" y1="106" x2="749" y2="140" marker-end="url(#arB)"/>
+
+    <rect class="box-warn" x="30" y="144" width="820" height="52" rx="2"/>
+    <text x="440" y="166" text-anchor="middle" class="sv-t">调度队列(唯一入口 · 幂等 · 触发面不互斥)</text>
+    <text x="440" y="186" text-anchor="middle" class="sv-ss">共识底线:流水线本体固化为 graph+调度队列,变的只是触发面,全部汇入同一队列</text>
+
+    <line class="edge" x1="440" y1="196" x2="440" y2="222" marker-end="url(#arB)"/>
+
+    <!-- 流水线 -->
+    <rect class="box" x="30" y="226" width="820" height="120" rx="2"/>
+    <text x="52" y="250" class="sv-t">evaluation 图(批处理,无对话语义)</text>
+    <rect class="box-lite" x="52" y="262" width="112" height="44" rx="2"/>
+    <text x="108" y="280" text-anchor="middle" class="sv-ss">拉取简历</text>
+    <text x="108" y="296" text-anchor="middle" class="sv-ss">(B 入口直连)</text>
+    <rect class="box-lite" x="178" y="262" width="112" height="44" rx="2"/>
+    <text x="234" y="280" text-anchor="middle" class="sv-ss">脱敏</text>
+    <text x="234" y="296" text-anchor="middle" class="sv-ss">(PII 闸 1)</text>
+    <rect class="box-lite" x="304" y="262" width="112" height="44" rx="2"/>
+    <text x="360" y="280" text-anchor="middle" class="sv-ss">按部门量规</text>
+    <text x="360" y="296" text-anchor="middle" class="sv-ss">分维度评分</text>
+    <rect class="box-lite" x="430" y="262" width="112" height="44" rx="2"/>
+    <text x="486" y="280" text-anchor="middle" class="sv-ss">证据核验</text>
+    <text x="486" y="296" text-anchor="middle" class="sv-ss">(EVA-05 重定义)</text>
+    <rect class="box-lite" x="556" y="262" width="112" height="44" rx="2"/>
+    <text x="612" y="280" text-anchor="middle" class="sv-ss">生成面试题</text>
+    <text x="612" y="296" text-anchor="middle" class="sv-ss">(输出闸 2)</text>
+    <rect class="box-lite" x="682" y="262" width="148" height="44" rx="2"/>
+    <text x="756" y="280" text-anchor="middle" class="sv-ss">评审确认</text>
+    <text x="756" y="296" text-anchor="middle" class="sv-ss">(批量写回,非对话令牌)</text>
+    <line class="edge" x1="164" y1="284" x2="174" y2="284" marker-end="url(#arB)"/>
+    <line class="edge" x1="290" y1="284" x2="300" y2="284" marker-end="url(#arB)"/>
+    <line class="edge" x1="416" y1="284" x2="426" y2="284" marker-end="url(#arB)"/>
+    <line class="edge" x1="542" y1="284" x2="552" y2="284" marker-end="url(#arB)"/>
+    <line class="edge" x1="668" y1="284" x2="678" y2="284" marker-end="url(#arB)"/>
+    <text x="52" y="334" class="sv-ss">断点续跑:若 B 留在 LangGraph,批处理进度由 checkpointer 承载(ADR-0007 决策关联);影子运行(EVA-09)是 M2 验收项,ground truth 数据源未定</text>
+
+    <!-- 查询工具 -->
+    <rect class="box" x="30" y="372" width="820" height="64" rx="2"/>
+    <text x="52" y="396" class="sv-t">对话侧工具(仅遥控,不重路由)</text>
+    <text x="52" y="418" class="sv-s sv-m">trigger_evaluation(cycle_id) — 入队即回执(触发成功 ≠ 跑完) · get_evaluation_progress — 查进度</text>
+    <text x="52" y="434" class="sv-ss sv-m">❓ 待拍板清单第 2 项:三提案不互斥,共识底线已达成</text>
+  </svg>
+  </figure>
+  <p class="figcap">图 6 · B 流水线 graph + 四触发面(对话遥控器 / 管理端按钮 / cron / 后端事件)汇入同一队列</p>
+
+  <div class="dcard sync">
+    <div class="d-head"><h3>B 遥控器触发工具</h3><span class="st-badge st-sync">🔄 待同步</span><span class="st-cat">新增</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">结论</span><span class="v">对话=遥控器,不是流水线本身:聊天中提供 <code>trigger_evaluation(cycle_id)</code>(入队即回执)与 <code>get_evaluation_progress</code>(查进度)两个工具。B 流水线本体由调度器/队列承载,不经聊天路由。</span></div>
+      <div class="d-row"><span class="k">背景</span><span class="v">EVA-07「管理员在对话中触发」与 ADR-0003「B 不经聊天路由」直接冲突。仲裁(2026-08-24):遥控器模式。同步议程 分歧5 记录三方提案(原设计=对话触发+cron;grill=遥控器工具;Zewang=简历导入后管理端「开始审核」按钮→自动触发),三方不互斥。</span></div>
+      <div class="d-row"><span class="k">分析与理由</span><span class="v">触发与执行解耦:对话只负责「说一声」并拿到回执,执行状态由队列与 graph 持有。这保留了管理员在对话里发起评估的便利(EVA-07 的原始价值),又不让对话持有流水线状态。入队即回执意味着「触发成功≠跑完」,所以必须配 progress 查询,否则管理员只能干等。</span></div>
+      <div class="d-row"><span class="k">利弊</span><span class="v"><div class="proscons"><div class="pros"><span class="pc-t">利</span><ul><li>对话入口保留,管理员日常可用</li><li>队列保证幂等与重试,不依赖对话生命周期</li><li>四触发面共用一套执行,无分叉</li></ul></div><div class="cons"><span class="pc-t">弊</span><ul><li>需要队列基础设施 + 进度查询语义</li><li>「入队即回执」容易让用户误以为已跑完,需文案设计</li><li>按钮方案(触发面②)仍需管理端前端配合</li></ul></div></div></span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-sync">🔄 待同步</span> 共识底线已达成(流水线=graph+队列);触发面组合待今晚拍板(待拍板清单第 2 项)。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">ADR-0003(触发仲裁);sync-agenda-2026-08-24 A5;gap-scan-2026-08-24 待拍板清单第 2 项。</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 07 评审确认 -->
+<section id="new-review">
+  <div class="sec-no">07 / 新增设计</div>
+  <h2>评审确认语义 + 分数卡 schema 需求</h2>
+  <p class="sec-lede">评分流水线账本缺口 的 B 数据面几乎全空,且压在「后端谈判」单点上:评审确认机制零设计、分数卡 schema 无定义、草稿/评审端点 openapi 不存在、PUT /score 只收 int。</p>
+
+  <div class="dcard pend">
+    <div class="d-head"><h3>评审确认语义 + 分数卡 schema</h3><span class="st-badge st-pend">❓ 待拍板</span><span class="st-cat">新增</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">结论</span><span class="v"><p>评审确认:B 流水线批量写回前,管理员在评审队列对分数卡逐条/批量批准;与对话确认(ADR-0005)是两套机制,不可互替。需定义:发行方(评审队列)、批量指纹、一次性、拒绝流、抽查 vs 全量。</p><p>分数卡 schema:必须绑定量规版本 + prompt 版本,否则第 2 周改量规后分数不可比。维度分 + 依据(引用)+ 量规版本 + prompt 版本 + 状态(草稿/已批准/已写回)。</p></span></div>
+      <div class="d-row"><span class="k">背景</span><span class="v">评分流水线账本缺口 P0,五个命中: 分数卡 schema 无定义(量规版本/prompt 版本不绑定评分→第 2 周改量规后分数不可比); 评审确认机制零设计(发行方/批量指纹/一次性/拒绝流/抽查 vs 全量矛盾);+ 草稿/评审端点 openapi 不存在,PUT /score 只收 int,维度分+依据无落库通道;EVA 产物存飞书多维表格 vs C 宿主在 admin 前端,形态冲突。</span></div>
+      <div class="d-row"><span class="k">分析与理由</span><span class="v">对话确认是「聊天中写操作前的人工批准」(interrupt+令牌,ADR-0005),面向单笔即时操作;B 是批处理批量写回,逐条 interrupt 会淹没聊天,语义也不同(管理员在评审队列里审的是「分数卡」而不是「一次调用」)。分数卡必须带版本:量规是评分依据,量规一改,新旧分数不可比——版本字段让分数可解释、可追溯。两者都依赖后端增量(草稿/评审端点、score 依据落库),所以合并进 SEC-01 一次谈判(见 §13.3)。</span></div>
+      <div class="d-row"><span class="k">利弊</span><span class="v"><div class="proscons"><div class="pros"><span class="pc-t">利</span><ul><li>分数可比性:改量规后历史分数可解释</li><li>批量审批效率远高于逐条 interrupt</li><li>两套确认语义各归其位,不混用</li></ul></div><div class="cons"><span class="pc-t">弊</span><ul><li>完全依赖后端谈判(端点不存在)</li><li>抽查 vs 全量矛盾未决,影响审批流程设计</li><li>分数卡 schema 是 B 数据面最大契约,牵一发动全身</li></ul></div></div></span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-pend">❓ 待拍板</span> 待拍板清单第 5 项;联动后端谈判(§13.3)。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">CONTEXT.md「评审确认」词条;gap-scan-2026-08-24 评分流水线账本缺口(///);ADR-0005(与对话确认不可互替)。</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 08 工具准入 -->
+<section id="new-tool">
+  <div class="sec-no">08 / 新增设计</div>
+  <h2>工具生命周期五条准入清单</h2>
+  <p class="sec-lede">CLAUDE.md 安全红线原有「新增写操作工具必须:确认令牌校验+审计日志+eval 用例,三者缺一不合入」;漂移表 12 条证明「桩内声明」不可信。五条准入清单=红线三条 + 描述契约 + 端点核对,从源头杜绝幽灵端点与签名漂移。</p>
+
+  <table>
+    <thead>
+      <tr><th>#</th><th>准入项</th><th>内容</th><th>来源</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>①</td><td>docstring 描述契约</td><td>写「何时用」而非「能做什么」;必须列边界条件(做不到什么、不接受什么输入);关键工具附 1~3 个真实调用示例</td><td>ADR-0003 工具描述契约</td></tr>
+      <tr><td>②</td><td>确认令牌校验(写操作)</td><td>写工具必须经 interrupt 人工确认;工具层校验令牌指纹,无令牌/指纹不符即抛错</td><td>CLAUDE.md 红线 · ADR-0005</td></tr>
+      <tr><td>③</td><td>审计日志</td><td>写操作必须产生审计行(五字段,§04),与确认令牌绑定同一操作指纹</td><td>CLAUDE.md 红线 · ADR-0006</td></tr>
+      <tr><td>④</td><td>eval 用例</td><td>工具行为必须有 eval 覆盖,钉住版本;改 prompt/图结构等同代码变更,走 PR,低于基线不合入</td><td>CLAUDE.md 红线 · README 开发约定</td></tr>
+      <tr><td>⑤</td><td>端点契约核对</td><td>与 openapi.yaml 逐字段核对:方法/路径/参数/返回字段;幽灵端点与签名漂移不得入桩</td><td>gap-scan 漂移表 12 条教训</td></tr>
+    </tbody>
+  </table>
+
+  <div class="dcard">
+    <div class="d-head"><h3>工具生命周期五条准入清单</h3><span class="st-badge st-sync">🔄 待同步</span><span class="st-cat">新增</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">结论</span><span class="v">新工具准入五条:①docstring 契约(何时用/边界条件/真实调用示例)②写操作确认令牌 ③审计日志 ④eval 用例 ⑤端点契约核对(openapi 逐字段)。五条缺一不合入。</span></div>
+      <div class="d-row"><span class="k">背景</span><span class="v">CLAUDE.md 红线只覆盖写操作三条(令牌/审计/eval);而漂移表 12 条显示读工具同样漂移(方法/参数/幽灵端点),docstring 与 openapi 对不上。准入清单需要覆盖全部工具,不止写工具。</span></div>
+      <div class="d-row"><span class="k">分析与理由</span><span class="v">漂移表证明「桩内声明」不可信:search_resumes 声明 POST 实为 GET、get_resume_detail 指向不存在的端点、submit_resume_score 声明 float+comment 实为 int 仅 score。若准入时逐字段核对 openapi,这些在合入前就被拦下。①④ 管「工具描述与评测」,②③ 管「写操作安全」,⑤ 管「与后端契约一致」——五个维度各自独立、缺一即产生一类已知缺陷。</span></div>
+      <div class="d-row"><span class="k">利弊</span><span class="v"><div class="proscons"><div class="pros"><span class="pc-t">利</span><ul><li>从源头杜绝幽灵端点/签名漂移/未注册 MCP</li><li>写操作安全三件套扩展为全工具五件套</li><li>docstring 即文档,模型工具选择质量提升</li></ul></div><div class="cons"><span class="pc-t">弊</span><ul><li>每条工具开发成本增加(示例/边界/eval)</li><li>⑤ 依赖 openapi 权威源,后端文档滞后时成阻塞</li></ul></div></div></span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-sync">🔄 待同步</span> 方向共识,落地以 TOOL-04/TOOL-06 实现为准。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">Official_Web_Agent/CLAUDE.md 安全红线;ADR-0003 工具描述契约;ADR-0005(令牌)、ADR-0006(审计);gap-scan-2026-08-24 §二 漂移表。</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 09 证据核验 -->
+<section id="new-verify">
+  <div class="sec-no">09 / 新增设计</div>
+  <h2>证据核验节点重定义(EVA-05)</h2>
+  <p class="sec-lede">上轮悬置 + 新悖论。批判回炉被重定义为「证据核验」:核验需对照原文 vs 原文已脱敏——分工解法:字符串核验在脱敏文本内(确定性代码),语义矛盾检查交给模型。</p>
+
+  <div class="dcard pend">
+    <div class="d-head"><h3>证据核验节点重定义</h3><span class="st-badge st-pend">❓ 待拍板</span><span class="st-cat">新增</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">结论</span><span class="v">EVA-05 从「批判回炉」重定义为「证据核验」,两部分分工:①代码核——依据引用真实性(在脱敏文本内做字符串/近似匹配,确定性、可测试);②模型核——维度评分与依据之间的语义矛盾检查。纯「再想想」自省不引入新信息,不作为独立节点。</span></div>
+      <div class="d-row"><span class="k">背景</span><span class="v">上轮悬置 EVA-05 重定义 + 新悖论:核验需要对照原文,而原文已脱敏——对不上怎么办?分工解法(2026-08-24):字符串核验在脱敏文本内进行,语义矛盾检查交给模型。CLAUDE.md 原定「批判节点负责检测提示注入」(简历是不可信输入),重定义后该职责需迁移(提示注入检测并入输入/行为护栏,§02)。</span></div>
+      <div class="d-row"><span class="k">分析与理由</span><span class="v">LLM 自省(「再想想」)不引入新信息:首轮评分与自省轮多数一致或伪变化,难以验证、不可测试。真正可核验的是两件具体的事:①评分的依据引用是否真实存在于(脱敏后)原文——这是确定性字符串问题,代码能精确回答,还能顺手防「编造依据」(幻觉引用);②维度分与依据内容是否自洽(如依据说「无项目经历」但打了高分)——这是语义判断,只能交给模型。悖论的分工解:脱敏抹掉的是电话号码等精确值,不影响「这句话存在吗」的核验;语义矛盾检查模型本来就看脱敏文本,不冲突。</span></div>
+      <div class="d-row"><span class="k">利弊</span><span class="v"><div class="proscons"><div class="pros"><span class="pc-t">利</span><ul><li>核验可自动化、可单测、可审计</li><li>防幻觉引用(依据编造)有确定性防线</li><li>比自省轮省钱省时(少一轮 LLM 调用)</li></ul></div><div class="cons"><span class="pc-t">弊</span><ul><li>语义矛盾检查仍是模型,不消除不确定性</li><li>脱敏改写可能造成字符串失配(漏报)</li><li>提示注入检测职责需重新安置,有迁移成本</li></ul></div></div></span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-pend">❓ 待拍板</span> 重定义方向已共识;悖论分工待拍板(待拍板清单第 7 项);见 §11.5 原方案对比。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">sync-agenda-2026-08-24 A7;gap-scan-2026-08-24 待拍板清单第 7 项;CONTEXT.md「简历评估」词条。</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 10 eval 可执行性 -->
+<section id="new-eval">
+  <div class="sec-no">10 / 新增设计</div>
+  <h2>eval 可执行性修复:从「写好了跑不动」到可执行</h2>
+  <p class="sec-lede">评测可执行性缺口 判定 eval 体系「物理不可执行」:CI 门禁拿不到 key、checkout 无数据、基线无流程、成本无归属。四件套修复:数据集分发 / secrets 方案 / 基线流程 / judge 校准。</p>
+
+  <div class="dcard pend">
+    <div class="d-head"><h3>eval 可执行性修复</h3><span class="st-badge st-pend">❓ 待拍板</span><span class="st-cat">新增</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">结论</span><span class="v">四件套:①数据集分发方式(标注集可入库/受控分发,CI checkout 有数据)②secrets 方案(fork PR 也能拿到 ANTHROPIC_API_KEY 的安全用法)③基线流程(冷启动基线、更新权、LLM 非确定性 flaky 容差)④judge 校准(同源偏差校准 + 成本预算归属)。附:prompt 事实源定文件为唯一权威(Langfuse 托管退出)。</span></div>
+      <div class="d-row"><span class="k">背景</span><span class="v">评测可执行性缺口 P1·流程级,六个命中: fork PR 无 secrets → CI 拿不到 ANTHROPIC_API_KEY,门禁跑不了; 标注集 gitignore 不入库 → CI checkout 无数据; 基线冷启动/更新权/LLM 非确定性 flaky 无流程; eval 成本($3-8/轮)无预算归属,谁付未定; judge 与主模型同源(sonnet 评 sonnet)偏差未校准; Langfuse prompt 托管 vs 文件 frontmatter 双事实源冲突——需定文件为唯一权威。</span></div>
+      <div class="d-row"><span class="k">分析与理由</span><span class="v">README 把 <code>uv run python -m evals</code> 列为 CI 门禁、开发约定写「eval 分数低于基线不合入」——但门禁的两个前置(数据、key)在 fork PR 场景都不成立,门禁形同虚设。judge 同源是隐蔽偏差:sonnet 评 sonnet 会系统性偏好 sonnet 风格输出;校准=用少量人工标注集算偏差系数,或在关键 eval 上换 judge。prompt 双事实源会让「钉住版本的 eval」失去锚点,必须文件唯一。</span></div>
+      <div class="d-row"><span class="k">利弊</span><span class="v"><div class="proscons"><div class="pros"><span class="pc-t">利</span><ul><li>门禁真正可跑,回归可防</li><li>judge 校准让分数可信,基线有意义</li><li>数据/成本归属明确,流程可持续</li></ul></div><div class="cons"><span class="pc-t">弊</span><ul><li>secrets 方案涉及 CI 安全,需要谨慎设计</li><li>成本归属是组织决策,非纯技术</li><li>数据分发方式影响数据敏感性(gitignore 有存在理由)</li></ul></div></div></span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-pend">❓ 待拍板</span> 待拍板清单第 8 项。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">gap-scan-2026-08-24 评测可执行性缺口(////);Official_Web_Agent/README.md(门禁与开发约定)。</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 11 改进 -->
+<section id="improvements" class="sp-lg">
+  <div class="sec-no">11 / 对原设计的改进</div>
+  <h2>七项改动原设计者方案(均待同步)</h2>
+  <p class="sec-lede">本节每条对照呈现:原方案、新方案、改动理由、原方案的合理之处。所有涉及原设计者骨架代码的清理已冻结——「已砍/已定」是架构评审会话内的方向共识,不构成单方面改代码的授权。</p>
+
+  <figure class="diagram">
+  <svg viewBox="0 0 880 520" role="img" aria-label="原设计 Router 主图含 B/C 与三入口直连的新架构对比" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arC" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6b655a"/></marker>
+      <marker id="arCr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c0533a"/></marker>
+    </defs>
+
+    <text x="30" y="26" class="sv-t">左:原设计(Router 主图含 B/C)· 右:新架构(三入口直连,ADR-0003)</text>
+
+    <!-- 左栏标题 -->
+    <text x="30" y="50" class="sv-m sv-s">原设计 · Router 主图集中分发</text>
+    <rect class="box-lite" x="30" y="60" width="400" height="36" rx="2"/>
+    <text x="230" y="83" text-anchor="middle" class="sv-ss">飞书事件/卡片 · 官网 SSE · CLI 调试</text>
+    <line class="edge" x1="230" y1="96" x2="230" y2="110" marker-end="url(#arC)"/>
+    <rect class="box" x="30" y="112" width="400" height="76" rx="2"/>
+    <text x="230" y="134" text-anchor="middle" class="sv-t">Router 主图(聊天路由)</text>
+    <rect class="box-lite" x="48" y="146" width="168" height="30" rx="2"/>
+    <text x="132" y="165" text-anchor="middle" class="sv-ss sv-m">resolve_identity · 确定性</text>
+    <rect class="box-warn" x="232" y="146" width="180" height="30" rx="2"/>
+    <text x="322" y="165" text-anchor="middle" class="sv-ss sv-m">classify_intent · 轻量模型(砍)</text>
+    <line class="edge" x1="230" y1="188" x2="230" y2="206" marker-end="url(#arC)"/>
+    <rect class="box" x="30" y="208" width="400" height="110" rx="2"/>
+    <text x="230" y="230" text-anchor="middle" class="sv-t">硬分发 → 四个子图</text>
+    <rect class="box-lite" x="48" y="242" width="112" height="36" rx="2"/><text x="104" y="264" text-anchor="middle" class="sv-ss">A 助理</text>
+    <rect class="box-lite" x="172" y="242" width="112" height="36" rx="2"/><text x="228" y="264" text-anchor="middle" class="sv-ss">B 评估(经路由)</text>
+    <rect class="box-lite" x="296" y="242" width="112" height="36" rx="2"/><text x="352" y="264" text-anchor="middle" class="sv-ss">C Copilot</text>
+    <text x="230" y="300" text-anchor="middle" class="sv-ss">GRA-03/04 问答查询 · GRA-05 写子图 · GRA-06 硬分发</text>
+    <line class="edge" x1="230" y1="318" x2="230" y2="336" marker-end="url(#arC)"/>
+    <rect class="box-lite" x="30" y="338" width="400" height="40" rx="2"/>
+    <text x="230" y="363" text-anchor="middle" class="sv-ss sv-m">MCP 工具层(经 langchain-mcp-adapters 消费)→ 后端 REST(服务账号 JWT)</text>
+
+    <!-- 右栏标题 -->
+    <text x="460" y="50" class="sv-m sv-s">新架构 · 三入口直连(ADR-0003)</text>
+
+    <!-- A -->
+    <rect class="box-lite" x="460" y="60" width="120" height="36" rx="2"/>
+    <text x="520" y="83" text-anchor="middle" class="sv-ss">A 入口(开放 NL)</text>
+    <line class="edge" x1="520" y1="96" x2="520" y2="110" marker-end="url(#arC)"/>
+    <rect class="box" x="460" y="112" width="390" height="64" rx="2"/>
+    <text x="655" y="134" text-anchor="middle" class="sv-t">A 前门 = Router 降级</text>
+    <text x="655" y="154" text-anchor="middle" class="sv-ss sv-m">身份解析(确定性)→ 按角色装配工具集(确定性,SEC-02)→ 单 ReAct 循环(sonnet)</text>
+    <line class="edge" x1="520" y1="176" x2="520" y2="196" marker-end="url(#arC)"/>
+    <rect class="box-ok" x="460" y="198" width="390" height="36" rx="2"/>
+    <text x="655" y="221" text-anchor="middle" class="sv-ss">写操作 interrupt 确认(ADR-0005)· 意图由工具选择隐式表达 · 无 classify_intent</text>
+
+    <!-- B -->
+    <rect class="box-lite" x="460" y="248" width="120" height="36" rx="2"/>
+    <text x="520" y="271" text-anchor="middle" class="sv-ss">B 触发面(无对话)</text>
+    <line class="edge" x1="520" y1="284" x2="520" y2="300" marker-end="url(#arC)"/>
+    <rect class="box" x="460" y="302" width="390" height="60" rx="2"/>
+    <text x="655" y="324" text-anchor="middle" class="sv-t">调度器/队列直连 evaluation 图</text>
+    <text x="655" y="344" text-anchor="middle" class="sv-ss sv-m">不经任何聊天路由;对话仅遥控器(trigger_evaluation / get_evaluation_progress)</text>
+
+    <!-- C -->
+    <rect class="box-lite" x="460" y="376" width="120" height="36" rx="2"/>
+    <text x="520" y="399" text-anchor="middle" class="sv-ss">C 宿主:官网管理端面试页</text>
+    <line class="edge" x1="520" y1="412" x2="520" y2="424" marker-end="url(#arC)"/>
+    <rect class="box" x="460" y="426" width="390" height="44" rx="2"/>
+    <text x="655" y="448" text-anchor="middle" class="sv-t">直连 copilot 图(INF-10 面板)</text>
+    <text x="655" y="464" text-anchor="middle" class="sv-ss">界面即路由;不再是飞书卡片宿主</text>
+
+    <!-- 底部共享 -->
+    <rect class="box-lite" x="460" y="484" width="390" height="34" rx="2"/>
+    <text x="655" y="506" text-anchor="middle" class="sv-ss sv-m">工具进程内直连 Python 函数;MCP server 纯对外(Claude Code 等挂载用)</text>
+
+    <!-- 标注 -->
+    <line class="edge-warn" x1="434" y1="161" x2="456" y2="140" marker-end="url(#arCr)"/>
+    <text x="438" y="128" text-anchor="middle" class="sv-ss" fill="#b07d1f">砍</text>
+    <line class="edge-red" x1="434" y1="260" x2="456" y2="320" marker-end="url(#arCr)"/>
+    <text x="420" y="300" text-anchor="middle" class="sv-ss" fill="#c0533a">移出路由</text>
+  </svg>
+  </figure>
+  <p class="figcap">图 1 · 原设计(Router 主图含 B/C,classify_intent 硬分发)vs 新架构(三入口直连:B 调度器直连、C 宿主直连、A 单循环)</p>
+
+  <h3 id="improve-gra02">11.1 GRA-02 意图分类砍除 → A 单循环</h3>
+  <div class="dcard sync">
+    <div class="d-head"><h3>GRA-02 意图分类砍除</h3><span class="st-badge st-sync">🔄 待同步</span><span class="st-cat">改进</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">原方案</span><span class="v">Router 主图 <code>resolve_identity → classify_intent(轻量模型)→ GRA-03..06 硬分发</code>:轻量模型分类意图后,把消息硬分发到 4 个子图(问答/查询/写/记忆)。</span></div>
+      <div class="d-row"><span class="k">新方案</span><span class="v">GRA-02 意图分类节点 v1 砍掉。Router 主图降级为「A 的前门」:身份解析(确定性代码:飞书 open_id / 官网 JWT / CLI 模拟身份 → 用户+角色)→ 按角色装配工具集(确定性代码,SEC-02)→ 单 ReAct 循环(模型自主选工具,sonnet)。「意图」由工具选择隐式表达。GRA-03/04 合并为一个 assistant 循环;GRA-05(写子图)退化为 interrupt 中间件+确认子流程,不是独立图。</span></div>
+      <div class="d-row"><span class="k">为什么改</span><span class="v">①安全价值已被覆盖:权限边界在工具装配层(按会话身份决定可见工具集,不靠 prompt/分类),分类的安全收益归零;②每消息多一跳 = 多一份 eval 面、多一次失败点;③硬分发分错即死胡同——错误分类不可恢复;④A 的输入是开放式自然语言,意图未知,模型在完整工具集上自主选择比先猜意图再限定更稳。单循环的写操作安全由三层承担:工具装配(读不到)+ interrupt 确认(执行不了)+ 令牌校验(绕不过,ADR-0005)。</span></div>
+      <div class="d-row"><span class="k">原方案的合理之处</span><span class="v">意图分类可做软路由提示(决定初始提示词与工具预裁剪),能省 token、提高首轮命中率;若未来 badcase 证明需要,只作软路由提示,不做硬闸——「分错即死胡同」的代价被软路由解除。</span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-sync">🔄 待同步</span> router.py 未动(冻结);GRA-02 issue 关闭或重标记为可选优化。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">ADR-0003;同步议程 分歧1;gap-scan 决策与代码不一致。</span></div>
+    </div>
+  </div>
+
+  <figure class="diagram">
+  <svg viewBox="0 0 880 320" role="img" aria-label="A 模块 ReAct 单循环流程:身份解析到工具装配到循环到 interrupt" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6b655a"/></marker>
+    </defs>
+
+    <text x="30" y="28" class="sv-t">A 模块 ReAct 单循环(无 classify_intent)</text>
+
+    <rect class="box-lite" x="30" y="46" width="120" height="52" rx="2"/>
+    <text x="90" y="68" text-anchor="middle" class="sv-ss">入口</text>
+    <text x="90" y="86" text-anchor="middle" class="sv-ss sv-m">飞书/官网SSE/CLI</text>
+
+    <line class="edge" x1="150" y1="72" x2="176" y2="72" marker-end="url(#arA)"/>
+
+    <rect class="box" x="180" y="46" width="150" height="52" rx="2"/>
+    <text x="255" y="68" text-anchor="middle" class="sv-t">身份解析(确定性)</text>
+    <text x="255" y="86" text-anchor="middle" class="sv-ss sv-m">open_id / JWT / 模拟 → 用户+角色</text>
+
+    <line class="edge" x1="330" y1="72" x2="356" y2="72" marker-end="url(#arA)"/>
+
+    <rect class="box" x="360" y="46" width="150" height="52" rx="2"/>
+    <text x="435" y="68" text-anchor="middle" class="sv-t">工具装配(确定性)</text>
+    <text x="435" y="86" text-anchor="middle" class="sv-ss sv-m">按角色装配,SEC-02</text>
+
+    <line class="edge" x1="510" y1="72" x2="536" y2="72" marker-end="url(#arA)"/>
+
+    <rect class="box" x="540" y="46" width="310" height="52" rx="2"/>
+    <text x="695" y="68" text-anchor="middle" class="sv-t">ReAct 循环(模型自主选工具,sonnet)</text>
+    <text x="695" y="86" text-anchor="middle" class="sv-ss">意图 = 工具选择,隐式表达;GRA-03/04 合并为 assistant 循环</text>
+
+    <!-- 循环 -->
+    <rect class="box-ok" x="560" y="130" width="120" height="44" rx="2"/>
+    <text x="620" y="157" text-anchor="middle" class="sv-ss">读工具 → 直接返回</text>
+    <rect class="box-warn" x="700" y="130" width="120" height="44" rx="2"/>
+    <text x="760" y="157" text-anchor="middle" class="sv-ss">写工具 → interrupt 挂起</text>
+    <line class="edge" x1="695" y1="98" x2="620" y2="126" marker-end="url(#arA)"/>
+    <line class="edge" x1="695" y1="98" x2="760" y2="126" marker-end="url(#arA)"/>
+    <path class="edge" d="M 560 152 C 430 152 430 220 255 220 L 255 102" marker-end="url(#arA)" stroke-dasharray="5 4"/>
+    <text x="390" y="238" text-anchor="middle" class="sv-ss">继续循环:结果回喂轨迹,模型重新规划;写确认=interrupt+令牌(ADR-0005),GRA-05 退化为中间件</text>
+
+    <!-- 安全三层 -->
+    <rect class="box" x="30" y="130" width="330" height="110" rx="2"/>
+    <text x="52" y="154" class="sv-t">单循环写操作安全 · 三层(不依赖意图分类)</text>
+    <text x="52" y="178" class="sv-ss">① 工具装配:写工具在会话身份下「读不到」</text>
+    <text x="52" y="198" class="sv-ss">② interrupt 确认:执行不了,必须人工批准</text>
+    <text x="52" y="218" class="sv-ss">③ 令牌校验:模型自编令牌绕不过(ADR-0005 指纹)</text>
+    <text x="52" y="238" class="sv-ss">遗留场景:飞书 bot 同时服务候选人+面试官 → v1 不做,届时另立决策</text>
+  </svg>
+  </figure>
+  <p class="figcap">图 2 · A 模块 ReAct 单循环:身份解析 → 工具装配 → 循环(读直返/写挂起)→ 三层写安全</p>
+
+  <h3 id="improve-b">11.2 B 移出聊天路由</h3>
+  <div class="dcard sync">
+    <div class="d-head"><h3>B 移出聊天路由(遥控器仲裁)</h3><span class="st-badge st-sync">🔄 待同步</span><span class="st-cat">改进</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">原方案</span><span class="v">B 挂在 Router 主图之下,与 A/C 共用聊天路由;触发方式 EVA-07=对话触发 + cron。</span></div>
+      <div class="d-row"><span class="k">新方案</span><span class="v">B 是定时批处理,没有对话语义——调度器(job runner / cron)直连 evaluation 图,不经任何聊天路由;对话侧仅遥控器工具(§06);共识底线:流水线本体固化为 graph+调度队列,变的只是触发面。</span></div>
+      <div class="d-row"><span class="k">为什么改</span><span class="v">入口语义不同:只有 A 的输入是开放式自然语言、意图未知;B 恰好是可确定性分解的工作流。编排选型按任务语义分级:单次调用 → 固定工作流 → 自主循环。B 是可确定性分解的工作流,A 是开放式自主循环——架构服从语义。</span></div>
+      <div class="d-row"><span class="k">原方案的合理之处</span><span class="v">对话触发便于管理员日常操作(不必进管理端页面)——因此保留遥控器工具,不彻底砍对话入口;统一 Router 也意味着单一入口面、单一鉴权点。</span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-sync">🔄 待同步</span> 三方提案不互斥,今晚拍板触发面组合(待拍板清单第 2 项)。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">ADR-0003;同步议程 分歧5。</span></div>
+    </div>
+  </div>
+
+  <h3 id="improve-mcp">11.3 工具进程内直连(MCP 纯对外)</h3>
+  <div class="dcard sync">
+    <div class="d-head"><h3>工具进程内直连</h3><span class="st-badge st-sync">🔄 待同步</span><span class="st-cat">改进</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">原方案</span><span class="v">MCP 工具层是唯一出口,agent 经 langchain-mcp-adapters 消费同一套工具(TOOL-07 描述);mcp_server.py docstring 与 pyproject 依赖残留该表述。</span></div>
+      <div class="d-row"><span class="k">新方案</span><span class="v">工具绑定:agent 进程内直接绑定 Python 函数;MCP server 纯对外暴露面(Claude Code 等外部消费者挂载用),不走协议回环。TOOL-07「经 langchain-mcp-adapters 消费同一套工具」的描述作废。</span></div>
+      <div class="d-row"><span class="k">为什么改</span><span class="v">进程内直连省去协议序列化/适配层,确定性工具函数可直接单测、直接调用;agent 自己走 MCP 协议回环是无谓的中间层(同一进程还要先序列化再反序列化)。</span></div>
+      <div class="d-row"><span class="k">原方案的合理之处</span><span class="v">MCP 是标准协议,统一出口便于外部工具复用(Claude Code 挂载后也能用同一套工具)——这个价值保留:只是对外,不对内。</span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-sync">🔄 待同步</span> mcp_server.py docstring + pyproject 残留依赖待清(事实修正 B9,冻结到同步后)。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">ADR-0003;sync-agenda B9;gap-scan 决策与代码不一致。</span></div>
+    </div>
+  </div>
+
+  <h3 id="improve-c">11.4 C 宿主从飞书改官网前端</h3>
+  <div class="dcard">
+    <div class="d-head"><h3>C 宿主改官网前端</h3><span class="st-badge st-sync">🔄 待同步</span><span class="st-cat">改进</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">原方案</span><span class="v">C 宿主界面在飞书(事件/卡片),候选人或面试官通过 IM 交互;卡片 schema 与交互措辞全是飞书时代。</span></div>
+      <div class="d-row"><span class="k">新方案</span><span class="v">C 已由项目所有者确认放官网管理端前端:管理端面试页直连 copilot 图(INF-10 面板),界面即路由——宿主本身知道自己是谁,不需要身份解析与路由分发。卡片 schema 与交互全需按 admin 前端重规格。</span></div>
+      <div class="d-row"><span class="k">为什么改</span><span class="v">C 的宿主界面(管理后台面试页)本身就知道自己是谁:入口语义决定架构——不需要 classify,不需要 Router;且面试官工作流(候选人卡片/速记/评价表)天然在浏览器内闭环,IM 卡片是弱载体。</span></div>
+      <div class="d-row"><span class="k">原方案的合理之处</span><span class="v">飞书卡片在 IM 内交互闭环,无需新前端开发;但所有者已确认官网管理端,宿主迁移后 INF(飞书)模块范围可能收缩。</span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-sync">🔄 待同步</span> 宿主由所有者确认;实现层(卡片 schema/交互重规格)待同步。附:C 模块 Round 4 备料(白名单内容未定义; 评价表写回三选一; get_candidate_card 需 X-On-Behalf-Of; COP-08 录音合规先行; COP-07 转写是新不可信输入面)。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">ADR-0003;gap-scan 决策与代码不一致与 §四 C 模块备料。</span></div>
+    </div>
+  </div>
+
+  <h3 id="improve-eva05">11.5 EVA-05 批判回炉 → 证据核验</h3>
+  <div class="dcard pend">
+    <div class="d-head"><h3>EVA-05 批判回炉 → 证据核验</h3><span class="st-badge st-pend">❓ 待拍板</span><span class="st-cat">改进</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">原方案</span><span class="v">评估流水线含「批判回炉」节点:模型对首轮评分自省重评(「再想想」),同时负责检测简历中的提示注入(CLAUDE.md 安全红线)。</span></div>
+      <div class="d-row"><span class="k">新方案</span><span class="v">重定义为「证据核验」(详细设计见 §09):代码核依据引用真实性(在脱敏文本内做字符串/近似匹配)+ 模型核维度矛盾。纯自省无新信息,不作为独立节点;提示注入检测职责迁入输入/行为护栏(§02)。</span></div>
+      <div class="d-row"><span class="k">为什么改</span><span class="v">自省不引入新信息——首轮与自省轮多数一致或伪变化,不可验证、不可测试,还多烧一轮 strong 模型。可核验的是具体事实:引用是否存在(确定性)、维度分与依据是否自洽(语义)。悖论分工:核验需对照原文 vs 原文已脱敏 → 字符串核验在脱敏文本内进行(脱敏抹掉的是精确值,不影响「这句话存在吗」),语义矛盾检查交给模型(模型本来就看脱敏文本)。</span></div>
+      <div class="d-row"><span class="k">原方案的合理之处</span><span class="v">批判节点确实能捕获部分评分错误(尤其 prompt 质量问题时),提示注入检测职责也是真实需求——重定义保留这两者的价值:核验发现矛盾后触发「重新生成」步骤,提示注入检测并入护栏。</span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-pend">❓ 待拍板</span> 方向共识;悖论分工与提示注入职责安置待拍板(待拍板清单第 7 项)。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">同步议程 分歧7;gap-scan 待拍板清单第 7 项;CLAUDE.md 安全红线(原批判节点职责)。</span></div>
+    </div>
+  </div>
+
+  <h3 id="improve-memory">11.6 记忆路线 v1 = checkpointer only</h3>
+  <div class="dcard sync">
+    <div class="d-head"><h3>记忆路线 v1 = checkpointer only</h3><span class="st-badge st-sync">🔄 待同步</span><span class="st-cat">改进</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">原方案</span><span class="v">MEM-01..06 全排期:checkpointer + 长期记忆 Store(Redis),记忆能力一次性铺满路线图。</span></div>
+      <div class="d-row"><span class="k">新方案</span><span class="v">v1 checkpointer only:会话状态(多轮对话 + interrupt 挂起)由 checkpointer 承载;MEM-02..06 等第一个真实需求再启;RAG 倾向 Day1 接口化(§05,接口先定,实现后上)。</span></div>
+      <div class="d-row"><span class="k">为什么改</span><span class="v">无真实需求的长期记忆是过度设计:招新对话大多 &lt;40 轮(ADR-0004),跨会话记忆场景未出现;v1 需要的全部状态(会话+挂起确认)checkpointer 已覆盖。触发指标:单会话 &gt;40 轮成为常态时再启压缩;记忆需求出现时再启 MEM-02..06。</span></div>
+      <div class="d-row"><span class="k">原方案的合理之处</span><span class="v">长期记忆对跨会话连续性(候选人隔周回来)有真实价值;把 MEM 全排期意味着能力一次到位——但代价是 v1 交付面扩大、记忆 Store 与 checkpointer 双状态源。</span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-sync">🔄 待同步</span> README 架构图仍画记忆全量排期,表述漂移(事实修正 B10)。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">同步议程 分歧6;ADR-0004(压缩触发指标);gap-scan B10。</span></div>
+    </div>
+  </div>
+
+  <h3 id="improve-move">11.7 move_interview 拟砍</h3>
+  <div class="dcard">
+    <div class="d-head"><h3>move_interview 拟砍</h3><span class="st-badge st-sync">🔄 待同步</span><span class="st-cat">改进</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">原方案</span><span class="v">C 模块 3 个写工具之一:move_interview(POST manual-adjust),用于手动调整面试安排。</span></div>
+      <div class="d-row"><span class="k">新方案</span><span class="v">拟砍除。依据是后端事实非偏好:对应后端端点已 deprecated 下线(openapi:「已下线,改用 preferences/assign」,实为 PUT)。write.py 未动(冻结)。</span></div>
+      <div class="d-row"><span class="k">为什么改</span><span class="v">端点已 deprecated,保留工具只会让模型调用必失败;砍掉是跟随后端事实,不是设计偏好。</span></div>
+      <div class="d-row"><span class="k">原方案的合理之处</span><span class="v">手动调整面试安排确实有业务需求;替代路径是 <code>/preferences/{resumeId}/assign</code>——但该端点未包装为工具,「重排无工具」仍是缺口(漂移表附注),需后端确认后补。</span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-sync">🔄 待同步</span>(拟)砍除意向已记录于 ADR-0005;write.py 冻结,待同步后清理。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">ADR-0005;同步议程 分歧2;gap-scan 决策与代码不一致;漂移表 move_interview 行。</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 12 优化 -->
+<section id="optimizations" class="sp-lg">
+  <div class="sec-no">12 / 优化与契约细化</div>
+  <h2>上下文工程、prompt 版本化、模型路由、失败哲学、存储选型</h2>
+  <p class="sec-lede">本节是对原设计的细化与校准,不构成与原设计者的冲突(除 Redis-vs-PG 一项)。上下文契约按缓存经济性与压缩策略的实验结论校准;失败哲学见 ADR-0005,存储选型建议见 ADR-0007。</p>
+
+  <h3 id="opt-context">12.1 四段上下文组装 + 双 cache 断点</h3>
+  <div class="dcard">
+    <div class="d-head"><h3>四段上下文组装 + 双断点</h3><span class="st-badge st-sync">🔄 待同步</span><span class="st-cat">优化</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">结论</span><span class="v"><p>组装顺序按「缓存稳定 → 易变」排四段,两个断点:</p><pre><span class="cmt">[全局静态前缀: 唯一 system prompt + 工具定义]   ← 所有用户逐字节相同,跨会话共享缓存</span>
+─── cache 断点 1 ───
+<span class="cmt">[会话稳定块: 身份/角色/当前周期]                ← 会话内不变,第 2 轮起命中</span>
+[轨迹: 对话消息,append-only]                    ← 只增不改
+[易变块: 代码维护的状态栏,user 角色消息挂末尾]   ← 每轮尾部替换,失效范围仅自身
+─── cache 断点 2(可选) ───</pre><p>三条铁律:①system prompt 全局唯一变体——角色/身份一律进断点后的稳定块,绝不烘进 system prompt(断点前每多一个运行时条件,缓存键变体翻倍 2^N);②易变块选「尾部替换」而非「持久追加」(Claude Code <code>&lt;system-reminder&gt;</code> 是持久追加的对照:状态栏位于轨迹末尾,删旧加新的失效范围只有自己;会话 &lt;40 轮时持久追加只会积累陈旧状态,留作长会话备选);③状态栏必须代码维护(从图状态确定性派生),绝不交给模型批量统计。</p></span></div>
+      <div class="d-row"><span class="k">裁剪与压缩</span><span class="v">阈值前不动(招新对话大多 &lt;40 轮);超阈值后批量上下文感知摘要,禁止滑动窗口与按长度硬切;摘要提示词携带当前查询意图与上下文;固定保留清单:[决策、约束、失败路径、引用];摘要用 strong 模型(「压缩即理解」,压缩模块能力需接近主模型);压缩熔断器——连续 N 次压缩失败即停,降级并上报人工;实现惰性——契约现在冻结,实现等真实长会话出现(触发指标:单会话 &gt;40 轮成为常态)。</span></div>
+      <div class="d-row"><span class="k">背景</span><span class="v">仓库此前没有上下文组装约定。两个天然张力:对话消息 append-only 对 prompt cache 最友好,而状态类内容每轮变化;裁剪省 token 但破坏缓存前缀。校准依据三条结论:缓存前缀须逐字节稳定;压缩须任务感知且批量进行;滑动窗口式丢弃会同时破坏缓存与关键工具结果。</span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-sync">🔄 待同步</span> ADR-0004 Accepted;GRA-07(摘要压缩)从实现 issue 降级为「已设计、按触发指标实现」。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">ADR-0004。</span></div>
+    </div>
+  </div>
+
+  <figure class="diagram">
+  <svg viewBox="0 0 880 360" role="img" aria-label="四段上下文组装与双 cache 断点" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arX" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6b655a"/></marker>
+    </defs>
+
+    <text x="30" y="28" class="sv-t">四段上下文组装 + 双 cache 断点(ADR-0004)</text>
+
+    <!-- 段 1 静态前缀 -->
+    <rect class="box-ok" x="30" y="48" width="260" height="120" rx="2"/>
+    <text x="160" y="72" text-anchor="middle" class="sv-t">段 1 · 全局静态前缀</text>
+    <text x="160" y="94" text-anchor="middle" class="sv-s sv-m">唯一 system prompt + 工具定义</text>
+    <text x="160" y="116" text-anchor="middle" class="sv-ss">所有用户逐字节相同</text>
+    <text x="160" y="136" text-anchor="middle" class="sv-ss">跨会话共享缓存</text>
+    <text x="160" y="156" text-anchor="middle" class="sv-ss">角色/身份绝不烘进来(2^N 变体)</text>
+
+    <!-- 断点 1 -->
+    <rect class="box-warn" x="310" y="48" width="120" height="120" rx="2"/>
+    <text x="370" y="74" text-anchor="middle" class="sv-t">cache 断点 1</text>
+    <text x="370" y="98" text-anchor="middle" class="sv-ss">前缀自此冻结</text>
+    <text x="370" y="118" text-anchor="middle" class="sv-ss">变体只来自其后</text>
+    <text x="370" y="138" text-anchor="middle" class="sv-ss">首轮预热,后续命中</text>
+
+    <!-- 段 2-4 -->
+    <rect class="box" x="450" y="48" width="400" height="120" rx="2"/>
+    <text x="650" y="70" text-anchor="middle" class="sv-t">段 2 · 会话稳定块(身份/角色/当前周期)</text>
+    <line x1="458" y1="78" x2="842" y2="78" stroke="var(--rule-2)" stroke-width="1"/>
+    <text x="650" y="98" text-anchor="middle" class="sv-s sv-m">段 3 · 轨迹:对话消息 append-only(只增不改)</text>
+    <text x="650" y="120" text-anchor="middle" class="sv-s sv-m">段 4 · 易变块:代码维护的状态栏,user 消息挂末尾</text>
+    <text x="650" y="142" text-anchor="middle" class="sv-ss">尾部替换:删旧加新,失效范围仅自身(对照 Claude Code system-reminder 持久追加)</text>
+    <text x="650" y="160" text-anchor="middle" class="sv-ss">状态栏必须代码维护(从图状态确定性派生),不交模型统计</text>
+
+    <!-- 断点 2 -->
+    <rect class="box-dash" x="310" y="196" width="120" height="56" rx="2"/>
+    <text x="370" y="218" text-anchor="middle" class="sv-t">cache 断点 2</text>
+    <text x="370" y="238" text-anchor="middle" class="sv-ss">可选;失效范围仅易变块自身</text>
+
+    <!-- 裁剪 -->
+    <rect class="box" x="450" y="196" width="400" height="120" rx="2"/>
+    <text x="650" y="220" text-anchor="middle" class="sv-t">超阈值后的压缩策略(阈值前不动,&lt;40 轮)</text>
+    <text x="650" y="242" text-anchor="middle" class="sv-ss">批量上下文感知摘要;禁止滑动窗口(实验 2-3:破坏前缀缓存+丢工具结果→重复调用循环)</text>
+    <text x="650" y="262" text-anchor="middle" class="sv-ss">禁止按长度硬切(实验 2-10:非任务感知压缩是六策略最差档)</text>
+    <text x="650" y="282" text-anchor="middle" class="sv-ss">固定保留清单:[决策、约束、失败路径、引用] · 摘要用 strong 模型(压缩即理解)</text>
+    <text x="650" y="302" text-anchor="middle" class="sv-ss">压缩熔断器:连续 N 次失败即停,降级并上报人工 · 实现惰性:触发指标=单会话 &gt;40 轮成常态</text>
+
+    <line class="edge" x1="290" y1="108" x2="306" y2="108" marker-end="url(#arX)"/>
+    <line class="edge" x1="430" y1="108" x2="446" y2="108" marker-end="url(#arX)"/>
+    <line class="edge-dash" x1="370" y1="168" x2="370" y2="192" marker-end="url(#arX)"/>
+  </svg>
+  </figure>
+  <p class="figcap">图 4 · 四段上下文组装 + 双 cache 断点 + 超阈值压缩策略(阈值前不动,<40 轮)</p>
+
+  <h3 id="opt-prompt">12.2 prompt 版本化 frontmatter</h3>
+  <div class="dcard">
+    <div class="d-head"><h3>prompt 版本化 frontmatter</h3><span class="st-badge st-sync">🔄 待同步</span><span class="st-cat">优化</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">结论</span><span class="v">一图一节点一文件:<code>prompts/&lt;graph&gt;/&lt;node&gt;.md</code>;frontmatter 记 <code>version / model_tier / cache_prefix</code>;代码零 prompt 字符串;改 prompt 必跑钉住该版本的 eval;文件为唯一权威(Langfuse prompt 托管退出)。</span></div>
+      <div class="d-row"><span class="k">背景</span><span class="v">CLAUDE.md 已定「prompt 全部放 prompts/ 版本化管理,不散落在代码字符串里」;gap-scan  指出 Langfuse prompt 托管 vs 文件 frontmatter 双事实源冲突——需定文件为唯一权威。</span></div>
+      <div class="d-row"><span class="k">分析与理由</span><span class="v">frontmatter 三字段各有用途:version 支撑「钉住版本的 eval」与审计字段 agent 里的 prompt 版本;model_tier 与模型路由(12.3)联动,让「哪个模型跑了哪个 prompt」可审计;cache_prefix 与缓存断点(12.1)联动,提示词变更即缓存键变更的显式声明。</span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-sync">🔄 待同步</span> ADR-0004 Accepted;prompts/ 目录组织由本 ADR 固定。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">ADR-0004;CLAUDE.md 架构要点;gap-scan 。</span></div>
+    </div>
+  </div>
+
+  <h3 id="opt-routing">12.3 模型路由分档(GRA-08)</h3>
+  <div class="dcard">
+    <div class="d-head"><h3>模型路由分档</h3><span class="st-badge st-sync">🔄 待同步</span><span class="st-cat">优化</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">结论</span><span class="v"><table>
+        <thead><tr><th>档位</th><th>适用场景</th><th>约束</th></tr></thead>
+        <tbody>
+          <tr><td><b>strong(默认)</b></td><td>用户可见输出 / 评估评分 / 批判(证据核验) / 面试题 / LLM-as-judge / 摘要压缩</td><td>面向用户与关键判断一律 strong</td></tr>
+          <tr><td><b>light(仅内部模式化)</b></td><td>字段抽取;意图分类若复活</td><td>须 eval 证明不掉分才可降</td></tr>
+          <tr><td><b>永远用代码</b></td><td>脱敏、投影裁剪</td><td>确定性任务绝不交给模型</td></tr>
+        </tbody>
+      </table></span></div>
+      <div class="d-row"><span class="k">分析与理由</span><span class="v">分档的核心是「面向用户/关键判断 strong,内部模式化 light,确定性永远代码」。降 light 的唯一许可证是 eval 证明不掉分——与「改 prompt 必跑钉住版本的 eval」同一哲学:任何质量让步必须有证据。</span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-sync">🔄 待同步</span> ADR-0004(GRA-08)。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">ADR-0004。</span></div>
+    </div>
+  </div>
+
+  <h3 id="opt-errors">12.4 错误三段式 + fail-open / fail-closed</h3>
+  <div class="dcard">
+    <div class="d-head"><h3>错误三段式 + fail-open / fail-closed</h3><span class="st-badge st-sync">🔄 待同步</span><span class="st-cat">优化</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">结论</span><span class="v"><table>
+        <thead><tr><th>错误类别</th><th>处理</th><th>原则</th></tr></thead>
+        <tbody>
+          <tr><td>工具/后端错</td><td>映射为可行动文案(哪个操作、为何失败、用户能做什么);模型只见映射文案不见堆栈</td><td>TOOL-06:可行动、不泄内幕</td></tr>
+          <tr><td>模型错(超时/限流)</td><td>指数退避重试 ≤3 次,仍败回 canned 道歉 + trace_id</td><td>有限重试 + 可追踪</td></tr>
+          <tr><td>系统错(观测/写路径依赖)</td><td>观测 fail-open,写路径 fail-closed</td><td>宁可不可用,不可不可信</td></tr>
+        </tbody>
+      </table><p>具体化:Langfuse 挂了聊天照常(只丢 trace);checkpointer 不可用 = 无法挂起确认 = 拒绝一切写操作。fail-closed 意味着 Redis(checkpointer)是写路径硬依赖:其持久化(AOF)与 TTL 策略(≥ 招新周期 + N 天)成为上线前检查项。</p></span></div>
+      <div class="d-row"><span class="k">背景</span><span class="v">ADR-0005 需要同时明确系统级失败的降级原则:「生产级」不是只定义 happy path。</span></div>
+      <div class="d-row"><span class="k">分析与理由</span><span class="v">三段分类对应三种失败来源与三种应对:后端错是业务事实(可行动文案);模型错是资源问题(重试与兜底);系统错是信任问题(写路径一旦无法确认就必须拒绝,不能静默假装成功)。fail-open/fail-closed 的分界线是「丢了什么」:丢 trace 可接受,丢确认不可接受。</span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-sync">🔄 待同步</span> ADR-0005 Accepted;write.py _require_token 从非空检查升级为指纹校验(TOOL-04)。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">ADR-0005;关联:ADR-0007(fail-closed → checkpointer 硬依赖)。</span></div>
+    </div>
+  </div>
+
+  <h3 id="opt-redis-pg">12.5 Checkpointer 存储:Redis vs Postgres(ADR-0007)</h3>
+  <div class="dcard sync">
+    <div class="d-head"><h3>Redis vs Postgres(倾向 PG)</h3><span class="st-badge st-sync">🔄 待同步</span><span class="st-cat">待讨论</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">结论</span><span class="v"><b>倾向 Postgres</b>,三条理由按分量排:①延迟优势在本负载归零——checkpoint 写入发生在每个 super-step 末,每步内含 LLM 调用(0.5~5s),Redis ~0.5ms vs PG ~3ms 的差 &lt;1% 步耗时,用户不可感知;②持久性是分水岭——Redis 默认内存态重启全丢,AOF everysec 仍有 ≤1s 丢失窗口,内存压力下 noeviction=写报错、allkeys-lru=逐出挂起 interrupt(确认静默丢失),丢挂起确认是生产事故级风险,与 fail-closed 哲学相悖;PG WAL+fsync 提交即持久;③运维账——PG 已在部署图(Langfuse 自带 PG;M4 pgvector),checkpointer 用 PG 则 Redis 可从 agent 栈整体退场(v1 限流/预算=进程内),有状态服务 2→1,备份=标准 pg_dump/PITR,thread 状态可 SQL 运维查询(找挂起确认/僵尸 thread)。</span></div>
+      <div class="d-row"><span class="k">Redis 的真实论点与回应</span><span class="v">①原生 TTL:真实优势,但 PG 侧一条清理 job(<code>DELETE ... WHERE updated_at &lt; ...</code> 挂 cron)可替代,换来不被逐出的确定性;②「聊天热数据放热存储」直觉:在 LLM 步耗面前不成立(理由 1)。</span></div>
+      <div class="d-row"><span class="k">若最终选 Redis 的底线三件套</span><span class="v"><b>AOF 开启 + maxmemory-policy=noeviction + 内存容量规划(会话数×平均 checkpoint 大小)</b>。三者缺一即挂起确认有静默丢失路径,须回写 ADR-0005 风险清单。</span></div>
+      <div class="d-row"><span class="k">全维对比</span><span class="v"><table>
+        <thead><tr><th>维度</th><th>Redis(langgraph-checkpoint-redis)</th><th>Postgres(langgraph-checkpoint-postgres)</th></tr></thead>
+        <tbody>
+          <tr><td>写延迟</td><td>~0.2-1ms</td><td>~1-5ms(本地网)</td></tr>
+          <tr><td>延迟在本负载的意义</td><td>每个 super-step 含 LLM 调用(0.5-5s),checkpoint 写入 &lt;1% 步耗时——毫秒差不可感知</td><td>同左</td></tr>
+          <tr><td>持久性</td><td>AOF everysec 仍有 ≤1s 丢失窗口;默认配置重启全丢=挂起中的写确认蒸发</td><td>WAL+fsync 提交即持久;崩溃恢复成熟</td></tr>
+          <tr><td>内存/逐出</td><td>全内存,随会话数线性涨;noeviction=写报错,allkeys-lru=可能逐出挂起 interrupt(确认静默丢失)</td><td>磁盘,无逐出风险</td></tr>
+          <tr><td>运维账</td><td>多一个有状态服务;AOF/TTL 要正确配置(ADR-0005 已列为检查项)</td><td>PG 反正在部署图(Langfuse 自带 PG;M4 pgvector)→checkpointer 用 PG 则 Redis 整个退出 agent 栈(v1 限流/预算=进程内);状态服务 2→1</td></tr>
+          <tr><td>过期/TTL</td><td>原生 TTL,会话自动蒸发</td><td>需清理 job(一条 SQL/cron)——Redis 唯一真实优势</td></tr>
+          <tr><td>可查询性</td><td>SCAN 键结构不友好</td><td>SQL 运维查询:找挂起确认/僵尸 thread/与审计交叉</td></tr>
+          <tr><td>备份恢复</td><td>AOF 快照,语义弱</td><td>pg_dump / PITR 成熟</td></tr>
+          <tr><td>B 批处理断点续跑</td><td>同上持久性短板(跑一半崩=丢进度)</td><td>崩溃后从 checkpoint 稳定恢复</td></tr>
+        </tbody>
+      </table></span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-sync">🔄 待同步</span> ADR-0007 Status:Proposed(Zewang 倾向 PG;原设计者倾向 Redis,待今晚同步);选 PG 需补清理 job(thread TTL 策略);Redis 退栈待限流/预算方案确认后执行;同步后按结论改 Status(Accepted / superseded)。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">ADR-0007;sync-agenda-2026-08-24 附录(全维对比表)。</span></div>
+    </div>
+  </div>
+
+  <figure class="diagram">
+  <svg viewBox="0 0 880 420" role="img" aria-label="Redis 与 Postgres 决策树" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#6b655a"/></marker>
+    </defs>
+
+    <text x="30" y="28" class="sv-t">Checkpointer 存储决策树(ADR-0007)</text>
+
+    <rect class="box" x="330" y="44" width="220" height="48" rx="2"/>
+    <text x="440" y="64" text-anchor="middle" class="sv-t">起点:写路径 fail-closed</text>
+    <text x="440" y="82" text-anchor="middle" class="sv-ss">checkpointer 是写路径硬依赖(ADR-0005)</text>
+
+    <line class="edge" x1="440" y1="92" x2="440" y2="118" marker-end="url(#arR)"/>
+
+    <rect class="box-warn" x="280" y="120" width="320" height="52" rx="2"/>
+    <text x="440" y="142" text-anchor="middle" class="sv-t">Q1:本负载 Redis 延迟优势兑现吗?</text>
+    <text x="440" y="162" text-anchor="middle" class="sv-ss">super-step 含 LLM 0.5-5s;~0.5ms vs ~3ms &lt;1% 步耗时 → 不可感知</text>
+
+    <line class="edge" x1="440" y1="172" x2="440" y2="200" marker-end="url(#arR)"/>
+
+    <rect class="box-warn" x="280" y="202" width="320" height="52" rx="2"/>
+    <text x="440" y="224" text-anchor="middle" class="sv-t">Q2:挂起确认可以被丢/被逐出吗?</text>
+    <text x="440" y="244" text-anchor="middle" class="sv-ss">Redis 重启全丢 / AOF 丢失窗口 / allkeys-lru 逐出 → 生产事故级</text>
+
+    <line class="edge" x1="440" y1="254" x2="440" y2="282" marker-end="url(#arR)"/>
+
+    <rect class="box-warn" x="280" y="284" width="320" height="52" rx="2"/>
+    <text x="440" y="306" text-anchor="middle" class="sv-t">Q3:运维账谁更简?</text>
+    <text x="440" y="326" text-anchor="middle" class="sv-ss">PG 已在部署图(Langfuse/M4 pgvector)→ 选 PG 则 Redis 退栈,状态服务 2→1</text>
+
+    <line class="edge" x1="440" y1="336" x2="440" y2="360" marker-end="url(#arR)"/>
+
+    <rect class="box-ok" x="300" y="362" width="280" height="48" rx="2"/>
+    <text x="440" y="382" text-anchor="middle" class="sv-t">结论:倾向 Postgres(WAL+fsync 即持久)</text>
+    <text x="440" y="400" text-anchor="middle" class="sv-ss">补:清理 job(thread TTL)替代原生 TTL</text>
+
+    <!-- 旁支:若留 Redis -->
+    <rect class="box-danger" x="610" y="120" width="250" height="200" rx="2"/>
+    <text x="735" y="144" text-anchor="middle" class="sv-t">若最终选用 Redis</text>
+    <text x="735" y="166" text-anchor="middle" class="sv-s">底线三件套(缺一即有丢失风险)</text>
+    <text x="735" y="192" text-anchor="middle" class="sv-ss">① AOF 开启</text>
+    <text x="735" y="212" text-anchor="middle" class="sv-ss">② maxmemory-policy = noeviction</text>
+    <text x="735" y="232" text-anchor="middle" class="sv-ss">③ 内存容量规划</text>
+    <text x="735" y="252" text-anchor="middle" class="sv-ss">(会话数×平均 checkpoint 大小)</text>
+    <text x="735" y="278" text-anchor="middle" class="sv-ss">三者缺一 → 挂起确认有</text>
+    <text x="735" y="296" text-anchor="middle" class="sv-ss">静默丢失路径,须回写</text>
+    <text x="735" y="314" text-anchor="middle" class="sv-ss">ADR-0005 风险清单</text>
+    <line class="edge-dash" x1="600" y1="146" x2="606" y2="146" marker-end="url(#arR)"/>
+    <text x="600" y="138" text-anchor="middle" class="sv-ss" fill="#c0533a">else</text>
+  </svg>
+  </figure>
+  <p class="figcap">图 9 · Redis-vs-PG 决策树:三道闸问题(延迟兑现?/确认可丢?/运维谁简)→ 倾向 PG;若留 Redis 则底线三件套</p>
+</section>
+
+<!-- ================================================================ 13 待讨论 -->
+<section id="open-questions" class="sp-lg">
+  <div class="sec-no">13 / 待讨论 · 待拍板</div>
+  <h2>七大分歧、9 项待拍板、SEC-01 谈判清单、悬置项</h2>
+  <p class="sec-lede">今晚同步的核心战场。先看分歧双方立场与证据,再逐条对 9 项待拍板,最后是合并进一次谈判的 SEC-01 清单与三个悬置项。</p>
+
+  <h3 id="open-disputes">13.1 sync-agenda 七大分歧(A1-A7)</h3>
+  <table>
+    <thead>
+      <tr><th>#</th><th>分歧</th><th>原设计立场</th><th>grill / Zewang 立场</th><th>证据与备注</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>A1</td><td>GRA-02 意图分类</td><td>轻量模型分类 → 硬分发 4 子图</td><td>砍除,A 走 ReAct 单循环 + 按身份装配工具集(ADR-0003)</td><td>装配已覆盖分类的安全价值;每消息多一跳多一份 eval 面;分错即死胡同;router.py 未动</td></tr>
+      <tr><td>A2</td><td>move_interview 写工具</td><td>保留(3 个写工具之一)</td><td>拟砍 1</td><td>依据是后端事实非偏好:端点已 deprecated 下线(openapi:「已下线,改用 preferences/assign」);write.py 未动</td></tr>
+      <tr><td>A3</td><td>checkpointer 存储</td><td>Redis</td><td>Postgres(倾向)</td><td>对比见 §12.5 全维表 + 决策树;今晚拍板</td></tr>
+      <tr><td>A4</td><td>A 是否接飞书(INF-05..07 范围)</td><td>飞书一等入口(M3)</td><td>C 已定官网前端,其余入口不一定需要飞书,可能收缩 INF 范围</td><td>ADR-0003 入口通道范围悬置;结论可能收缩 INF 模块范围,届时更新 ADR</td></tr>
+      <tr><td>A5</td><td>B 触发方式</td><td>EVA-07=对话触发 + cron</td><td>grill=遥控器工具(trigger/progress);Zewang=简历导入后管理端「开始审核」按钮→自动触发</td><td>三方提案不互斥;共识底线:流水线本体固化为 graph+调度队列,变的只是触发面,全部汇入同一队列</td></tr>
+      <tr><td>A6</td><td>记忆路线</td><td>MEM-01..06 全排期</td><td>v1=checkpointer only,MEM-02..06 等第一个真实需求再启;RAG 倾向 Day1 接口化</td><td>触发条件:单会话 &gt;40 轮成常态(压缩);真实记忆需求出现(长期记忆)</td></tr>
+      <tr><td>A7</td><td>EVA-05 批判回炉</td><td>批判节点(自省重评)</td><td>重定义为「证据核验」:代码核引用真实性 + 模型核维度矛盾;纯自省无新信息</td><td>悖论分工:字符串核验在脱敏文本内,语义矛盾查给模型;提示注入检测职责迁入护栏</td></tr>
+    </tbody>
+  </table>
+
+  <h3>事实修正(4 项,非偏好分歧,建议直接修)</h3>
+  <table>
+    <thead>
+      <tr><th>#</th><th>事实</th><th>内容</th><th>建议</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>修正 1</td><td>工具↔端点漂移 12 条</td><td>幽灵端点×2(get_resume_detail / get_recruit_statistics 指向不存在或未实现的端点)、方法漂移×4(search_resumes POST→GET、handle_reschedule POST→PUT)、签名缺必填 cycleId×2(get_my_interview / list_reschedule_requests)、submit_resume_score 的 comment 后端不收(PUT /score body 仅 score int)等,全表见 §14.2</td><td>修不修、谁修待同步</td></tr>
+      <tr><td>修正 2</td><td>MCP 文档残留</td><td>mcp_server.py docstring 仍写「经 langchain-mcp-adapters 消费」+ pyproject 残留该依赖(ADR-0003 已定进程内直连,MCP 纯对外)</td><td>清理(冻结到同步后)</td></tr>
+      <tr><td>修正 3</td><td>README 漂移</td><td>README 架构图仍画「意图分类」与记忆全量排期,与 ADR 表述漂移</td><td>更新</td></tr>
+      <tr><td>修正 4</td><td>get_my_interview 未注册 MCP(8/9)</td><td>若有意(需本人令牌)请注明</td><td>注明意图或补注册</td></tr>
+    </tbody>
+  </table>
+
+  <h3>共同空白(4 项,双方都没设计过)</h3>
+  <table>
+    <thead>
+      <tr><th>#</th><th>空白</th><th>要点</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>空白 1</td><td>thread 生命周期五点</td><td>诞生/属主/并发/终结/跨入口 + 属主权限(详见 §01 与 §15.3)</td></tr>
+      <tr><td>空白 2</td><td>PII 分层边界</td><td>trace 在脱敏前记录原始简历(工具返回→Langfuse 采集顺序);模型输出侧无 PII 守卫;checkpointer 挂起载荷含 PII——脱敏从「节点」升级为「边界」(详见 §03)</td></tr>
+      <tr><td>空白 3</td><td>SEC-01 后端谈判清单终版</td><td>服务账号 + X-On-Behalf-Of + GET /api/auth/me + 审计写入端点 + B 草稿/评审端点 + score 依据落库扩展——合并一次谈(详见 §13.3)</td></tr>
+      <tr><td>空白 4</td><td>设计方案 §05 工具表入库</td><td>请入库(现只存于飞书/本地,upstream docs/ 404)</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="open-gap9">13.2 gap-scan 9 项待拍板(下一轮 grill 前沿)</h3>
+  <ol class="mono">
+    <li><b>trace PII 边界</b>(隐私边界缺口 核心):脱敏下沉到工具返回层 vs trace 采集点二次脱敏 + payload 禁入清单</li>
+    <li><b>B 触发仲裁</b>:EVA-07「对话触发」vs ADR-0003「调度直连」——建议:对话=遥控器(trigger/progress 工具入队),不是重路由</li>
+    <li><b>审计权威存储</b>:agent Postgres(M4)/后端端点(扩 SEC-01 谈判)/文件+聚合</li>
+    <li><b>thread 生命周期契约</b>(会话管理缺口):命名/属主/并发串行化/SSE 确认上行+续流协议</li>
+    <li><b>评审确认机制 + 分数卡 schema</b>(评分流水线账本缺口 核心,联动后端谈判)</li>
+    <li><b>RAG 接口</b>(上轮悬置):RAG 形接口 Day1 + 实现分两步</li>
+    <li><b>EVA-05 重定义</b>(上轮悬置+新悖论):核验需对照原文 vs 原文已脱敏——分工:确定性字符串核验(脱敏文本内)+模型维度矛盾检查</li>
+    <li><b>eval 可执行性流程</b>(评测可执行性缺口):数据集分发方式/secrets 方案/基线流程/judge 校准</li>
+    <li><b>SEC-01 谈判清单终版</b>:代理身份三件套 + 审计端点/草稿端点/评分扩展(依据落库)——把评分流水线账本缺口/5 的后端依赖合并成一次谈判</li>
+  </ol>
+
+  <h3 id="open-sec01">13.3 SEC-01 谈判清单终版(一次 PR 谈完)</h3>
+  <div class="dcard pend">
+    <div class="d-head"><h3>SEC-01 后端谈判清单</h3><span class="st-badge st-pend">❓ 待拍板</span><span class="st-cat">待讨论</span></div>
+    <div class="d-rows">
+      <div class="d-row"><span class="k">结论</span><span class="v">把评分流水线账本缺口/5 的后端依赖合并成一次谈判(一次 PR):<b>①最小权限服务账号;②X-On-Behalf-Of 请求头;③GET /api/auth/me;④审计写入端点;⑤B 草稿/评审端点;⑥score 依据落库扩展(PUT /score 只收 int 的缺口)</b>。①②③是代理身份三件套(ADR-0006),④⑤⑥是审计与 B 数据面的落库通道。</span></div>
+      <div class="d-row"><span class="k">为什么合并</span><span class="v">六个增量共用同一后端负责人与同一 PR 通道;拆开谈六次,每次都有「下一轮再补」的风险;合并后 agent 侧依赖单一同步点。</span></div>
+      <div class="d-row"><span class="k">退路</span><span class="v">若后端拒绝增量:agent 进程内单防线(每个管理工具执行前二次校验会话 role,审计仍记录 acting user,但明写「单防线、风险自负」,ADR-0006)。</span></div>
+      <div class="d-row"><span class="k">状态</span><span class="v"><span class="st-badge st-pend">❓ 待拍板</span> 待拍板清单第 9 项;共同空白(SEC-01 清单终版)。</span></div>
+      <div class="d-row"><span class="k">出处</span><span class="v">ADR-0006;gap-scan 待拍板清单第 3 项/#5/#9;评分流水线账本缺口与审计链缺口。</span></div>
+    </div>
+  </div>
+
+  <h3 id="open-suspended">13.4 悬置项(三个)</h3>
+  <div class="split">
+    <div class="panel">
+      <h4>飞书范围(INF-05..07)</h4>
+      <ul>
+        <li>C 已由项目所有者确认放官网管理端前端</li>
+        <li>A 是否接飞书(INF-05..07)还是仅官网 SSE + CLI——待与原设计者讨论(2026-08-24 提出)</li>
+        <li>结论可能收缩 INF 模块范围,届时更新 ADR-0003</li>
+        <li>遗留场景:若飞书 bot 同时服务候选人与面试官,webhook 层需按群绑定/身份分发——v1 不做</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h4>RAG 最终确认</h4>
+      <ul>
+        <li>方向倾向:Day1 接口化 + 小语料实现 + 后端可换(§05)</li>
+        <li>最终确认悬置,待拍板清单第 6 项</li>
+      </ul>
+      <h4>EVA-05 拍板</h4>
+      <ul>
+        <li>重定义方向共识(证据核验)</li>
+        <li>悖论分工(字符串核验 vs 语义矛盾)待拍板清单第 7 项</li>
+        <li>提示注入检测职责安置未定</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 14 缺漏扫描 -->
+<section id="gap-scan" class="sp-lg">
+  <div class="sec-no">14 / 缺漏扫描情要</div>
+  <h2>12 条工具↔端点漂移 + eval 四卡点</h2>
+  <p class="sec-lede">来源:4 个并行调研子代理(scout,A 入口面 / B 流水线+工具层 / C Copilot / SEC·OBS·MEM 横切面),对照 ADR-0003~0006、65 个 issue、后端 openapi.yaml 与 Agent 仓库代码逐条核实,去重后的收敛视图。</p>
+
+  <p class="tbl-note">七组缺口(会话管理 / 隐私边界 / 评分流水线账本 / 决策与代码不一致 / 审计链 / 评测可执行性 / 护栏细节)的完整场景与严重度分级见 <code>docs/gap-scan-2026-08-24.md</code>;各组要点已收录于本文 §01–§10 对应章节。</p>
+
+  <h3 id="gap-drift">14.2 工具 ↔ 端点漂移总表(12 行,ScanB 逐条对照 openapi 核实)</h3>
+  <table>
+    <thead>
+      <tr><th>工具</th><th>桩内声明</th><th>openapi 实际</th><th>判定</th></tr>
+    </thead>
+    <tbody>
+      <tr class="drift"><td>get_open_cycle</td><td>GET /api/cycles/open</td><td>✅存在;返回<strong>无 status 字段</strong></td><td>docstring 字段漂移</td></tr>
+      <tr class="drift"><td>search_resumes</td><td><strong>POST</strong> /api/resumes/search,参数 department/keyword/status</td><td><strong>GET</strong>;参数 expectedDepartment/name/major;无 keyword</td><td>方法+参数漂移</td></tr>
+      <tr class="drift"><td>get_resume_detail</td><td>GET /api/resumes/{id}</td><td><strong>不存在</strong>;实际 GET /api/resumes/admin/{userId}/{cycleId}</td><td>幽灵端点+签名要改</td></tr>
+      <tr class="drift"><td>get_my_interview</td><td>GET /api/interview/schedule/my</td><td>✅存在;<strong>cycleId 必填缺失</strong></td><td>签名漂移;未注册 MCP</td></tr>
+      <tr class="drift"><td>find_available_sessions</td><td>…available-sessions + date 过滤</td><td>✅存在;过滤仅 deptId</td><td>date 需客户端过滤,注明即可</td></tr>
+      <tr><td>list_unassigned</td><td>…unassigned</td><td>✅存在</td><td>无漂移</td></tr>
+      <tr class="drift"><td>list_reschedule_requests</td><td>status="pending"(str)</td><td>✅存在;<strong>cycleId 必填缺失</strong>;status 为 int 0/1/2</td><td>参数漂移</td></tr>
+      <tr class="drift"><td>get_recruit_statistics</td><td>GET /api/interview/statistics</td><td><strong>deprecated「未实现,代码中无此接口」</strong></td><td>幽灵端点,需重映射</td></tr>
+      <tr><td>get_candidate_card</td><td>…/evaluation/cycles/…</td><td>✅存在(省略 /interview/ 前缀)</td><td>契约 OK;权限链见 </td></tr>
+      <tr class="drift"><td>move_interview</td><td>POST manual-adjust</td><td>deprecated 已下线(实为 PUT)</td><td>已砍未删</td></tr>
+      <tr class="drift"><td>handle_reschedule</td><td><strong>POST</strong> …handle</td><td><strong>PUT</strong>;body=status int+adminNote</td><td>方法漂移</td></tr>
+      <tr class="drift"><td>submit_resume_score</td><td>PUT …/score,score:float+comment</td><td>✅PUT;<strong>int 0~100,body 仅 score 无 comment</strong></td><td>类型漂移+comment 无通道</td></tr>
+    </tbody>
+  </table>
+  <p class="tbl-note">另:handle_reschedule approve=true 只同意改期,<b>重排无工具</b>(后端要求「随后人工重排」,替代端点 /preferences/{resumeId}/assign 未包装)。</p>
+
+  <h3 id="gap-eval">14.3 eval 体系不可执行性四卡点</h3>
+  <div class="split">
+    <div class="panel">
+      <h4>卡点 1:CI 拿不到 key</h4>
+      <p>fork PR 无 secrets → CI 拿不到 ANTHROPIC_API_KEY,门禁跑不了。</p>
+      <h4>卡点 2:checkout 无数据</h4>
+      <p>标注集 gitignore 不入库 → CI checkout 无数据,即使有 key 也没得跑。</p>
+    </div>
+    <div class="panel">
+      <h4>卡点 3:基线无流程</h4>
+      <p>基线冷启动/更新权/LLM 非确定性 flaky 无流程;eval 成本($3-8/轮)无预算归属,谁付未定。</p>
+      <h4>卡点 4:judge 同源偏差</h4>
+      <p>judge 与主模型同源(sonnet 评 sonnet)偏差未校准;prompt 双事实源冲突需定文件唯一权威。</p>
+    </div>
+  </div>
+  <p class="note">修复方案见 §10(eval 可执行性修复,待拍板清单第 8 项)。</p>
+</section>
+
+<!-- ================================================================ 15 今晚同步 -->
+<section id="tonight-sync" class="sp-lg">
+  <div class="sec-no">15 / 今晚同步议程</div>
+  <h2>归属地图 · 建议谈判顺序 · thread 五点与原则</h2>
+  <p class="sec-lede">总原则:不单方面改原设计者的代码——所有涉及骨架代码的清理已冻结,待本晚同步后再动。</p>
+
+  <h3 id="sync-ownership">15.1 归属地图(谁的东西)</h3>
+  <table>
+    <thead>
+      <tr><th>内容</th><th>归属</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Agent 仓库骨架(8f532d2 脚手架 + 885a169 文档修正,289 行,含 12 工具桩/router/CI)</td><td>原设计者</td></tr>
+      <tr><td>CLAUDE.md「Agent skills」块 + Official_Web_Agent/docs/agents/*(tracker/domain 配置)</td><td>Zewang 侧(2026-08-24)</td></tr>
+      <tr><td>工作区根文档仓库(CONTEXT.md 增补 / ADR-0001..0006 / gap-scan / 本文档)</td><td>Zewang + 架构评审会话;<b>ADR-0003/0005 含对原设计的变更,尚未与原设计者同步</b></td></tr>
+      <tr><td>65 个 issues(upstream Boyuan-IT-Club)</td><td>原设计者起草</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="sync-order">15.2 建议谈判顺序</h3>
+  <div class="chain">
+    <span class="node curr">先拍分歧 A1-A7</span><span class="arrow">→</span>
+    <span class="node">事实修正直接过(上面 4 项)</span><span class="arrow">→</span>
+    <span class="node">共同空白共建(上面 4 项)</span><span class="arrow">→</span>
+    <span class="node">按结论改 ADR Status</span>
+  </div>
+  <ul>
+    <li><b>先拍分歧 A1-A7</b>:决策相关,阻塞后续所有落地(意图分类砍否 / move_interview 砍否 / checkpointer 存储 / 飞书范围 / B 触发面 / 记忆路线 / EVA-05 重定义)。</li>
+    <li><b>事实修正直接过(上面 4 项)</b>:非偏好分歧,证据在 openapi 与仓库代码里,建议同步当场确认后直接修,不占谈判时间。</li>
+    <li><b>共同空白共建(上面 4 项)</b>:双方都没设计过,按共同决策走:thread 五点、PII 边界、SEC-01 谈判清单、设计方案 §05 入库。</li>
+  </ul>
+  <p class="note">每拍一个分歧,若与 ADR 冲突则当场更新对应 ADR 的 Status / 内容(ADR-0003/0005 含对原设计的变更;ADR-0007 同步后按结论改 Accepted / superseded)。</p>
+
+  <h3 id="sync-thread">15.3 thread 五点 + 原则(已记录,双方共建)</h3>
+  <ol>
+    <li><b>诞生</b>:thread_id 命名规则 = 入口:用户:随机段(防猜防跨入口互踩)。</li>
+    <li><b>属主</b>:恢复/读取必须校验 thread 属主——否则可枚举翻别人会话(PII)。</li>
+    <li><b>并发</b>:同 thread 消息串行化(锁/队列),防 checkpointer 冲突与确认令牌错配。</li>
+    <li><b>终结</b>:TTL 与 SEC-06 留存对齐;挂起确认载荷按 PII 处理。</li>
+    <li><b>跨入口</b>:同一用户换入口接旧 thread 还是新开(v1 建议:新开)。</li>
+  </ol>
+  <div class="callout">
+    <span class="t">原则(Zewang)</span>
+    每个用户只能控制 / 访问自己的信息;<b>权限校验在恢复路径,不在仅创建路径</b>——创建时校验挡不住「知道 thread_id 就来恢复」的枚举攻击,恢复/读取路径才是 PII 防线的最后一道。
+  </div>
+</section>
+
+<footer>
+  <p><b>Grill 会话全记录 · 2026-08-24</b> — Official_Web_Agent 架构同步底稿。事实来源:docs/adr/0003~0007 · docs/gap-scan-2026-08-24.md · docs/sync-agenda-2026-08-24.md · CONTEXT.md · Official_Web_Agent/{CLAUDE.md,README.md}(原始 scout 调研记录为会话内部产物,关键场景已全部收入本文与 gap-scan)。</p>
+  <p>状态徽章:🔄 待同步(评审会话形成,待与原设计者确认) · ❓ 待拍板(方向未定,共同决定)。冻结条款(2026-08-24):所有涉及原设计者骨架代码的清理项,在 sync-agenda §A/§B 同步之前不动一行。</p>
+  <p>单文件自包含 · 零外部 JS/CSS(仅 Google Fonts link)· 9 幅手写 SVG · prefers-reduced-motion 已支持 · 可离线阅读</p>
+</footer>
+
+</main>
+</div>
+</body>
+</html>
+
