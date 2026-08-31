@@ -15,11 +15,15 @@ uv run python -m evals  # eval 集(需要模型 API key,CI 中作为门禁)
 ## 架构要点
 
 - `tools/` 是确定性层:后端 API 的语义化封装,全部可单测;工具粒度对齐意图而非接口,
-  返回做投影裁剪,错误信息必须可行动
-- `graphs/` 是编排层:router 主图按身份+意图分发到子图;**写操作必须经 `interrupt()`
-  人工确认**,写工具在代码层校验确认令牌,无令牌抛错
+  返回做投影裁剪,错误信息必须可行动;agent 进程内直连函数,MCP 仅对外(ADR-0003)
+- `graphs/` 是编排层(ADR-0003,无意图分类):A=身份解析→按角色装配工具集→ReAct
+  单循环;B=调度器直连批处理图;C=宿主界面直连三态图。**写操作必须经 `interrupt()`
+  人工确认**,令牌=interrupt 恢复凭证(操作指纹绑定、一次性,ADR-0005)
 - 权限边界在工具装配层(按会话身份决定可见工具集),不靠 prompt 约束
-- prompt 全部放 `prompts/` 版本化管理,不散落在代码字符串里
+- 状态存储:checkpointer/长期记忆/审计均用 Postgres,Redis 不在 agent 栈(ADR-0007)
+- prompt 全部放 `prompts/` 版本化管理(一图一节点一文件 + frontmatter,ADR-0004),
+  模型路由默认 strong,降 light 须 eval 证明
+- 失败哲学:观测 fail-open,写路径 fail-closed(ADR-0005)
 
 ## 安全红线
 

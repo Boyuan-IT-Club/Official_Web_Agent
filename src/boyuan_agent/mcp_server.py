@@ -1,8 +1,7 @@
-"""MCP Server(TOOL-02):把工具层对外暴露。
+"""MCP Server(TOOL-02):工具层的纯对外暴露面(ADR-0003)。
 
-用法:
-- 本地 Claude Code 挂载(stdio):`uv run python -m boyuan_agent.mcp_server`
-- agent 内部经 langchain-mcp-adapters 消费同一套工具(TOOL-07)
+仅供外部消费者(Claude Code 等)挂载:`uv run python -m boyuan_agent.mcp_server`。
+agent 进程内不走 MCP 回环——直接绑定 tools/ 下的 Python 函数(TOOL-07)。
 """
 
 from mcp.server.fastmcp import FastMCP
@@ -11,7 +10,9 @@ from boyuan_agent.tools import readonly
 
 mcp = FastMCP("boyuan-backend")
 
-# 只读工具逐个注册;写工具(tools/write.py)仅在 agent 内部装配,不经 MCP 对外暴露
+# 只读工具注册。有意不注册的:
+# - get_my_interview:需最终用户本人令牌,服务账号语义下无意义
+# - 写工具(tools/write.py):仅在 agent 进程内经 interrupt 确认流程装配
 for fn in (
     readonly.get_open_cycle,
     readonly.search_resumes,

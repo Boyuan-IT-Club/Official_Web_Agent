@@ -18,9 +18,8 @@ class Settings(BaseSettings):
     model_light: str = "claude-haiku-4-5-20251001"
     model_strong: str = "claude-sonnet-5"
 
-    # 记忆
-    redis_url: str = "redis://localhost:6379/1"
-    postgres_url: str = ""  # M4 起启用
+    # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)
+    postgres_url: str = "postgresql://localhost:5432/boyuan_agent"
 
     # 飞书(M3)
     feishu_app_id: str = ""

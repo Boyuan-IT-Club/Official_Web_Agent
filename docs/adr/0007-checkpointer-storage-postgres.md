@@ -1,7 +1,8 @@
 # ADR-0007: Checkpointer 存储选型——倾向 Postgres
 
-- **Status**: Proposed(Zewang 倾向 PG;原设计者倾向 Redis,待 2026-08-24 晚同步,
-  详见 docs/sync-agenda-2026-08-24.md 附录)
+- **Status**: Accepted(2026-08-25 原设计者拍板:选 Postgres。附加决定:后端 MySQL
+  不迁移;不采用 Redis 向量方案;agent 栈独立加一个 PG 实例部署于 Node B;
+  Langfuse 生产部署延后,M1–M2 先跑开发机)
 - **Date**: 2026-08-24
 
 ## Context

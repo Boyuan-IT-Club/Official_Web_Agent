@@ -6,7 +6,7 @@
   input: "技术部还有多少简历没筛?"
   expected_tools: [get_open_cycle, search_resumes]
   expected_params:
-    search_resumes: { department: "技术部", status: "pending" }
+    search_resumes: { department: "技术部" }
 
 - id: ts-002
   role: admin

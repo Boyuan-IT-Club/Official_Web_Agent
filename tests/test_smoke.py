@@ -3,7 +3,7 @@
 import pytest
 
 from boyuan_agent.config import Settings
-from boyuan_agent.tools.write import ConfirmationRequired, move_interview
+from boyuan_agent.tools.write import ConfirmationRequired, assign_interview
 
 
 def test_settings_defaults() -> None:
@@ -14,4 +14,4 @@ def test_settings_defaults() -> None:
 
 async def test_write_tool_requires_confirmation_token() -> None:
     with pytest.raises(ConfirmationRequired):
-        await move_interview(schedule_id=1, session_id=2, confirmation_token=None)
+        await assign_interview(resume_id=1, target_session_id=2, confirmation_token=None)
