@@ -12,6 +12,16 @@ uv run pytest           # 单测(确定性代码:tools/、图结构)
 uv run python -m evals  # eval 集(需要模型 API key,CI 中作为门禁)
 ```
 
+## 本地 Langfuse(OBS-01)
+
+```bash
+cd deploy/langfuse && docker compose up -d   # web: http://127.0.0.1:3001
+```
+
+凭证在 `deploy/langfuse/.env`(gitignore,模板 `.env.example`);同目录 PG 暴露
+127.0.0.1:5432,checkpointer/审计(MEM-01/SEC-03)复用该实例。trace 接线:
+`from boyuan_agent.observability import langfuse_callbacks`——fail-open,未配置自动降级。
+
 ## 架构要点
 
 - `tools/` 是确定性层:后端 API 的语义化封装,全部可单测;工具粒度对齐意图而非接口,

@@ -18,6 +18,7 @@ dependencies = [
     "langfuse>=2.60",
     "typer>=0.15",
     "rich>=13",
+    "langchain>=1.0",
 ]
 
 [dependency-groups]
