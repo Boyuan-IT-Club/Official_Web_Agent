@@ -55,6 +55,11 @@ uv run boyuan-agent chat --role admin   # CLI 对话(M1)
 uv run python -m boyuan_agent.mcp_server  # 启动 MCP Server(stdio)
 ```
 
+## 文档
+
+- **[docs/design.md](docs/design.md)** —— 设计方案 v0.2:愿景/目标/三模块/架构/工具映射/里程碑(同步议程第 15 项要求的入库版)
+- `docs/adr/` —— 架构决策记录;`docs/gap-scan-2026-08-24.md` 等评审产物
+
 ## 开发约定
 
 - prompt 与图结构变更等同代码变更,一律走 PR;eval 分数低于基线不合入
