@@ -1,89 +1,91 @@
-# SEC-01 后端谈判清单(终版待谈)
+# SEC-01 后端增量:核实版决策清单
 
 > 目的:agent(Boyuan-IT-Club/Official_Web_Agent)上线前需要后端
-> (Official_Web_Backend)的一组增量。本文是谈判底稿:每项写清为什么需要、
-> 后端改动量评估、以及后端拒绝时的退路——供后端负责人逐项决策。
-> 状态:待与后端负责人过一次会(预计 30~45 分钟);谈完本文升级为决议记录。
-> 关联:ADR-0006(代理身份与审计契约,Proposed)· issue #52 · #69
+> (Official_Web_Backend)的一组增量。本文每项已按后端代码逐条核实
+> (2026-09-01),给出实现挂载点与真实改动量,供后端负责人逐项拍板。
+> 状态标记:【待拍板】【已核实待做】【建议放弃】。
+> 关联:ADR-0006 · issue #52 · #69
 
-## 背景(为什么有这次谈判)
+## 背景一句话
 
-agent 全程持一个**服务账号 JWT** 调后端。后端只认 JWT 里的 permissionCodes,
-于是:后端视角所有请求都是服务账号——**权限判定与审计都丢失「最终用户是谁」**。
-目前 agent 侧唯一的防线是「按身份装配工具集」(候选人会话物理拿不到管理员工具),
-但这是单防线:一旦工具装配出错或被绕过,后端无任何拦截。
+agent 全程持服务账号 JWT 调后端,后端只认 JWT 里的 permissionCodes——
+权限判定与审计都丢失「最终用户是谁」;另有评估流水线的评分数据无处落库。
 
-另有一组评估流水线(简历初筛)的数据通道需求:后端现有 `PUT /api/resumes/{id}/score`
-只收一个 int,评分的维度分与依据没有落库通道。
+---
 
-## 谈判项
+## 第 1 项 最小权限服务账号【已核实,纯 SQL,零 Java】
 
-### 1. 最小权限服务账号
+- **代码事实**:RBAC 五表齐备(`V6__core_schema_baseline.sql:77-130`:
+  user/role/permission/user_role/role_permission);user 表有
+  status(0禁用/1启用)列(:61),无需新增机器账号标记列。
+- **做法**:一个 Flyway 迁移(V33+)——INSERT `svc-agent` 用户行 + 新建
+  `AGENT_SERVICE` 角色 + 按现有 permission_code(非硬编码 id!)关联最小权限集。
+- **⚠ 必须遵守的既有教训**(权限种子事故,V13→V18 复盘):种子禁止
+  「硬编码 permission_id + INSERT IGNORE」——线上 id 已被手工数据占用时会静默
+  跳过。按 `permission_code` 存在性插入(V18 模式)。
+- **权限集建议**:user:view + resume:view + 简历检索相关只读 + 面试管理端点
+  所需码(与 agent 工具面对照后定稿)。
 
-- **要什么**:一个 agent 专用账号(如 `svc-agent`),权限收敛到工具集所需最小集
-  (只读查询 + 面试安排 + 评分写入),不挂超管。
-- **为什么**:现在本地联调借管理员账号,生产不能这么做;权限最小化是审计前提。
-- **后端改动**:建账号 + 角色绑定,纯数据操作(迁移或后台配置),零代码。
-- **退路**:无——这是硬前提,但成本极低。
+## 第 2 项 X-On-Behalf-Of 代理头【已核实,中等工作量】
 
-### 2. `X-On-Behalf-Of: <user_id>` 请求头
+- **代码事实**:
+  - 过滤链顺序(SecurityConfig.java:88-90):serviceTokenFilter → jwtFilter
+    → UsernamePasswordAuthenticationFilter。**挂载点明确:jwtFilter 之后**。
+  - JWT claims 已含 userId/roleNames/permissionCodes(JwtTokenUtil.java:104),
+    服务账号 JWT 先正常认证,再读代理头。
+  - 下游判定点已定位:`EvaluationBoardServiceImpl.getCandidateResume`
+    (:154-164)的场次绑定校验 `isInterviewerOf(sessionId, viewerUserId)`——
+    2005 的来源,viewerUserId 正是代理头要替换的输入。
+- **做法**:新薄 Filter(~60 行,参照 ServiceTokenAuthenticationFilter 的
+  OncePerRequestFilter 模式)——仅当 principal 为服务账号时读
+  `X-On-Behalf-Of: <user_id>` 装入 request attribute/SecurityContext details;
+  下游 4~5 个取 viewerUserId 的调用点改为「有代理头用代理头」。
+- **安全边界(必须)**:普通用户 JWT 携带此头一律忽略——防用户伪造他人代理;
+  服务账号 + 代理头 = 双重身份,服务账号裸调(无头)维持现有行为(2005)。
 
-- **要什么**:agent 请求带此头时,后端按**最终用户**身份判权限、记审计;
-  按现有 RBAC(permissionCodes)叠加判定即可,不需要新权限模型。
-- **为什么**:防线从一层(工具装配)变两层(装配 + 后端判定);审计需要归因到人。
-  已有现实阻塞:评价看板端点有场次绑定校验,服务账号直调会 2005——Copilot 的
-  候选人卡片工具已经实现(Tools 仓库 `get_candidate_card`),等此头落地即活。
-- **后端改动**:过滤器识别头 → 以代理用户身份进权限链路。估计一个 Filter +
-  审计日志字段,中等工作量。
-- **退路**:agent 单防线运行,风险自负(在 ADR-0006 明写);Copilot 卡片功能延后。
+## 第 3 项 GET /api/auth/me【已核实,小工作量】
 
-### 3. `GET /api/auth/me`(JWT → 用户 + 角色)
+- **代码事实**:AuthController(6 个端点:register/login/logout/发码×2/
+  reset-password)无 /me;claims 已有 userId/roleNames/permissionCodes,
+  身份部分零查库,资料(name/email/avatar)一次 selectById。
+- **做法**:一个端点 + 一个 DTO(~40 行),从 SecurityContext 取当前用户。
+- **战略意义**:agent 验官网 token 不接触 JWT_SECRET(HS256 共享密钥,
+  持有即具备签发能力)——官网入口身份解析(GRA-01)的唯一非红线路径。
 
-- **要什么**:凭有效 JWT 换取该用户资料与角色/权限码。
-- **为什么**:①官网入口的身份解析(候选人/管理员)需要验官网 token,agent 不能
-  也不该接触 JWT_SECRET(HS256 共享密钥,持有即具备签发能力);②一石二鸟,
-  这就是身份解析节点的实现路径。
-- **后端改动**:一个只读端点,从 SecurityContext 取当前用户返回。工作量小。
-- **退路**:无等价替代(自解 JWT 需要密钥,违反红线)。此项若拒,官网入口阻塞。
+## 第 4 项 审计权威存储【待拍板,倾向 b,后端零改动】
 
-### 4. 审计写入端点(或确认 agent 侧存储)
+- **代码事实**:后端无任何审计表/审计端点(grep 全库无 audit 命中)。
+- **三选一**:a) 后端建审计表+内部端点;b) **agent 侧 Postgres(倾向)**——
+  agent 行为的审计跟着 agent 走,badcase 回流(OBS-06)同库串联 trace_id;
+  c) 文件+聚合。
+- 选 b 后端零改动,只需在本文确认。
 
-- **要什么**:三选一——a) 后端提供内部审计写入端点; b) 确认审计权威存储在
-  agent 侧 Postgres(后端不管 agent 行为审计); c) 文件 + 聚合脚本。
-- **为什么**:写操作(interrupt 确认后的执行)必须有不可抵赖的审计行
-  (谁授意/哪个 agent 节点/什么操作/谁确认/trace_id)。现 Langfuse trace 可删可改,
-  不能当权威存储。
-- **后端改动**:选 a 才有(内部端点 + 表);选 b/c 后端零改动。
-- **倾向**:b(agent 侧 Postgres)——agent 行为的审计跟着 agent 走,后端不背
-  这个域;但需要拍板。
+## 第 5 项 评估草稿/评审端点【已核实,大,单独排期】
 
-### 5. 评估流水线的草稿/评审端点(评分数据面)
+- **代码事实**:`PUT /api/resumes/{resumeId}/score`(ResumeController:312-319)
+  只收 int,注释自述「resume_score 列此前只有飞书导出在读」;已带打分人署名
+  (`updateResumeScore(..., currentUser().getUserId())`)——署名链路可复用。
+- **需要**:草稿表(resume_id/cycle_id/维度分+依据 JSON/量规版本/prompt 版本/
+  状态/评审人)+ 暂存/列表/确认落库 3~4 端点。schema 草案由 agent 侧 #69 出。
+- **不阻塞**第 1~3 项;评估结果过渡期可落 agent 侧 PG + 飞书多维表格。
 
-- **要什么**:简历评估的写回通道——按周期批量:草稿暂存(维度分 + 每维度依据
-  引用 + 量规版本 + prompt 版本)→ 人工评审确认 → 落库。
-- **为什么**:现在 `PUT /api/resumes/{id}/score` 只收 int;维度分与依据没有通道,
-  评估流水线(M2)的产出无处可去。schema 草案由 agent 侧出(issue #69),
-  谈判时对齐字段即可。
-- **后端改动**:两张表(草稿 + 评审记录)+ 3~4 个端点。本清单里最大的一项,
-  可单独排期,不阻塞 1~3。
-- **退路**:评估结果先落 agent 侧 Postgres + 飞书多维表格推送(已有 issue 覆盖),
-  后端通道缓到 v2——代价是评分数据不在官网展示。
+## 第 6 项 面试统计端点【建议放弃】
 
-### 6. (低优先)面试统计端点
+- **代码事实**:全库 Java 无 statistics 实现(仅 openapi 里 deprecated 标注)。
+- agent 侧聚合工具(PR #73)已真链路验证可用——后端不做。
 
-- **要什么**:`GET /api/interview/statistics` 类聚合端点(openapi 里标了
-  deprecated「未实现」)。
-- **为什么**:agent 的汇总统计工具现在靠 result/list + evaluation summary 两端点
-  聚合,能用;单端点更干净而已。
-- **退路**:现状可接受,谈不下就维持聚合。
+---
 
-## 建议谈判顺序
+## 拍板与执行顺序
 
-1 → 2 → 3 为一组(身份与权限,agent 上线硬依赖,后端改动小);
-4 顺带拍板(倾向 b,后端零改动);
-5 单独排期(M2 前);6 放弃也行。
+| 项 | 状态 | 后端工作量 | 建议顺序 |
+|---|---|---|---|
+| 1 服务账号 | 已核实待做 | 一个 SQL 迁移 | **第一批**(agent 生产前提) |
+| 3 /api/auth/me | 已核实待做 | ~40 行 | **第一批**(GRA-01 前置) |
+| 2 X-On-Behalf-Of | 已核实待做 | Filter+5 调用点 | 第二批(Copilot 卡片激活) |
+| 4 审计存储 | 待拍板(倾向 b) | 0 | 随第一批口头确认 |
+| 5 评估草稿端点 | 已核实待做 | 大 | M2 前单独排期 |
+| 6 统计端点 | 建议放弃 | — | — |
 
-## 谈完之后
-
-- 每项标「谈成/退路/放弃」,本文转为决议,ADR-0006 状态更新;
-- 后端侧开 issue 跟踪增量实现,agent 侧解锁对应 issue(#52 关闭条件)。
+第一批合计:一个迁移 + 一个端点,后端侧半天内;谈成即解除 agent 上线
+与官网入口两个阻塞。
