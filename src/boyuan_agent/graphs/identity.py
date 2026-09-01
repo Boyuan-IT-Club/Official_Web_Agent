@@ -76,18 +76,27 @@ async def _resolve_cli(credential: IdentityCredential) -> ResolvedIdentity:
         client = _client_as(username, credential.get("password") or "")
         try:
             token = await client.login()
+            claims = _decode_jwt_payload(token)
+            resolved = _identity_from_claims(claims, "cli")
         except BaseException:
+            # 登录失败/claims 解码失败:新建 client 关闭即弃,单例不动
+            # (解码失败若先换单例,会留下半激活身份且旧 client 已关无法回滚)
             await client.aclose()
             raise
         old = await get_backend_client()
         set_backend_client(client)
         if old is not client:
             await old.aclose()
+        return resolved
     else:
         # 未指定模拟账号:沿用 .env 服务账号(PAT 落地前的过渡)
         client = await get_backend_client()
         token = await client.login()
-    claims = _decode_jwt_payload(token)
+        claims = _decode_jwt_payload(token)
+        return _identity_from_claims(claims, "cli")
+
+
+def _identity_from_claims(claims: dict, source: str) -> ResolvedIdentity:
     user_id = claims.get("userId")
     if not isinstance(user_id, int) or isinstance(user_id, bool) or user_id <= 0:
         user_id = None
@@ -96,7 +105,7 @@ async def _resolve_cli(credential: IdentityCredential) -> ResolvedIdentity:
         role=_map_role(claims.get("roleNames") or []),
         role_names=claims.get("roleNames") or [],
         permission_codes=claims.get("permissionCodes") or [],
-        source="cli",
+        source=source,
     )
 
 

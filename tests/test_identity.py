@@ -168,7 +168,7 @@ async def test_resolve_cli_missing_user_id_degrades() -> None:
             mp.setattr("boyuan_agent.config.get_settings", mock_settings)
             identity = await resolve(IdentityCredential(kind="cli", username="ghost", password="x"))
         assert identity["user_id"] is None
-        assert resolve_identity(dict(identity))["role"] == "unknown"
+        assert resolve_identity(cast(AgentState, dict(identity)))["role"] == "unknown"
     finally:
         await cleanup_shared_client()
 
