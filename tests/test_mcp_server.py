@@ -153,3 +153,72 @@ async def test_http_transport_protocol_handshake():
     finally:
         httpd.should_exit = True
         await asyncio.wait_for(server_task, timeout=10)
+
+
+@respx.mock
+async def test_empty_list_result_still_has_content(mock_backend):
+    """SDK 对空 list 产出空 content(消费端视为工具没说话)——注册层包成
+    {count:0, results:[]} 保证空结果也可见。真链路测试抓到的回归。"""
+    respx.post("http://backend.test/api/auth/login").side_effect = httpx.Response(
+        201, json={"code": 200, "message": "ok", "data": {"token": "tok", "user_id": 1}}
+    )
+    respx.get("http://backend.test/api/cycles/open").side_effect = httpx.Response(
+        200, json={"code": 200, "message": "ok", "data": []}
+    )
+
+    from boyuan_agent.mcp_server import server
+
+    result = await server.call_tool("get_open_cycle", {})
+    assert not result.is_error
+    assert result.content, "空列表结果必须有 content"
+    assert '"count": 0' in result.content[0].text
+
+
+@respx.mock
+async def test_nonempty_list_result_is_single_json_block(mock_backend):
+    """非空 list 逐项转多块 content → 规范化为单块 {count, results}。"""
+    respx.post("http://backend.test/api/auth/login").side_effect = httpx.Response(
+        201, json={"code": 200, "message": "ok", "data": {"token": "tok", "user_id": 1}}
+    )
+    respx.get("http://backend.test/api/interview/admin/cycles/1/unassigned").side_effect = (
+        httpx.Response(
+            200, json={"code": 200, "message": "ok", "data": [{"userId": 3}, {"userId": 4}]}
+        )
+    )
+
+    from boyuan_agent.mcp_server import server
+
+    result = await server.call_tool("list_unassigned", {"cycle_id": 1})
+    assert len(result.content) == 1
+    assert '"count": 2' in result.content[0].text
+
+
+async def test_wrapper_preserves_signature_for_schema():
+    """wrapper 必须继承原签名,否则 add_tool 生成的参数 schema 退化。"""
+    from boyuan_agent.mcp_server import server
+
+    tools = {t.name: t for t in await server.list_tools()}
+    schema = tools["find_available_sessions"].input_schema
+    assert "cycle_id" in schema.get("required", [])
+    assert "date" in schema.get("properties", {})
+
+
+@respx.mock
+async def test_backend_error_message_survives_to_model(mock_backend):
+    """真链路抓到的回归:BackendError 被 SDK 当 crash 包成 generic 错误,
+    可行动文案丢失(ADR-0005)——wrapper 转 ToolError 保住文案。"""
+    respx.post("http://backend.test/api/auth/login").side_effect = httpx.Response(
+        201, json={"code": 200, "message": "ok", "data": {"token": "tok", "user_id": 1}}
+    )
+    respx.get("http://backend.test/api/resumes/admin/1/1").side_effect = httpx.Response(
+        404, json={"code": 3001, "message": "简历不存在"}
+    )
+
+    from boyuan_agent.mcp_server import server
+
+    # 进程内便捷方法抛 ToolError(SDK v2 语义);协议路径(session.call_tool)
+    # 将其转成 is_error result 且文案进 content——两条路径文案都必须保住
+    with pytest.raises(ToolError) as exc_info:
+        await server.call_tool("get_resume_detail", {"user_id": 1, "cycle_id": 1})
+    assert "简历不存在" in str(exc_info.value)
+    assert "search_resumes" in str(exc_info.value)  # 可行动指引必须到达模型
