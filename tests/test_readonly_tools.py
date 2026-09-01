@@ -180,14 +180,18 @@ async def test_get_recruit_statistics_paginates_and_aggregates(
         ),
         ok({"total": 3, "interviewResults": [{"decision": 3, "assignedDeptId": None}]}),
     ]
-    # 评价表未开启 → 业务错误 → 统计仍要成功
+    # 评价表未开启 → 业务错误 → 统计仍要成功;search 提供投递总数
     respx.get(f"{BASE}/api/interview/evaluation/cycles/2/summary").side_effect = (
         httpx.Response(400, json={"code": 3703, "message": "该周期尚无已分配的面试名单"})
+    )
+    respx.get(f"{BASE}/api/resumes/search").side_effect = ok(
+        {"content": [], "totalElements": 25}
     )
 
     stats = await get_recruit_statistics(cycle_id=2)
 
     assert list_route.call_count == 2
+    assert stats["totalResumes"] == 25
     assert stats["totalResults"] == 3
     assert stats["decisionCounts"] == {
         "pending": 0, "passed": 2, "rejected": 0, "toTransfer": 1,
@@ -219,3 +223,48 @@ async def test_get_backend_client_is_singleton(monkeypatch: pytest.MonkeyPatch) 
     c2 = await get_backend_client()
     assert c1 is c2
     set_backend_client(None)
+
+
+@respx.mock
+async def test_get_my_interview_body_auth_code_maps_to_relogin_hint(
+    mock_client: BackendClient,
+) -> None:
+    """HARD-1 回归:body 业务码过期(1002)不得泄漏 _AuthExpired 内部信号。"""
+    respx.post(LOGIN).side_effect = login_ok()
+    respx.get(f"{BASE}/api/interview/schedule/my").side_effect = httpx.Response(
+        409, json={"code": 1002, "message": "token已过期"}
+    )
+
+    with pytest.raises(BackendError, match="重新登录"):
+        await get_my_interview(cycle_id=2, user_token="expired")
+
+
+@respx.mock
+async def test_get_my_interview_timeout_maps_to_actionable_error(
+    mock_client: BackendClient,
+) -> None:
+    """HARD-2 回归:网络异常映射为可行动文案,不裸抛 httpx 异常。"""
+    respx.post(LOGIN).side_effect = login_ok()
+    respx.get(f"{BASE}/api/interview/schedule/my").side_effect = httpx.ReadTimeout("boom")
+
+    with pytest.raises(BackendError, match="后端连接失败"):
+        await get_my_interview(cycle_id=2, user_token="tok")
+
+
+@respx.mock
+async def test_get_candidate_card_requires_on_behalf_of(mock_client: BackendClient) -> None:
+    """判断项回归:缺代理身份 fail-fast,把「为什么被拒、要传什么」说在前面。"""
+    with pytest.raises(BackendError, match="on_behalf_of"):
+        await get_candidate_card(cycle_id=1, schedule_id=1, on_behalf_of=None)  # type: ignore[arg-type]
+
+
+@respx.mock
+async def test_statistics_contract_drift_fails_loudly(mock_client: BackendClient) -> None:
+    """核实项回归:result/list 缺 total 字段=契约漂移,显式报错而非静默截断。"""
+    respx.post(LOGIN).side_effect = login_ok()
+    respx.get(f"{BASE}/api/interview/result/list").side_effect = ok(
+        {"interviewResults": [{"decision": 1}]}  # 没有 total
+    )
+
+    with pytest.raises(BackendError, match="契约可能已变更"):
+        await get_recruit_statistics(cycle_id=1)

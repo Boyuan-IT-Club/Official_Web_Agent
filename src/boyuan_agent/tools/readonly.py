@@ -154,7 +154,7 @@ async def get_recruit_statistics(cycle_id: int) -> dict:
     后端无单一统计端点(原 /api/interview/statistics 未实现,已列入 SEC-01
     谈判清单),由 /api/interview/result/list(分页拉全量)与
     /api/interview/evaluation/cycles/{id}/summary 聚合计算。
-    返回:总人数、按最终决定(decision)计数、按分配部门计数、已评价人数;
+    返回:简历投递总数、按最终决定(decision)计数、按分配部门计数、已评价人数;
     看个人明细用 search_resumes / list_unassigned 下钻。
     """
     client = await get_backend_client()
@@ -166,7 +166,11 @@ async def get_recruit_statistics(cycle_id: int) -> dict:
         )
         batch = (data or {}).get("interviewResults", [])
         items.extend(batch)
-        total = (data or {}).get("total", len(items))
+        # 契约校验而非回退:键名漂移时显式报错,避免回退恒真导致分页静默截断
+        # (后端 InterviewResultResponseDTO 用 total,非通用分页的 totalElements)
+        total = (data or {}).get("total")
+        if total is None:
+            raise BackendError("result/list 响应缺少 total 字段,后端契约可能已变更")
         if len(items) >= total or not batch:
             break
         page += 1
@@ -187,8 +191,15 @@ async def get_recruit_statistics(cycle_id: int) -> dict:
     except BackendError:
         pass  # 该周期评价表未开启时无 summary,统计不因此失败
 
+    # 投递总数(含未提交草稿):search 的 totalElements;周期不存在时后端给空页
+    resumes = await client.get(
+        "/api/resumes/search", params={"cycleId": cycle_id, "page": 1, "size": 1}
+    )
+    total_resumes = (resumes or {}).get("totalElements")
+
     return {
         "cycleId": cycle_id,
+        "totalResumes": total_resumes,
         "totalResults": len(items),
         "decisionCounts": decision_counts,
         "assignedByDeptId": by_dept,
@@ -196,9 +207,7 @@ async def get_recruit_statistics(cycle_id: int) -> dict:
     }
 
 
-async def get_candidate_card(
-    cycle_id: int, schedule_id: int, on_behalf_of: int | None = None
-) -> dict:
+async def get_candidate_card(cycle_id: int, schedule_id: int, on_behalf_of: int) -> dict:
     """Copilot 用:候选人简历 + 该周期评价维度打包成一张卡片数据。
 
     对应 GET /api/interview/evaluation/cycles/{id}/candidates/{scheduleId}/resume
@@ -206,8 +215,14 @@ async def get_candidate_card(
     on_behalf_of(面试官 userId,经 X-On-Behalf-Of 代理身份,ADR-0006);
     该机制依赖 SEC-01 后端谈判落地,在此之前本工具直调必然被拒。
     """
+    if on_behalf_of is None:
+        # 服务账号直调必被场次绑定校验拒(2005);客户端把原因说在前面比后端报错可行动
+        raise BackendError(
+            "缺少面试官身份(on_behalf_of)。本工具需 X-On-Behalf-Of 代理身份,"
+            "SEC-01 后端谈判落地前仅 Copilot 场景可用"
+        )
     client = await get_backend_client()
-    headers = {"X-On-Behalf-Of": str(on_behalf_of)} if on_behalf_of else {}
+    headers = {"X-On-Behalf-Of": str(on_behalf_of)}
     base = f"/api/interview/evaluation/cycles/{cycle_id}/candidates/{schedule_id}"
     resume = await client.get(f"{base}/resume", headers=headers)
     dimensions = await client.get(f"{base}/dimensions", headers=headers)

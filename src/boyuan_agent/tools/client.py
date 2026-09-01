@@ -98,15 +98,24 @@ class BackendClient:
         与服务账号通道语义不同,故不做重登与重试:用户 token 无效/过期
         是另一类失败,如实抛 BackendError 由调用方引导用户重新登录,
         绝不能拿服务账号悄悄顶替。
+        出现第三个用户令牌工具时应拆出 UserTokenClient(review #73,SMELL)。
         """
         if not user_token:
             raise BackendError("缺少用户本人令牌(user_token),该操作必须以最终用户身份执行")
-        resp = await self._http.request(
-            "GET", path, params=params, headers={"Authorization": f"Bearer {user_token}"}
-        )
-        if resp.status_code == 401:
-            raise BackendError("用户令牌无效或已过期,需用户重新登录后重试")
-        return _interpret(resp)
+        try:
+            resp = await self._http.request(
+                "GET", path, params=params, headers={"Authorization": f"Bearer {user_token}"}
+            )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            # 用户令牌通道不自动重试(非幂等语义不明确),只映射成可行动文案
+            raise BackendError(
+                f"后端连接失败({type(exc).__name__}),稍后重试;持续失败请检查后端状态"
+            ) from None
+        try:
+            return _interpret(resp)
+        except _AuthExpired:
+            # body 业务码过期(1001-1003/2004/2006)与 HTTP 401 同文案,不泄漏内部信号
+            raise BackendError("用户令牌无效或已过期,需用户重新登录后重试") from None
 
     async def login(self) -> str:
         """服务账号登录并缓存 token。凭证错误抛 BackendAuthError。"""
