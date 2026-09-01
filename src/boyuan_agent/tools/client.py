@@ -75,14 +75,38 @@ class BackendClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        return await self._request("GET", path, params=params)
+    async def get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        # headers 用于附加代理身份等自定义头;Authorization 由本层注入,不可覆盖
+        return await self._request("GET", path, params=params, headers=headers)
 
     async def post(self, path: str, json: dict[str, Any] | None = None) -> Any:
         return await self._request("POST", path, json=json)
 
     async def put(self, path: str, json: dict[str, Any] | None = None) -> Any:
         return await self._request("PUT", path, json=json)
+
+    async def get_as_user(
+        self, path: str, params: dict[str, Any] | None = None, user_token: str = ""
+    ) -> Any:
+        """以最终用户本人令牌裸发请求(get_my_interview 等场景)。
+
+        与服务账号通道语义不同,故不做重登与重试:用户 token 无效/过期
+        是另一类失败,如实抛 BackendError 由调用方引导用户重新登录,
+        绝不能拿服务账号悄悄顶替。
+        """
+        if not user_token:
+            raise BackendError("缺少用户本人令牌(user_token),该操作必须以最终用户身份执行")
+        resp = await self._http.request(
+            "GET", path, params=params, headers={"Authorization": f"Bearer {user_token}"}
+        )
+        if resp.status_code == 401:
+            raise BackendError("用户令牌无效或已过期,需用户重新登录后重试")
+        return _interpret(resp)
 
     async def login(self) -> str:
         """服务账号登录并缓存 token。凭证错误抛 BackendAuthError。"""
@@ -126,10 +150,13 @@ class BackendClient:
         *,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> Any:
         token = await self._ensure_token()
         try:
-            return await self._send(method, path, params=params, json=json, token=token)
+            return await self._send(
+                method, path, params=params, json=json, token=token, headers=headers
+            )
         except _AuthExpired:
             # 重登一次后重试;再失效说明账号/服务端有真问题,如实抛出。
             # 锁内先看 token 是否已被并发协程换新,避免重复登录。
@@ -138,7 +165,9 @@ class BackendClient:
                     self._token = await self._do_login()
                 token = self._token
             try:
-                return await self._send(method, path, params=params, json=json, token=token)
+                return await self._send(
+                    method, path, params=params, json=json, token=token, headers=headers
+                )
             except _AuthExpired:
                 raise BackendError(
                     "重新登录后请求仍被拒,服务账号可能被禁用或后端鉴权异常"
@@ -152,18 +181,20 @@ class BackendClient:
         params: dict[str, Any] | None,
         json: dict[str, Any] | None,
         token: str,
+        headers: dict[str, str] | None = None,
     ) -> Any:
         """发送单轮请求:瞬时错误重试(GET)+ 统一错误解释。"""
         attempts = _MAX_ATTEMPTS if method == "GET" else 1
         last_exc: Exception | None = None
         for attempt in range(attempts):
             try:
+                merged_headers = {"Authorization": f"Bearer {token}"}
+                if headers:
+                    merged_headers.update(
+                        {k: v for k, v in headers.items() if k.lower() != "authorization"}
+                    )
                 resp = await self._http.request(
-                    method,
-                    path,
-                    params=params,
-                    json=json,
-                    headers={"Authorization": f"Bearer {token}"},
+                    method, path, params=params, json=json, headers=merged_headers
                 )
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_exc = exc
