@@ -20,6 +20,7 @@ from boyuan_agent.tools import readonly
 from boyuan_agent.tools.client import BackendClient
 
 EXPECTED_TOOLS = {
+    "auth_status",
     "get_open_cycle",
     "search_resumes",
     "get_resume_detail",

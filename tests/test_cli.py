@@ -107,7 +107,7 @@ def test_chat_bad_credentials_exits_with_error(monkeypatch: pytest.MonkeyPatch) 
         raise BackendAuthError("用户名或密码错误(code 401)")
 
     monkeypatch.setattr(cli_mod, "resolve", fake_resolve)
-    result = runner.invoke(app, ["--username", "x", "--password", "y"])
+    result = runner.invoke(app, ["chat", "--username", "x", "--password", "y"])
     assert result.exit_code == 1
     assert "身份解析失败" in result.output
 
@@ -128,7 +128,7 @@ def test_chat_full_roundtrip_with_fake_model(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(cli_mod, "build_assistant_agent", fake_build)
 
-    result = runner.invoke(app, ["--session", "qa-1"], input="现在有开放周期吗?\n退出\n")
+    result = runner.invoke(app, ["chat", "--session", "qa-1"], input="现在有开放周期吗?\n退出\n")
 
     assert result.exit_code == 0
     assert "身份=admin" in result.output
@@ -194,7 +194,7 @@ def test_chat_backend_unreachable_exits_gracefully(monkeypatch: pytest.MonkeyPat
         await _r({"kind": "cli"})  # type: ignore[typeddict-item]
 
     monkeypatch.setattr(cli_mod, "resolve", fake_resolve)
-    result = runner.invoke(app, ["--username", "x", "--password", "y"])
+    result = runner.invoke(app, ["chat", "--username", "x", "--password", "y"])
     assert result.exit_code == 1
     assert "身份解析失败" in result.output
     readonly.set_backend_client(None)

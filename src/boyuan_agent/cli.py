@@ -18,6 +18,7 @@ import typer
 from langchain_core.messages import AIMessageChunk, HumanMessage
 from rich.console import Console
 
+from boyuan_agent.config import get_settings
 from boyuan_agent.graphs.assistant import (
     assemble_tools,
     build_assistant_agent,
@@ -25,13 +26,62 @@ from boyuan_agent.graphs.assistant import (
 )
 from boyuan_agent.graphs.identity import resolve
 from boyuan_agent.observability import langfuse_callbacks
-from boyuan_agent.tools.client import BackendError
+from boyuan_agent.tools.client import BackendClient, BackendError
 from boyuan_agent.tools.readonly import get_backend_client
 
 app = typer.Typer(help="博远招新 Agent 开发 CLI")
 console = Console()
 
 _EXIT_WORDS = {"exit", "quit", "退出", "q"}
+
+
+@app.command()
+def login(
+    username: str = typer.Option("", "--username", "-u", help="账号(空则交互输入)"),
+    password: str = typer.Option("", "--password", "-p", help="密码(空则交互隐码输入)"),
+) -> None:
+    """登录后端并保存凭证(7 天内 MCP/CLI 免登录)。凭证只存本机 600 文件。"""
+    asyncio.run(_login(username, password))
+
+
+async def _login(username: str, password: str) -> None:
+    import time as _time
+
+    from boyuan_agent import credentials
+
+    if not username:
+        username = typer.prompt("账号")
+    if not password:
+        password = typer.prompt("密码", hide_input=True)
+
+    client = BackendClient(
+        http=httpx.AsyncClient(base_url=(await _settings_base_url())),
+        settings=get_settings().model_copy(
+            update={"backend_service_username": username, "backend_service_password": password}
+        ),
+    )
+    token = await client.login()
+    claims = cli_mod_claims(token)
+    credentials.save(
+        token,
+        exp=int(claims.get("exp") or (_time.time() + 24 * 3600)),
+        user_id=claims.get("userId"),
+        username=username,
+    )
+    await client.aclose()
+    console.print(f"[green]已保存凭证[/green](用户 {claims.get('userId')},7 天内免登录)")
+
+
+def cli_mod_claims(token: str) -> dict:
+    from boyuan_agent.graphs.identity import _decode_jwt_payload
+
+    return _decode_jwt_payload(token)
+
+
+async def _settings_base_url() -> str:
+    from boyuan_agent.config import get_settings
+
+    return get_settings().backend_base_url
 
 
 @app.command()
