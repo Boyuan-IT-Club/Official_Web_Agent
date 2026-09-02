@@ -79,8 +79,16 @@ def main(argv: list[str] | None = None) -> None:
     if "--http" not in args:
         server.run(transport="stdio")
         return
-    host = args[args.index("--host") + 1] if "--host" in args else "127.0.0.1"
-    port = int(args[args.index("--port") + 1]) if "--port" in args else 8000
+    def _flag_value(flag: str, default: str) -> str:
+        if flag not in args:
+            return default
+        i = args.index(flag)
+        if i + 1 >= len(args):  # 缺值裸 IndexError 防护(#74 review nit)
+            raise SystemExit(f"{flag} 需要一个值,如: {flag} 0.0.0.0")
+        return args[i + 1]
+
+    host = _flag_value("--host", "127.0.0.1")
+    port = int(_flag_value("--port", "8000"))
     server.run(transport="streamable-http", host=host, port=port)
 
 

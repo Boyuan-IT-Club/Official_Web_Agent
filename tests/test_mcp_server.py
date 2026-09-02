@@ -222,3 +222,13 @@ async def test_backend_error_message_survives_to_model(mock_backend):
         await server.call_tool("get_resume_detail", {"user_id": 1, "cycle_id": 1})
     assert "简历不存在" in str(exc_info.value)
     assert "search_resumes" in str(exc_info.value)  # 可行动指引必须到达模型
+
+
+def test_main_flag_without_value_fails_gracefully(capsys) -> None:
+    """#74 review nit 回归:--host 缺值不裸 IndexError。"""
+    from boyuan_agent.mcp_server import main
+
+    with pytest.raises(SystemExit, match="--host"):
+        main(["--http", "--host"])
+    with pytest.raises(SystemExit, match="--port"):
+        main(["--http", "--port"])
