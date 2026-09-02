@@ -137,12 +137,12 @@ async def test_expired_storage_falls_back_to_env_login(cred_file) -> None:
     await client2.aclose()
 
 
-def test_auth_status_has_no_credentials_leak(cred_file) -> None:
+async def test_auth_status_has_no_credentials_leak(cred_file) -> None:
     """红线断言:auth_status 输出不含 token 本身,只含身份与剩余时长。"""
     from boyuan_agent.tools.credentials import auth_status
 
     credentials.save("secret-token-value", exp=int(time.time()) + 3600, user_id=1, username="admin")
-    status = auth_status()
+    status = await auth_status()
     dumped = json.dumps(status, ensure_ascii=False)
     assert "secret-token-value" not in dumped
     assert status["authenticated"] is True
@@ -150,18 +150,18 @@ def test_auth_status_has_no_credentials_leak(cred_file) -> None:
     assert 55 <= status["remaining_minutes"] <= 60  # save→load 间会流逝秒级
 
 
-def test_auth_status_reports_expired(cred_file) -> None:
+async def test_auth_status_reports_expired(cred_file) -> None:
     from boyuan_agent.tools.credentials import auth_status
 
     credentials.save("expired", exp=int(time.time()) - 5)
-    status = auth_status()
+    status = await auth_status()
     assert status["expired"] is True and status["authenticated"] is False
     assert "boyuan-agent login" in status["hint"]
 
 
-def test_auth_status_when_never_logged_in(cred_file) -> None:
+async def test_auth_status_when_never_logged_in(cred_file) -> None:
     from boyuan_agent.tools.credentials import auth_status
 
-    status = auth_status()
+    status = await auth_status()
     assert status["authenticated"] is False
     assert "boyuan-agent login" in status["hint"]

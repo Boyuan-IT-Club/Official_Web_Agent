@@ -10,7 +10,7 @@ from typing import Any
 from boyuan_agent import credentials
 
 
-def auth_status() -> dict[str, Any]:
+async def auth_status() -> dict[str, Any]:
     """查询当前后端凭证状态:是否有效、以谁的身份、剩余时长。
 
     本工具不触碰任何数据查询,仅报告凭证;token 本身不会出现在结果中。
