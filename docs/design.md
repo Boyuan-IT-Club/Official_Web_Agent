@@ -83,7 +83,7 @@ A:CLI / 官网 SSE(飞书悬置) ─→ 身份解析 → 按角色装配工具�
 B:调度队列(遥控器工具/按钮/cron)─→ evaluation 图(批处理)
 C:官网管理端面试页 ─→ copilot 三态图
                   │
-     工具层 tools/(进程内直连 Python 函数;MCP Server 仅对外暴露)
+     工具层 tools/(进程内直连 Python 函数;MCP Server 仅对外暴露,已降级为维护态)
                   │
      后端 REST(服务账号 JWT + X-On-Behalf-Of)
      Postgres(checkpointer / pgvector / 审计) · Langfuse(trace,fail-open)
@@ -92,7 +92,7 @@ C:官网管理端面试页 ─→ copilot 三态图
 关键决策(详见对应 ADR):
 
 - **入口各自直连,无统一意图路由**(ADR-0003)
-- **工具进程内直连**;MCP 纯对外给 Claude Code 等挂载(ADR-0003)
+- **工具进程内直连**;MCP 纯对外给 Claude Code 等挂载(ADR-0003)。**入口决策(2026-09-01):一等入口=飞书(M3)+官网(M5),MCP 不作为用户入口**——已实现(TOOL-02)但降级为维护态:仅当出现「外部 AI 客户端需接招新数据」的真实需求时再激活
 - **上下文四段组装 + 双 cache 断点**;超阈值任务感知摘要,禁滑动窗口;prompt 一图一节点
   一文件 + frontmatter(ADR-0004)
 - **模型路由默认 strong**,降 light 仅限内部模式化步骤且须 eval 证明(ADR-0004)
