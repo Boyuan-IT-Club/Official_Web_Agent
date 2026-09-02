@@ -13,7 +13,12 @@ class Settings(BaseSettings):
     backend_service_username: str = ""
     backend_service_password: str = ""
 
-    # 模型(分级路由,GRA-08)
+    # 模型(分级路由,GRA-08)。provider=anthropic 走 ANTHROPIC_API_KEY;
+    # provider=openai-compatible 走 OpenAI 兼容端点(DeepSeek 等),
+    # llm_api_key+llm_base_url 决定接入
+    llm_provider: str = "anthropic"
+    llm_base_url: str = ""
+    llm_api_key: str = ""
     anthropic_api_key: str = ""
     model_light: str = "claude-haiku-4-5-20251001"
     model_strong: str = "claude-sonnet-5"

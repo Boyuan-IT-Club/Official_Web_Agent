@@ -121,18 +121,39 @@ def identity_message(identity: ResolvedIdentity) -> str:
     )
 
 
+def _build_model(settings: Any) -> Any:
+    """按配置构造对话模型(GRA-08 路由的接入点)。
+
+    - anthropic:ANTHROPIC_API_KEY(默认)
+    - openai-compatible:OpenAI 兼容端点(DeepSeek 等),LLM_BASE_URL+
+      LLM_API_KEY——换模型供应商不改代码
+    """
+    if settings.llm_provider == "openai-compatible":
+        from langchain_openai import ChatOpenAI
+
+        if not settings.llm_base_url or not settings.llm_api_key:
+            raise ValueError(
+                "openai-compatible 模式需要在 .env 配置 LLM_BASE_URL 与 LLM_API_KEY"
+            )
+        return ChatOpenAI(
+            model=settings.model_strong,
+            api_key=SecretStr(settings.llm_api_key),
+            base_url=settings.llm_base_url,
+        )
+    # ChatAnthropic 为 pydantic **kwargs 构造器,mypy 无法静态解析字段
+    return ChatAnthropic(  # type: ignore[call-arg]
+        model=settings.model_strong,
+        api_key=SecretStr(settings.anthropic_api_key) if settings.anthropic_api_key else None,  # type: ignore[arg-type]
+    )
+
+
 def build_assistant_agent(identity: ResolvedIdentity, user_token: str = "") -> Any:
     """构建 A 模块 ReAct agent。调用方(CLI/SSE)负责身份解析与消息装配,
     并把 langfuse_callbacks 挂到 invoke 的 config(fail-open,ADR-0005)。
     """
     settings = get_settings()
-    # ChatAnthropic 为 pydantic **kwargs 构造器,mypy 无法静态解析字段
-    model = ChatAnthropic(  # type: ignore[call-arg]
-        model=settings.model_strong,
-        api_key=SecretStr(settings.anthropic_api_key) if settings.anthropic_api_key else None,  # type: ignore[arg-type]
-    )
     return create_agent(
-        model,
+        _build_model(settings),
         tools=assemble_tools(identity, user_token),
         system_prompt=load_system_prompt(),
     )
