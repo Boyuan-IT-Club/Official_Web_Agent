@@ -84,6 +84,12 @@ class BackendClient:
         # headers 用于附加代理身份等自定义头;Authorization 由本层注入,不可覆盖
         return await self._request("GET", path, params=params, headers=headers)
 
+    @property
+    def token(self) -> str | None:
+        """当前缓存的服务/会话 token(只读)。CLI 等入口层据此把登录
+        令牌传给工具装配(candidate 的 get_my_interview 绑定)。"""
+        return self._token
+
     async def post(self, path: str, json: dict[str, Any] | None = None) -> Any:
         return await self._request("POST", path, json=json)
 
