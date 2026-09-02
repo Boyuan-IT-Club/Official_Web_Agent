@@ -12,6 +12,7 @@ Langfuse callbacks fail-open 挂载(OBS-01)。
 """
 
 import asyncio
+import time
 
 import httpx
 import typer
@@ -45,8 +46,6 @@ def login(
 
 
 async def _login(username: str, password: str) -> None:
-    import time as _time
-
     from boyuan_agent import credentials
 
     if not username:
@@ -60,11 +59,25 @@ async def _login(username: str, password: str) -> None:
             update={"backend_service_username": username, "backend_service_password": password}
         ),
     )
-    token = await client.login()
+    try:
+        token = await client.login()
+    except BackendError as exc:
+        # 登录失败(凭证错/后端不可达/网关错)——人话+修因,不甩栈
+        console.print(f"[red]登录失败:[/red] {exc}")
+        if "连接" in str(exc) or "Connect" in str(exc):
+            console.print(
+                "[yellow]提示: 本地开发需先启动后端"
+                "(docker start official-mysql-local 并启动 Spring Boot);"
+                "生产环境请确认 BACKEND_BASE_URL 指向服务端[/yellow]"
+            )
+        raise typer.Exit(1) from None
+    except httpx.HTTPError as exc:
+        console.print(f"[red]登录失败:[/red] 网络异常({exc})")
+        raise typer.Exit(1) from None
     claims = cli_mod_claims(token)
     credentials.save(
         token,
-        exp=int(claims.get("exp") or (_time.time() + 24 * 3600)),
+        exp=int(claims.get("exp") or (time.time() + 7 * 24 * 3600)),
         user_id=claims.get("userId"),
         username=username,
     )
