@@ -147,13 +147,20 @@ def _build_model(settings: Any) -> Any:
     )
 
 
-def build_assistant_agent(identity: ResolvedIdentity, user_token: str = "") -> Any:
+def build_assistant_agent(
+    identity: ResolvedIdentity,
+    user_token: str = "",
+    checkpointer: Any | None = None,
+) -> Any:
     """构建 A 模块 ReAct agent。调用方(CLI/SSE)负责身份解析与消息装配,
     并把 langfuse_callbacks 挂到 invoke 的 config(fail-open,ADR-0005)。
-    """
+
+    checkpointer(MEM-01):传 AsyncPostgresSaver 则启用多轮持久化;
+    None 则纯内存(CLI --session 标识仅作 trace 用)。"""
     settings = get_settings()
     return create_agent(
         _build_model(settings),
         tools=assemble_tools(identity, user_token),
         system_prompt=load_system_prompt(),
+        checkpointer=checkpointer,
     )

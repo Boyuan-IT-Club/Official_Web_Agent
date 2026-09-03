@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     model_strong: str = "claude-sonnet-5"
 
     # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)
-    postgres_url: str = "postgresql://localhost:5432/boyuan_agent"
+    postgres_url: str = "postgresql://localhost:5432/official_agent"
 
     # 飞书(M3)
     feishu_app_id: str = ""

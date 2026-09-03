@@ -1,14 +1,14 @@
 """CLI 对话入口(INF-03):开发调试主力,M1 验收载体。
 
 链路:模拟身份凭证 → GRA-01 身份解析 → GRA-04 agent 工厂 → 流式多轮对话。
-身份信息作为首条用户消息注入(静态前缀纪律);多轮历史本地累积
-(checkpointer 接线是 MEM-01,落地前 session 仅作 thread_id 标识);
+身份信息作为首条用户消息注入(静态前缀纪律);检查点持久化由 MEM-01
+checkpointer 承担(Postgres),多轮历史跨进程续接;session=thread_id。
 Langfuse callbacks fail-open 挂载(OBS-01)。
 
 用法:
     uv run boyuan-agent chat                       # .env 服务账号身份
     uv run boyuan-agent chat --username admin      # 模拟指定账号(密码交互输入)
-    uv run boyuan-agent chat --session recruit-qa  # 会话 id(trace/thread 标识)
+    uv run boyuan-agent chat --session recruit-qa  # session id(thread/trace 标识)
 """
 
 import asyncio
@@ -27,6 +27,8 @@ from boyuan_agent.graphs.assistant import (
 )
 from boyuan_agent.graphs.identity import resolve
 from boyuan_agent.observability import langfuse_callbacks
+from boyuan_agent.state.pg import get_checkpointer
+from boyuan_agent.state.threads import create_thread, ensure_agent_threads_table
 from boyuan_agent.tools.client import BackendClient, BackendError
 from boyuan_agent.tools.readonly import get_backend_client
 
@@ -125,53 +127,103 @@ async def _chat(username: str, password: str, session: str) -> None:
         raise typer.Exit(1) from None
 
     user_token = (await get_backend_client()).token or ""
-    try:
-        agent = build_assistant_agent(identity, user_token=user_token)
-    except Exception as exc:  # noqa: BLE001 — 入口层:模型缺 key 等配置错误转人话
-        console.print(f"[red]模型初始化失败:[/red] {exc}")
-        console.print("[yellow]提示: 需要在 .env 配置 ANTHROPIC_API_KEY[/yellow]")
-        raise typer.Exit(1) from None
-    callbacks = langfuse_callbacks()
 
-    console.print(
-        f"[bold]boyuan-agent[/bold] 身份={identity['role']}(用户 {identity['user_id']}) "
-        f"session={session} 工具={len(assemble_tools(identity, user_token))}个 "
-        f"exit/退出 结束"
-    )
-    # 静态前缀纪律:身份是首条用户消息,不进 system
-    history: list = [HumanMessage(content=identity_message(identity))]
-
-    while True:
+    # 线程档(MEM-01):显式 --session 建档(thread_id=session),默认 dev 是共享
+    # 开发会话,不建档以免 agent_threads 被开发噪音污染。
+    tid = session or "dev"
+    if tid != "dev" and identity["user_id"] is not None:
         try:
-            user_input = console.input("[bold cyan]你>[/bold cyan] ").strip()
-        except (EOFError, KeyboardInterrupt):
-            console.print("\n[dim]再见[/dim]")
-            return
-        if not user_input:
-            continue
-        if user_input.lower() in _EXIT_WORDS:
-            console.print("[dim]再见[/dim]")
-            return
+            create_thread(
+                "cli", tid, owner_user_id=identity["user_id"], channel="cli", thread_id=tid
+            )
+        except Exception as exc:  # noqa: BLE001 — 建档失败不阻断对话
+            console.print(f"[dim]建档失败(session 仍可用):[/dim] {exc}")
 
-        history.append(HumanMessage(content=user_input))
+    # checkpointer(fail-open,ADR-0005):PG 不可达则降级无 checkpointer,
+    # CLI 仍可用(持久化是增强,不阻断对话)。
+    from contextlib import AsyncExitStack
+
+    async with AsyncExitStack() as stack:
         try:
-            history = await _run_turn(agent, history, session, callbacks)
-        except KeyboardInterrupt:
-            console.print("\n[dim]已中断本轮(历史保留)[/dim]")
-            continue
-        except Exception as exc:  # noqa: BLE001 — 入口层:模型/网络错误转人话,会话不崩
-            console.print(f"\n[red]本轮执行失败:[/red] {exc}")
-            if "api_key" in str(exc).lower() or "anthropic" in str(exc).lower():
-                console.print("[yellow]提示: .env 需配置 ANTHROPIC_API_KEY[/yellow]")
-            history.pop()  # 失败轮不进历史,防脏上下文
+            saver = await stack.enter_async_context(get_checkpointer())
+            ensure_agent_threads_table()  # L-1:幂等建 agent_threads 档案表
+        except Exception as exc:  # noqa: BLE001 — PG 未起/配置错 → 降级
+            msg = "[dim]Postgres 未连接,本轮无持久化(MEM-01 需启动 Langfuse PG):[/dim]"
+            console.print(f"{msg} {exc}")
+            saver = None
 
+        try:
+            agent = build_assistant_agent(identity, user_token=user_token, checkpointer=saver)
+        except Exception as exc:  # noqa: BLE001 — 入口层:模型缺 key 等配置错误转人话
+            console.print(f"[red]模型初始化失败:[/red] {exc}")
+            console.print("[yellow]提示: 需要在 .env 配置 ANTHROPIC_API_KEY[/yellow]")
+            raise typer.Exit(1) from None
+        callbacks = langfuse_callbacks()
+
+        console.print(
+            f"[bold]boyuan-agent[/bold] 身份={identity['role']}(用户 {identity['user_id']}) "
+            f"session={tid} 工具={len(assemble_tools(identity, user_token))}个 "
+            f"exit/退出 结束"
+        )
+
+        # 身份前缀首轮注入(SEC-07 静态前缀纪律)。
+        # 判据用持久化事实而非进程内计数:有 checkpointer 时,new thread
+        # (aget_state 无历史)才注入前缀;续接/已有历史只发增量——避免跨进程
+        # 续接重复注入身份(H-1)。失败轮未持久化 → 下次 aget_state 仍无 →
+        # 自动重发前缀(H-2)。降级路径用本地累积(原 CLI 语义)。
+        first_input = HumanMessage(content=identity_message(identity))
+        chat_history: list = []  # 仅降级路径使用:本地历史累积
+        while True:
+            try:
+                user_input = console.input("[bold cyan]你>[/bold cyan] ").strip()
+            except (EOFError, KeyboardInterrupt):
+                console.print("\n[dim]再见[/dim]")
+                return
+            if not user_input:
+                continue
+            if user_input.lower() in _EXIT_WORDS:
+                console.print("[dim]再见[/dim]")
+                return
+
+            if saver is not None:
+                # 持久化事实判据:该 thread 已有历史则只发增量(续接),否则带前缀
+                state = await agent.aget_state({"configurable": {"thread_id": tid}})
+                has_history = bool(state and state.values.get("messages"))
+                messages = (
+                    [first_input, HumanMessage(content=user_input)]
+                    if not has_history
+                    else [HumanMessage(content=user_input)]
+                )
+            else:
+                # 降级:本地累积,保证多轮不失忆(原 CLI 语义)
+                messages = [first_input, *chat_history, HumanMessage(content=user_input)]
+            try:
+                history_out = await _run_turn(agent, messages, tid, callbacks)
+                if saver is None:
+                    # 降级:用返回的累积历史推进本地会话(首轮前缀除外)
+                    chat_history = [m for m in history_out if m is not first_input]
+            except KeyboardInterrupt:
+                console.print("\n[dim]已中断本轮(历史保留)[/dim]")
+                continue
+            except Exception as exc:  # noqa: BLE001 — 入口层:模型/网络错误转人话,会话不崩
+                console.print(f"\n[red]本轮执行失败:[/red] {exc}")
+                if "api_key" in str(exc).lower() or "anthropic" in str(exc).lower():
+                    console.print("[yellow]提示: .env 需配置 ANTHROPIC_API_KEY[/yellow]")
+                # H-2:失败轮不进历史。有 saver 时下次 aget_state 仍无→自动重发前缀;
+                # 降级时把本轮输入放回 chat_history(保上下文)
+                if saver is None:
+                    chat_history.append(HumanMessage(content=user_input))
 
 async def _run_turn(agent: object, history: list, session: str, callbacks: list) -> list:
-    """跑一轮:流式打印 token 与工具状态,返回更新后的完整消息历史。"""
+    """跑一轮:流式打印 token 与工具状态,返回本轮增量累积的消息历史。
+
+    历史也由 checkpointer 持久化(MEM-01);返回值供调用方在无 checkpointer
+    场景(如测试替身)继续累积。
+    """
     console.print("[bold green]agent>[/bold green] ", end="")
     config = {
         "callbacks": callbacks,
-        "configurable": {"thread_id": session},  # MEM-01 checkpointer 落地后生效
+        "configurable": {"thread_id": session},  # MEM-01:thread_id 即线程档主键
     }
     new_messages: list = []  # 本轮增量(create_agent 的 updates 每节点只吐新增)
     async for mode, payload in agent.astream(  # type: ignore[attr-defined]

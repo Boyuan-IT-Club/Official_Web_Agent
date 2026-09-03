@@ -38,6 +38,10 @@ class _FakeGraphAgent:
     def __init__(self, final_text: str) -> None:
         self._final = final_text
 
+    async def aget_state(self, config: dict | None = None) -> dict | None:  # noqa: ANN201, ARG002
+        """模拟 checkpointer 状态查询:默认无历史(新线程)。"""
+        return None
+
     async def astream(self, inp: dict, config: dict | None = None, stream_mode=None):  # noqa: ANN201
         assert stream_mode == ["messages", "updates"]
         assert config["configurable"]["thread_id"]
@@ -121,9 +125,10 @@ def test_chat_full_roundtrip_with_fake_model(monkeypatch: pytest.MonkeyPatch) ->
     captured: dict = {}
     fake = _FakeGraphAgent("你好,我是招新助理,当前没有开放周期数据。")
 
-    def fake_build(identity, user_token=""):  # noqa: ANN001, ARG001
+    def fake_build(identity, user_token="", checkpointer=None):  # noqa: ANN001, ARG001
         captured["identity"] = identity
         captured["user_token"] = user_token
+        captured["checkpointer"] = checkpointer
         return fake
 
     monkeypatch.setattr(cli_mod, "build_assistant_agent", fake_build)
@@ -140,6 +145,152 @@ def test_chat_full_roundtrip_with_fake_model(monkeypatch: pytest.MonkeyPatch) ->
     assert captured["identity"]["user_id"] == 7
     assert captured["identity"]["role"] == "admin"
     assert captured["user_token"]  # login 后有 token
+    readonly.set_backend_client(None)
+
+
+@respx.mock
+def test_chat_degraded_no_pg_keeps_multi_turn_history(monkeypatch: pytest.MonkeyPatch) -> None:
+    """降级路径(PG 不可达 → saver=None):多轮对话仍用本地历史,不失忆。
+
+    回归:最初接 checkpointer 时删了本地 history 累积,saper=None 时第二轮
+    agent 收不到第一轮输入(多轮失忆)。
+    """
+    respx.post(LOGIN).mock(side_effect=lambda _: _login_ok())
+    _install_mock_backend()
+
+    seen_inputs: list[list] = []
+
+    class _CapturingAgent(_FakeGraphAgent):
+        async def astream(self, inp: dict, config: dict | None = None, stream_mode=None):  # noqa: ANN201, ARG002
+            seen_inputs.append(list(inp["messages"]))
+            async for item in super().astream(inp, config, stream_mode):
+                yield item
+
+    captured: dict = {}
+
+    def fake_build(identity, user_token="", checkpointer=None):  # noqa: ANN001, ARG001
+        captured["identity"] = identity
+        captured["checkpointer"] = checkpointer
+        return _CapturingAgent("好的")
+
+    monkeypatch.setattr(cli_mod, "build_assistant_agent", fake_build)
+
+    # PG 不可达:get_checkpointer 抛异常 → 降级 saver=None
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def boom():
+        raise ConnectionError("connection refused")
+        yield None  # pragma: no cover — unreachable
+
+    monkeypatch.setattr(cli_mod, "get_checkpointer", boom)
+
+    result = runner.invoke(
+        app, ["chat", "--session", "qa-1"], input="第一轮问题\n第二轮追问\n退出\n"
+    )
+    assert result.exit_code == 0
+    assert captured["checkpointer"] is None  # 降级生效
+    assert len(seen_inputs) == 2
+    # 第二轮必须包含第一轮用户输入(本地历史累积)
+    first_round_msgs = [m.content for m in seen_inputs[0]]
+    second_round_msgs = [m.content for m in seen_inputs[1]]
+    assert any("第一轮问题" in str(c) for c in first_round_msgs)
+    assert any("第一轮问题" in str(c) for c in second_round_msgs)
+    assert any("第二轮追问" in str(c) for c in second_round_msgs)
+    readonly.set_backend_client(None)
+
+
+@respx.mock
+def test_chat_resume_existing_thread_no_duplicate_identity_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H-1 回归:续接已有线程(aget_state 有历史)只发增量,不重复身份前缀。
+
+    跨进程续接是本功能核心;进程局部 turn 计数会误判"首轮"给已有线程
+    再注入身份前缀。fix 后判据改为持久化事实(aget_state)。
+    """
+    respx.post(LOGIN).mock(side_effect=lambda _: _login_ok())
+    _install_mock_backend()
+
+    seen_inputs: list[list] = []
+
+    class _ResumeAgent(_FakeGraphAgent):
+        def __init__(self) -> None:
+            super().__init__("ok")
+            self._call = 0
+
+        async def aget_state(self, config: dict | None = None):  # noqa: ANN201, ARG002
+            # 真实契约:StateSnapshot 对象,含 .values dict(已有历史+身份前缀)
+            from types import SimpleNamespace
+
+            return SimpleNamespace(values={"messages": [HumanMessage("已存在的身份前缀")]})
+
+        async def astream(self, inp: dict, config: dict | None = None, stream_mode=None):  # noqa: ANN201, ARG002
+            seen_inputs.append(list(inp["messages"]))
+            async for item in super().astream(inp, config, stream_mode):
+                yield item
+
+    def fake_build(identity, user_token="", checkpointer=None):  # noqa: ANN001, ARG001
+        return _ResumeAgent()
+
+    monkeypatch.setattr(cli_mod, "build_assistant_agent", fake_build)
+
+    result = runner.invoke(app, ["chat", "--session", "qa-1"], input="续接问题\n退出\n")
+
+    assert result.exit_code == 0
+    assert len(seen_inputs) == 1
+    msgs = seen_inputs[0]
+    # 续接时只发用户输入,不带身份前缀
+    assert not any(m.content == "已存在的身份前缀" for m in msgs)
+    assert any(m.content == "续接问题" for m in msgs)
+    readonly.set_backend_client(None)
+
+
+@respx.mock
+def test_chat_first_round_failure_reinjects_identity_next_round(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """H-2 回归:首轮失败(未持久化)→ 第二轮自动重发身份前缀。
+
+    修复前 turn 单调递增,失败轮丢失前缀后永不恢复;修复后判据是
+    aget_state 无历史 → 失败轮后续自动重发。
+    """
+    respx.post(LOGIN).mock(side_effect=lambda _: _login_ok())
+    _install_mock_backend()
+
+    seen_inputs: list[list] = []
+
+    class _FlakyAgent(_FakeGraphAgent):
+        def __init__(self) -> None:
+            super().__init__("ok")
+            self._call = 0
+            self._fail_rounds = {0}  # 第一轮失败
+
+        async def aget_state(self, config: dict | None = None) -> dict | None:  # noqa: ANN201, ARG002
+            return None  # 始终无历史(失败轮未持久化)
+
+        async def astream(self, inp: dict, config: dict | None = None, stream_mode=None):  # noqa: ANN201, ARG002
+            if self._call in self._fail_rounds:
+                self._call += 1
+                raise RuntimeError("模拟首轮失败")
+            self._call += 1
+            seen_inputs.append(list(inp["messages"]))
+            async for item in super().astream(inp, config, stream_mode):
+                yield item
+
+    def fake_build(identity, user_token="", checkpointer=None):  # noqa: ANN001, ARG001
+        return _FlakyAgent()
+
+    monkeypatch.setattr(cli_mod, "build_assistant_agent", fake_build)
+
+    result = runner.invoke(app, ["chat", "--session", "qa-1"], input="第一问\n第二问\n退出\n")
+
+    assert result.exit_code == 0
+    assert len(seen_inputs) == 1  # 第二问成功,第一问失败
+    msgs = seen_inputs[0]
+    # 第二轮重新带上了身份前缀(首轮失败未持久化 → 仍视为新线程)
+    assert any(getattr(m, "type", "") == "human" and "身份" in str(m.content) for m in msgs)
+    assert any("第二问" in str(m.content) for m in msgs)
     readonly.set_backend_client(None)
 
 
