@@ -15,3 +15,28 @@ from boyuan_agent import credentials
 def _isolated_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(credentials, "_CREDENTIALS_FILE", tmp_path / "credentials.json")
     monkeypatch.setattr(credentials, "_CREDENTIALS_DIR", tmp_path)
+
+
+@pytest.fixture
+async def real_checkpointer():
+    from boyuan_agent.memory import db as memdb
+
+    await memdb.open_pool()
+    """真 PG 集成 fixture(backend 标记用):连 5432 的 official_agent 库。"""
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from psycopg_pool import AsyncConnectionPool
+
+    from boyuan_agent.memory.db import database_url
+
+    pool = AsyncConnectionPool(
+        conninfo=database_url(),
+        min_size=1,
+        max_size=2,
+        open=False,
+        check=AsyncConnectionPool.check_connection,
+    )
+    await pool.open(wait=True, timeout=15)
+    saver = AsyncPostgresSaver(pool)
+    await saver.setup()
+    yield saver
+    await memdb.close_pool()

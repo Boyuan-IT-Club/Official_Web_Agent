@@ -20,6 +20,7 @@ dependencies = [
     "rich>=13",
     "langchain>=1.0",
     "langchain-openai>=1.6.0",
+    "psycopg[binary]>=3.3.4",
 ]
 
 [dependency-groups]
