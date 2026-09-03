@@ -172,3 +172,34 @@ def test_role_tool_tables_stay_consistent() -> None:
     assert set(assistant_mod._ROLE_TOOL_NAMES["admin"]) == set(assistant_mod._ALL_TOOLS)
     for role, names in assistant_mod._ROLE_TOOL_NAMES.items():
         assert set(names) <= set(assistant_mod._ALL_TOOLS), f"{role} 档登记了未知工具"
+
+
+def test_build_model_openai_compatible_branch() -> None:
+    """provider=openai-compatible 构造 ChatOpenAI(base_url 指向 DeepSeek 等)。"""
+    from langchain_openai import ChatOpenAI
+
+    from boyuan_agent.config import Settings
+    from boyuan_agent.graphs.assistant import _build_model
+
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        llm_provider="openai-compatible",
+        llm_base_url="https://api.deepseek.com",
+        llm_api_key="sk-test",
+        model_strong="deepseek-v4-flash",
+    )
+    model = _build_model(settings)
+    assert isinstance(model, ChatOpenAI)
+    assert model.model_name == "deepseek-v4-flash"
+
+
+def test_build_model_openai_compatible_missing_config_fails() -> None:
+    from boyuan_agent.config import Settings
+    from boyuan_agent.graphs.assistant import _build_model
+
+    settings = Settings(  # type: ignore[call-arg]
+        _env_file=None, llm_provider="openai-compatible",
+        llm_base_url="", llm_api_key="",
+    )
+    with pytest.raises(ValueError, match="LLM_BASE_URL"):
+        _build_model(settings)
