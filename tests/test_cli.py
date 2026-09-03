@@ -1,6 +1,7 @@
 """INF-03 CLI 单测:CliRunner 全链路(fake model)+身份失败路径+历史累积。"""
 
 import asyncio
+import re
 from collections.abc import Iterator
 from typing import Any, cast
 
@@ -137,7 +138,8 @@ def test_chat_full_roundtrip_with_fake_model(monkeypatch: pytest.MonkeyPatch) ->
 
     assert result.exit_code == 0
     assert "身份=admin" in result.output
-    assert "session=qa-1" in result.output
+    # SEC-07:session 显示为生成的 thread_id(cli:u{user}:{random8}),不是别名
+    assert re.search(r"session=cli:u7:[0-9a-f]{8}", result.output)
     assert "工具=" in result.output
     assert "招新助理" in result.output  # 终答流式打印
     assert "退出" in result.output

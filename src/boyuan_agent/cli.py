@@ -28,7 +28,11 @@ from boyuan_agent.graphs.assistant import (
 from boyuan_agent.graphs.identity import resolve
 from boyuan_agent.observability import langfuse_callbacks
 from boyuan_agent.state.pg import get_checkpointer
-from boyuan_agent.state.threads import create_thread, ensure_agent_threads_table
+from boyuan_agent.state.threads import (
+    create_thread,
+    ensure_agent_threads_table,
+    find_active_by_subject,
+)
 from boyuan_agent.tools.client import BackendClient, BackendError
 from boyuan_agent.tools.readonly import get_backend_client
 
@@ -105,9 +109,15 @@ def chat(
         "", "--username", "-u", help="模拟身份账号(空=用 .env 服务账号)"
     ),
     password: str = typer.Option("", "--password", "-p", help="密码(空且指定了账号则交互输入)"),
-    session: str = typer.Option("dev", "--session", "-s", help="会话 id(thread/trace 标识)"),
+    session: str = typer.Option(
+        "", "--session", "-s", help="会话别名:续接该别名最近会话,无则新开(空=每次新会话)"
+    ),
 ) -> None:
-    """本地多轮对话,流式输出,支持指定模拟身份。"""
+    """本地多轮对话,流式输出,支持指定模拟身份。
+
+    --session 是会话别名(SEC-07):同名续接该用户最近 active 会话,不是裸
+    thread_id。thread_id 由系统按 {channel}:u{user}:{random8} 生成。
+    """
     if username and not password:
         password = typer.prompt(f"账号 {username} 的密码", hide_input=True)
     asyncio.run(_chat(username, password, session))
@@ -128,16 +138,27 @@ async def _chat(username: str, password: str, session: str) -> None:
 
     user_token = (await get_backend_client()).token or ""
 
-    # 线程档(MEM-01):显式 --session 建档(thread_id=session),默认 dev 是共享
-    # 开发会话,不建档以免 agent_threads 被开发噪音污染。
-    tid = session or "dev"
-    if tid != "dev" and identity["user_id"] is not None:
+    # 线程档(SEC-07):--session 是用户侧别名,存 agent_threads.subject。
+    # 同名续接该用户最近 active 会话,无则新开;不传则每次新会话。
+    # thread_id 由系统生成 {channel}:u{user}:{random8},不拼用户可控串。
+    tid = ""
+    user_id = identity["user_id"]
+    if user_id is not None and session:
         try:
-            create_thread(
-                "cli", tid, owner_user_id=identity["user_id"], channel="cli", thread_id=tid
-            )
+            existing = find_active_by_subject(user_id, "cli", session)
+            if existing is not None:
+                tid = existing.thread_id
+            else:
+                tid = create_thread("cli", user_id, subject=session).thread_id
         except Exception as exc:  # noqa: BLE001 — 建档失败不阻断对话
-            console.print(f"[dim]建档失败(session 仍可用):[/dim] {exc}")
+            console.print(f"[dim]会话恢复失败(将新开):[/dim] {exc}")
+            tid = ""
+    if not tid and user_id is not None:
+        try:
+            tid = create_thread("cli", user_id).thread_id
+        except Exception as exc:  # noqa: BLE001 — 建档失败不阻断对话
+            console.print(f"[dim]建档失败(将用 dev 会话):[/dim] {exc}")
+            tid = "dev"
 
     # checkpointer(fail-open,ADR-0005):PG 不可达则降级无 checkpointer,
     # CLI 仍可用(持久化是增强,不阻断对话)。

@@ -45,11 +45,9 @@ async def main() -> None:
         print("[1] get_checkpointer() OK")
 
     # 2. 建档 + H-3 幂等:同 tid 二次建档不炸
-    rec = create_thread("cli", "mem01-e2e-verify", owner_user_id=7, channel="cli")
-    print(f"[2] 建档 OK thread_id={rec.thread_id}")
-    rec2 = create_thread(
-        "cli", "mem01-e2e-verify", owner_user_id=7, channel="cli", thread_id=rec.thread_id
-    )
+    rec = create_thread("cli", 7, subject="mem01-e2e-verify")
+    print(f"[2] 建档 OK thread_id={rec.thread_id} subject={rec.subject}")
+    rec2 = create_thread("cli", 7, thread_id=rec.thread_id)
     assert rec2.thread_id == rec.thread_id
     print("[2b] H-3 同 tid 二次建档幂等 OK")
     assert get_thread(rec.thread_id) is not None
