@@ -6,7 +6,7 @@
 
 from unittest.mock import MagicMock, patch
 
-from boyuan_agent.state import threads
+from official_agent.state import threads
 
 
 def _mock_conn(rows: list[dict] | None = None) -> MagicMock:

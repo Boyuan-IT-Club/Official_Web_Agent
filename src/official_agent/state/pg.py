@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-from boyuan_agent.config import get_settings
+from official_agent.config import get_settings
 
 
 @asynccontextmanager

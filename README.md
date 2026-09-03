@@ -33,7 +33,7 @@ C Copilot:   官网管理端面试页(界面即路由)─→ copilot 三态图
 ## 目录结构
 
 ```
-src/boyuan_agent/
+src/official_agent/
 ├── config.py       # pydantic-settings 配置
 ├── cli.py          # CLI 对话入口(开发调试)
 ├── mcp_server.py   # MCP Server:工具对外暴露(Claude Code 可直接挂载)
@@ -51,8 +51,8 @@ tests/              # 确定性单测
 ```bash
 uv sync
 cp .env.example .env   # 填入后端地址、服务账号、模型 API key
-uv run boyuan-agent chat --role admin   # CLI 对话(M1)
-uv run python -m boyuan_agent.mcp_server  # 启动 MCP Server(stdio)
+uv run official-agent chat --role admin   # CLI 对话(M1)
+uv run python -m official_agent.mcp_server  # 启动 MCP Server(stdio)
 ```
 
 ## 文档

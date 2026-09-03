@@ -8,10 +8,10 @@ import httpx
 import pytest
 import respx
 
-from boyuan_agent import credentials
-from boyuan_agent.config import Settings
-from boyuan_agent.tools import readonly
-from boyuan_agent.tools.client import BackendAuthError, BackendClient
+from official_agent import credentials
+from official_agent.config import Settings
+from official_agent.tools import readonly
+from official_agent.tools.client import BackendAuthError, BackendClient
 
 
 def make_jwt(user_id: int = 1, exp: int | None = None, role: str = "超级管理员") -> str:
@@ -95,7 +95,7 @@ async def test_no_credentials_and_no_env_gives_login_guidance(cred_file) -> None
     respx.post("http://backend.test/api/auth/login")
     client = make_client()
 
-    with pytest.raises(BackendAuthError, match="boyuan-agent login"):
+    with pytest.raises(BackendAuthError, match="official-agent login"):
         await client.get("/api/cycles/open")
     await client.aclose()
 
@@ -139,7 +139,7 @@ async def test_expired_storage_falls_back_to_env_login(cred_file) -> None:
 
 async def test_auth_status_has_no_credentials_leak(cred_file) -> None:
     """红线断言:auth_status 输出不含 token 本身,只含身份与剩余时长。"""
-    from boyuan_agent.tools.credentials import auth_status
+    from official_agent.tools.credentials import auth_status
 
     credentials.save("secret-token-value", exp=int(time.time()) + 3600, user_id=1, username="admin")
     status = await auth_status()
@@ -151,17 +151,17 @@ async def test_auth_status_has_no_credentials_leak(cred_file) -> None:
 
 
 async def test_auth_status_reports_expired(cred_file) -> None:
-    from boyuan_agent.tools.credentials import auth_status
+    from official_agent.tools.credentials import auth_status
 
     credentials.save("expired", exp=int(time.time()) - 5)
     status = await auth_status()
     assert status["expired"] is True and status["authenticated"] is False
-    assert "boyuan-agent login" in status["hint"]
+    assert "official-agent login" in status["hint"]
 
 
 async def test_auth_status_when_never_logged_in(cred_file) -> None:
-    from boyuan_agent.tools.credentials import auth_status
+    from official_agent.tools.credentials import auth_status
 
     status = await auth_status()
     assert status["authenticated"] is False
-    assert "boyuan-agent login" in status["hint"]
+    assert "official-agent login" in status["hint"]

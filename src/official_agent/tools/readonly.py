@@ -15,7 +15,7 @@ PII 红线(#68):本层返回原文即 trace 上报原文。get_resume_detail 是
 import asyncio
 from typing import Any
 
-from boyuan_agent.tools.client import BackendClient, BackendError
+from official_agent.tools.client import BackendClient, BackendError
 
 _client: BackendClient | None = None
 _client_lock = asyncio.Lock()

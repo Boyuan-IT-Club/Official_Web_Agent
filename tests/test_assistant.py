@@ -18,14 +18,14 @@ from langchain_core.messages import (
 from langchain_core.outputs import ChatGeneration, ChatResult  # noqa: E402
 from langchain_core.tools import StructuredTool
 
-from boyuan_agent.graphs.assistant import (
+from official_agent.graphs.assistant import (
     _bind_my_interview,
     assemble_tools,
     identity_message,
     load_system_prompt,
 )
-from boyuan_agent.graphs.identity import ResolvedIdentity
-from boyuan_agent.tools import readonly
+from official_agent.graphs.identity import ResolvedIdentity
+from official_agent.tools import readonly
 
 
 class _FakeToolCallingModel(BaseChatModel):
@@ -127,7 +127,7 @@ async def test_react_loop_with_fake_model_tool_roundtrip(monkeypatch: pytest.Mon
     不花 API 费用验证 create_react_agent 接线(工具绑定/消息流/终止)。
     """
 
-    from boyuan_agent.graphs.assistant import build_assistant_agent
+    from official_agent.graphs.assistant import build_assistant_agent
 
     seq = iter(
         [
@@ -146,7 +146,7 @@ async def test_react_loop_with_fake_model_tool_roundtrip(monkeypatch: pytest.Mon
 
     fake_get_open_cycle.__name__ = "get_open_cycle"  # 注册名与真工具一致
 
-    import boyuan_agent.graphs.assistant as assistant_mod
+    import official_agent.graphs.assistant as assistant_mod
 
     # _ALL_TOOLS 在 import 时捕获原函数引用,patch 装配表本身
     patched_tools = dict(assistant_mod._ALL_TOOLS, get_open_cycle=fake_get_open_cycle)
@@ -167,7 +167,7 @@ async def test_react_loop_with_fake_model_tool_roundtrip(monkeypatch: pytest.Mon
 def test_role_tool_tables_stay_consistent() -> None:
     """防漂移:admin 档必须登记 _ALL_TOOLS 的全部工具(TOOL-05/SEC-02
     演化时,新工具只登记一张表会静默对全部角色不可见)。"""
-    import boyuan_agent.graphs.assistant as assistant_mod
+    import official_agent.graphs.assistant as assistant_mod
 
     assert set(assistant_mod._ROLE_TOOL_NAMES["admin"]) == set(assistant_mod._ALL_TOOLS)
     for role, names in assistant_mod._ROLE_TOOL_NAMES.items():
@@ -178,8 +178,8 @@ def test_build_model_openai_compatible_branch() -> None:
     """provider=openai-compatible 构造 ChatOpenAI(base_url 指向 DeepSeek 等)。"""
     from langchain_openai import ChatOpenAI
 
-    from boyuan_agent.config import Settings
-    from boyuan_agent.graphs.assistant import _build_model
+    from official_agent.config import Settings
+    from official_agent.graphs.assistant import _build_model
 
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None,
@@ -194,8 +194,8 @@ def test_build_model_openai_compatible_branch() -> None:
 
 
 def test_build_model_openai_compatible_missing_config_fails() -> None:
-    from boyuan_agent.config import Settings
-    from boyuan_agent.graphs.assistant import _build_model
+    from official_agent.config import Settings
+    from official_agent.graphs.assistant import _build_model
 
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None, llm_provider="openai-compatible",

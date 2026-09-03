@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from boyuan_agent.state import pg
+from official_agent.state import pg
 
 
 @pytest.mark.asyncio

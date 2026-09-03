@@ -6,9 +6,9 @@ checkpointer 承担(Postgres),多轮历史跨进程续接;session=thread_id。
 Langfuse callbacks fail-open 挂载(OBS-01)。
 
 用法:
-    uv run boyuan-agent chat                       # .env 服务账号身份
-    uv run boyuan-agent chat --username admin      # 模拟指定账号(密码交互输入)
-    uv run boyuan-agent chat --session recruit-qa  # session id(thread/trace 标识)
+    uv run official-agent chat                       # .env 服务账号身份
+    uv run official-agent chat --username admin      # 模拟指定账号(密码交互输入)
+    uv run official-agent chat --session recruit-qa  # session id(thread/trace 标识)
 """
 
 import asyncio
@@ -19,22 +19,22 @@ import typer
 from langchain_core.messages import AIMessageChunk, HumanMessage
 from rich.console import Console
 
-from boyuan_agent.config import get_settings
-from boyuan_agent.graphs.assistant import (
+from official_agent.config import get_settings
+from official_agent.graphs.assistant import (
     assemble_tools,
     build_assistant_agent,
     identity_message,
 )
-from boyuan_agent.graphs.identity import resolve
-from boyuan_agent.observability import langfuse_callbacks
-from boyuan_agent.state.pg import get_checkpointer
-from boyuan_agent.state.threads import (
+from official_agent.graphs.identity import resolve
+from official_agent.observability import langfuse_callbacks
+from official_agent.state.pg import get_checkpointer
+from official_agent.state.threads import (
     create_thread,
     ensure_agent_threads_table,
     find_active_by_subject,
 )
-from boyuan_agent.tools.client import BackendClient, BackendError
-from boyuan_agent.tools.readonly import get_backend_client
+from official_agent.tools.client import BackendClient, BackendError
+from official_agent.tools.readonly import get_backend_client
 
 app = typer.Typer(help="博远招新 Agent 开发 CLI")
 console = Console()
@@ -52,7 +52,7 @@ def login(
 
 
 async def _login(username: str, password: str) -> None:
-    from boyuan_agent import credentials
+    from official_agent import credentials
 
     if not username:
         username = typer.prompt("账号")
@@ -92,13 +92,13 @@ async def _login(username: str, password: str) -> None:
 
 
 def cli_mod_claims(token: str) -> dict:
-    from boyuan_agent.graphs.identity import _decode_jwt_payload
+    from official_agent.graphs.identity import _decode_jwt_payload
 
     return _decode_jwt_payload(token)
 
 
 async def _settings_base_url() -> str:
-    from boyuan_agent.config import get_settings
+    from official_agent.config import get_settings
 
     return get_settings().backend_base_url
 
@@ -182,7 +182,7 @@ async def _chat(username: str, password: str, session: str) -> None:
         callbacks = langfuse_callbacks()
 
         console.print(
-            f"[bold]boyuan-agent[/bold] 身份={identity['role']}(用户 {identity['user_id']}) "
+            f"[bold]official-agent[/bold] 身份={identity['role']}(用户 {identity['user_id']}) "
             f"session={tid} 工具={len(assemble_tools(identity, user_token))}个 "
             f"exit/退出 结束"
         )

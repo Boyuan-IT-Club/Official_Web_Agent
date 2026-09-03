@@ -17,7 +17,7 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
-from boyuan_agent.config import get_settings
+from official_agent.config import get_settings
 
 _STATUS_ACTIVE = "active"
 _STATUS_TERMINATED = "terminated"

@@ -1,8 +1,8 @@
 """MCP Server(TOOL-02):工具层的纯对外暴露面(ADR-0003)。
 
 仅供外部消费者(Claude Code 等)挂载:
-- stdio(默认,本地 Claude Code):`uv run python -m boyuan_agent.mcp_server`
-- HTTP:`uv run python -m boyuan_agent.mcp_server --http`(127.0.0.1:8000,/mcp)
+- stdio(默认,本地 Claude Code):`uv run python -m official_agent.mcp_server`
+- HTTP:`uv run python -m official_agent.mcp_server --http`(127.0.0.1:8000,/mcp)
 agent 进程内不走 MCP 回环——直接绑定 tools/ 下的 Python 函数(TOOL-07)。
 
 依赖 mcp SDK v2(FastMCP 已改名 MCPServer,transport 参数移至 run)。
@@ -17,12 +17,12 @@ from typing import Any
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from boyuan_agent.tools import credentials as credentials_tools
-from boyuan_agent.tools import readonly
-from boyuan_agent.tools.client import BackendError
+from official_agent.tools import credentials as credentials_tools
+from official_agent.tools import readonly
+from official_agent.tools.client import BackendError
 
 server = MCPServer(
-    "boyuan-backend",
+    "official-backend",
     instructions=(
         "博远信息技术社招新后端的只读查询工具集:招募周期、简历检索与详情、"
         "面试场次容量、未分配候选人、改期申请、汇总统计。"

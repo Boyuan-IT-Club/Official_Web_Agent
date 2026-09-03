@@ -6,8 +6,8 @@ import httpx
 import pytest
 import respx
 
-from boyuan_agent.config import Settings
-from boyuan_agent.tools.client import (
+from official_agent.config import Settings
+from official_agent.tools.client import (
     BackendAuthError,
     BackendClient,
     BackendError,

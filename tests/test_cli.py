@@ -20,11 +20,11 @@ from langchain_core.messages import (
 from langchain_core.outputs import ChatGeneration, ChatResult
 from typer.testing import CliRunner
 
-import boyuan_agent.cli as cli_mod
-from boyuan_agent.cli import app
-from boyuan_agent.config import Settings
-from boyuan_agent.tools import readonly
-from boyuan_agent.tools.client import BackendClient
+import official_agent.cli as cli_mod
+from official_agent.cli import app
+from official_agent.config import Settings
+from official_agent.tools import readonly
+from official_agent.tools.client import BackendClient
 
 runner = CliRunner()
 BASE = "http://backend.test"
@@ -107,7 +107,7 @@ def test_chat_bad_credentials_exits_with_error(monkeypatch: pytest.MonkeyPatch) 
     _install_mock_backend()
 
     async def fake_resolve(credential):  # noqa: ANN001, ARG001
-        from boyuan_agent.tools.client import BackendAuthError
+        from official_agent.tools.client import BackendAuthError
 
         raise BackendAuthError("用户名或密码错误(code 401)")
 
@@ -329,7 +329,7 @@ def test_run_turn_accumulates_history_and_shows_tool_flow(monkeypatch: pytest.Mo
 
 def test_exit_words_and_eof() -> None:
     """退出词/EOF 干净退出。"""
-    from boyuan_agent.cli import _EXIT_WORDS
+    from official_agent.cli import _EXIT_WORDS
 
     assert "exit" in _EXIT_WORDS and "退出" in _EXIT_WORDS
     assert cast(bool, "q" in _EXIT_WORDS)
@@ -342,7 +342,7 @@ def test_chat_backend_unreachable_exits_gracefully(monkeypatch: pytest.MonkeyPat
     _install_mock_backend()
 
     async def fake_resolve(credential):  # noqa: ANN001, ARG001
-        from boyuan_agent.graphs.identity import resolve as _r
+        from official_agent.graphs.identity import resolve as _r
 
         await _r({"kind": "cli"})  # type: ignore[typeddict-item]
 

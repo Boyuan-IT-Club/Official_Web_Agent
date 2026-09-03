@@ -1,4 +1,4 @@
-"""测试全局隔离:凭证文件指到 tmp,防真实 ~/.boyuan-agent 泄漏进测试。
+"""测试全局隔离:凭证文件指到 tmp,防真实 ~/.official-agent 泄漏进测试。
 
 SEC-09 的存储优先级意味着存在真实凭证时,测试行为会随本机状态漂移——
 autouse 隔离是正确性要求,不只是卫生。
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from boyuan_agent import credentials
+from official_agent import credentials
 
 
 @pytest.fixture(autouse=True)

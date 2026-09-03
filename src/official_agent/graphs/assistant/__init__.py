@@ -23,9 +23,9 @@ from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from pydantic import SecretStr
 
-from boyuan_agent.config import get_settings
-from boyuan_agent.graphs.identity import ResolvedIdentity
-from boyuan_agent.tools import readonly
+from official_agent.config import get_settings
+from official_agent.graphs.identity import ResolvedIdentity
+from official_agent.tools import readonly
 
 _PROMPT_FILE = Path(__file__).parent.parent.parent / "prompts" / "assistant.md"
 

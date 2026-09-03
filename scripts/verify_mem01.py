@@ -21,8 +21,8 @@ from langgraph.graph import StateGraph
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
-from boyuan_agent.state.pg import get_checkpointer
-from boyuan_agent.state.threads import (
+from official_agent.state.pg import get_checkpointer
+from official_agent.state.threads import (
     create_thread,
     ensure_agent_threads_table,
     get_thread,
