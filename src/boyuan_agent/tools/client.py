@@ -11,10 +11,11 @@
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
+from boyuan_agent import credentials
 from boyuan_agent.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -130,10 +131,23 @@ class BackendClient:
         return token
 
     async def _ensure_token(self) -> str:
+        """token 获取优先级(SEC-09):
+        内存缓存 → 本地存储凭证(boyuan-agent login 的产物)→ 账密 login。
+        .env 无账密且无存储凭证时,报可行动指引(运行 boyuan-agent login)。
+        """
         if self._token:
+            return self._token
+        stored = credentials.load()
+        if stored is not None:
+            self._token = cast("str", stored["token"])
             return self._token
         async with self._login_lock:
             if self._token is None:
+                if not self._settings.backend_service_username:
+                    raise BackendAuthError(
+                        "未配置凭证:请先运行 boyuan-agent login,或在 .env 设置 "
+                        "BACKEND_SERVICE_USERNAME/PASSWORD"
+                    )
                 self._token = await self._do_login()
             return self._token
 
@@ -260,7 +274,7 @@ def _error_message(body: dict[str, Any]) -> str:
     """业务错误 → 可行动文案:后端 message + code + 处置提示。"""
     code = body.get("code")
     message = body.get("message", "未知错误")
-    hint = _ACTIONABLE_HINTS.get(code)
+    hint = _ACTIONABLE_HINTS.get(code) if code is not None else None
     parts = [f"{message}(code {code})"]
     if hint:
         parts.append(hint)

@@ -11,11 +11,13 @@ agent 进程内不走 MCP 回环——直接绑定 tools/ 下的 Python 函数(T
 import functools
 import inspect
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
+from typing import Any
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
+from boyuan_agent.tools import credentials as credentials_tools
 from boyuan_agent.tools import readonly
 from boyuan_agent.tools.client import BackendError
 
@@ -29,7 +31,7 @@ server = MCPServer(
 )
 
 
-def _normalize_for_mcp(fn: Callable[..., Awaitable[object]]) -> Callable[..., Awaitable[object]]:
+def _normalize_for_mcp(fn: Callable[..., Any]) -> Callable[..., Any]:
     """MCP 消费面规范化:list 包 dict + 业务错误文案透传。
 
     两处 SDK v2 语义适配(真链路测试逐个抓出):
@@ -57,11 +59,13 @@ def _normalize_for_mcp(fn: Callable[..., Awaitable[object]]) -> Callable[..., Aw
     return wrapper
 
 
-# 只读工具注册。有意不注册的:
+# 只读工具注册。auth_status(SEC-09)也在此:模型可答「我是谁/token 还能用多久」,
+# 输出不含凭证本身。有意不注册的:
 # - get_my_interview:需最终用户本人令牌,服务账号语义下无意义
 # - 写工具(tools/write.py):仅在 agent 进程内经 interrupt 确认流程装配
 #   (GRA-05),MCP 消费方无确认通道,暴露即越权
 for fn in (
+    credentials_tools.auth_status,
     readonly.get_open_cycle,
     readonly.search_resumes,
     readonly.get_resume_detail,

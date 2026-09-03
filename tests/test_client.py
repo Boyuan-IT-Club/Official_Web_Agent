@@ -117,7 +117,7 @@ async def test_missing_credentials_fails_fast() -> None:
     settings = Settings(_env_file=None, backend_base_url=BASE)
     client = BackendClient(http=httpx.AsyncClient(base_url=BASE), settings=settings)
 
-    with pytest.raises(BackendAuthError, match="未配置服务账号凭证"):
+    with pytest.raises(BackendAuthError, match="未配置凭证"):
         await client.get("/api/cycles/open")
     await client.aclose()
 
