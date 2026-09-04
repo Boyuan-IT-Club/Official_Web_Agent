@@ -291,3 +291,54 @@ def test_chat_error_path_logs_error_row(
     assert len(logged) == 1
     assert logged[0]["error_code"] == "unknown"  # RuntimeError → unknown
     assert logged[0]["reply_summary"] == ""  # 错误行不存回复
+
+
+def test_chat_rebuilds_agent_after_config_change(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M6 #111 热生效:PUT /admin/config 后,续传会话下一轮重建 agent。"""
+    from official_agent.web import routes
+
+    builds: list[dict] = []
+
+    # 先装 fakes(resolve + 默认 fake agent);再包计数层,避免被 _install_fakes 覆盖
+    _install_fakes(monkeypatch)
+
+    def _counting_build(*args, **kwargs):
+        builds.append(kwargs)
+        return _FakeAgent()
+
+    monkeypatch.setattr(routes, "build_assistant_agent", _counting_build)
+    monkeypatch.setattr(routes, "_config_fingerprint", lambda: "fp-1")
+
+    # 第一轮:新建 session,agent 构建 1 次
+    with client.stream(
+        "POST",
+        "/api/agent/chat",
+        json={"message": "hi"},
+        headers={"Authorization": "Bearer tok"},
+    ) as resp:
+        events = _sse_events(resp)
+    sid = next(e["session_id"] for e in events if e["type"] == "session")
+    assert len(builds) == 1
+
+    # 配置变化(指纹变)→ 下一轮重建
+    monkeypatch.setattr(routes, "_config_fingerprint", lambda: "fp-2")
+    with client.stream(
+        "POST",
+        "/api/agent/chat",
+        json={"message": "hi again", "session_id": sid},
+        headers={"Authorization": "Bearer tok"},
+    ) as resp:
+        _sse_events(resp)
+    assert len(builds) == 2  # 配置变更后重建
+
+    # 指纹不变 → 不重建
+    with client.stream(
+        "POST",
+        "/api/agent/chat",
+        json={"message": "hi 3", "session_id": sid},
+        headers={"Authorization": "Bearer tok"},
+    ) as resp:
+        _sse_events(resp)
+    assert len(builds) == 2

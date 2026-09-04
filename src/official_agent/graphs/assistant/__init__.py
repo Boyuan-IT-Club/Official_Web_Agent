@@ -24,7 +24,7 @@ from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from pydantic import SecretStr
 
-from official_agent.config import get_settings
+from official_agent.config import get_effective_settings
 from official_agent.graphs.identity import ResolvedIdentity
 from official_agent.tools import readonly
 
@@ -172,7 +172,7 @@ def build_assistant_agent(
 
     checkpointer(MEM-01):传 AsyncPostgresSaver 则启用多轮持久化;
     None 则纯内存(CLI --session 标识仅作 trace 用)。"""
-    settings = get_settings()
+    settings = get_effective_settings()
     return create_agent(
         _build_model(settings),
         tools=assemble_tools(identity, user_token),

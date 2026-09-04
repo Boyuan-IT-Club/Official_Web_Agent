@@ -52,6 +52,9 @@ class _SessionState:
         self.identity = identity
         self.user_token = user_token
         self.agent = agent
+        # M6 #111 热生效:agent 装配时的配置指纹(HOT_KEYS 值哈希)。
+        # PUT /admin/config 后下一轮比对发现不同 → 重建 agent 用新配置。
+        self.applied_config_fingerprint: str | None = None
 
 
 # 会话注册表:session_id → 运行时状态。进程内存,单 worker 语义(多副本 INF-11)。
@@ -124,6 +127,8 @@ async def _get_or_create_session(
         checkpointer = getattr(request.app.state, "checkpointer", None)
         agent = build_assistant_agent(identity, user_token=user_token, checkpointer=checkpointer)
         session = _SessionState(session_id, identity, user_token, agent)
+        # 新建即记录当前配置指纹,避免首轮 _ensure_fresh_agent_config 误重建
+        session.applied_config_fingerprint = _config_fingerprint()
         _sessions[session_id] = session
         return session, True
 
@@ -147,8 +152,9 @@ async def chat(
     session_id = (body.get("session_id") or "").strip() or None
 
     session, is_new = await _get_or_create_session(request, identity, user_token, session_id)
+    checkpointer = getattr(request.app.state, "checkpointer", None)
     return StreamingResponse(
-        _stream_turn(session, message, is_new),
+        _stream_turn(session, message, is_new, checkpointer),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -185,8 +191,35 @@ def _error_code(exc: Exception) -> str:
         return _ERR_INVALID_REQUEST
     return _ERR_UNKNOWN
 
+
+def _config_fingerprint() -> str:
+    """当前生效配置(HOT_KEYS 值)的指纹;配置变更即变化。"""
+    from official_agent.config import HOT_KEYS, get_effective_settings
+
+    settings = get_effective_settings()
+    return repr(tuple((k, getattr(settings, k, None)) for k in sorted(HOT_KEYS)))
+
+
+def _ensure_fresh_agent_config(session: _SessionState, checkpointer: Any) -> None:
+    """M6 #111 热生效:比对配置指纹,变了则重建 session 的 agent。
+
+    PUT /admin/config 只失效 get_settings 缓存;活跃会话的 agent 是进程内
+    复用的(见模块 docstring),不重建就一直用旧 model/provider。此处每轮
+    比对指纹,发现变化即用新配置重建 agent(身份/token 不变)。
+    """
+    try:
+        current = _config_fingerprint()
+    except Exception:  # noqa: BLE001 — PG 不可用 → 指纹取 env(不重建)
+        return
+    if session.applied_config_fingerprint == current:
+        return
+    session.agent = build_assistant_agent(
+        session.identity, user_token=session.user_token, checkpointer=checkpointer
+    )
+    session.applied_config_fingerprint = current
+
 async def _stream_turn(
-    session: _SessionState, message: str, is_new: bool
+    session: _SessionState, message: str, is_new: bool, checkpointer: Any = None
 ) -> AsyncIterator[str]:
     """跑一轮:流式吐 SSE。is_new 由会话层判定(新建才注身份前缀)。
 
@@ -194,7 +227,11 @@ async def _stream_turn(
     - 正常:user_message(问题原文) + reply_summary(回复摘要非全文) + tools/耗时
     - 异常(error 事件):只存 error_code + 耗时,不存对话内容(决策 #102/#110)
     落行失败(fail-open)不阻断对话——观测绝不拖垮主流程(ADR-0005)。
+    checkpointer:配置变更后重建 agent 需要(见 _ensure_fresh_agent_config)。
     """
+    # M6 #111 热生效:配置指纹变了 → 重建 agent(新 model/provider 立即作用于本轮)
+    _ensure_fresh_agent_config(session, checkpointer)
+
     config = {
         "configurable": {"thread_id": session.session_id},
         "callbacks": langfuse_callbacks(),
@@ -297,3 +334,128 @@ def _log_conversation(
 
 def _elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
+
+
+# ── M6 #111 管理 API:配置热生效 ────────────────────────────────────────
+
+# 高敏键(Settings 字段名):真实凭证,只读回显掩码,永不入库/不可在线改。
+_SECRET_SETTINGS_FIELDS: frozenset[str] = frozenset(
+    {
+        "backend_service_username",
+        "backend_service_password",
+        "llm_api_key",
+        "anthropic_api_key",
+        "postgres_url",
+        "feishu_app_id",
+        "feishu_app_secret",
+        "feishu_verification_token",
+        "feishu_encrypt_key",
+        "langfuse_public_key",
+        "langfuse_secret_key",
+    }
+)
+
+
+def _mask_secret(value: str) -> str:
+    """掩码末 4 位(短值整掩)。"""
+    return value[-4:] if len(value) >= 4 else "****"
+
+
+async def _require_monitor(request: Request, authorization: Annotated[str | None, Header()] = None):
+    """管理 API 认证:官网 JWT → resolve → permission_codes 含 agent:monitor。"""
+    identity, _ = await _authenticate(request, authorization)
+    codes = identity.get("permission_codes") or []
+    if "agent:monitor" not in codes:
+        raise HTTPException(status_code=403, detail="需要 agent:monitor 权限")
+    return identity
+
+
+@router.get("/admin/config")
+async def get_admin_config(
+    _: Annotated[ResolvedIdentity, Depends(_require_monitor)],
+) -> dict[str, Any]:
+    """回显配置:低敏键实值(DB 覆盖优先) + 高敏键掩码({configured, masked})。"""
+    from official_agent.config import HOT_KEYS, get_settings
+
+    settings = get_settings()
+    try:
+        db_overrides = get_all_config()
+    except Exception:  # noqa: BLE001 — PG 不可用 → 只显示 env(fail-open)
+        db_overrides = {}
+
+    result: dict[str, Any] = {}
+    for field in HOT_KEYS:
+        result[field] = db_overrides.get(field, getattr(settings, field, ""))
+    for field in sorted(_SECRET_SETTINGS_FIELDS):
+        value = getattr(settings, field, "") or ""
+        result[field] = {
+            "configured": bool(value),
+            "masked": _mask_secret(value) if value else "",
+        }
+    return result
+
+
+# 安全(评审 MINOR-1):llm_base_url 若被改成任意端点,下轮重建 agent 时
+# .env 的 LLM key 会作为 Bearer 发往该端点 → key 泄漏。只允许 https + 受信 host。
+_ALLOWED_LLM_HOSTS: tuple[str, ...] = (
+    "api.deepseek.com",
+    "api.openai.com",
+    "api.anthropic.com",
+    "open.bigmodel.cn",
+)
+
+
+def _validate_base_url(value: str) -> None:
+    import urllib.parse
+
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise HTTPException(status_code=400, detail="llm_base_url 必须为 https 且含 host")
+    if parsed.hostname not in _ALLOWED_LLM_HOSTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"llm_base_url 的 host 不在白名单: {parsed.hostname}",
+        )
+
+
+@router.put("/admin/config")
+async def put_admin_config(
+    body: dict[str, str],
+    _: Annotated[ResolvedIdentity, Depends(_require_monitor)],
+) -> dict[str, Any]:
+    """改低敏键(HOT_KEYS 白名单)并热生效;非白名单(高敏)→ 400。"""
+    from official_agent.config import HOT_KEYS
+
+    invalid_keys = [k for k in body if k not in HOT_KEYS]
+    if invalid_keys:
+        raise HTTPException(status_code=400, detail=f"不可热载的键: {', '.join(invalid_keys)}")
+    for key, value in body.items():
+        value = (value or "").strip()
+        if not value:
+            raise HTTPException(status_code=400, detail=f"{key} 值不能为空")
+        if key == "llm_base_url":
+            _validate_base_url(value)
+        set_config(key, value)
+    # 全部键成功写库后才失效缓存(避免部分写 + 缓存未刷的分离,评审 MINOR-2)
+    invalidate_settings_cache()
+    return {"updated": list(body.keys())}
+
+def get_all_config() -> dict[str, str]:
+    """读 agent_config 全部键值(lazy;模块级包装供测试 patch)。"""
+    from official_agent.state.config_store import get_all_config as _impl
+
+    return _impl()
+
+
+def set_config(key: str, value: str) -> None:
+    """upsert 一个配置键(lazy;模块级包装供测试 patch)。"""
+    from official_agent.state.config_store import set_config as _impl
+
+    _impl(key, value)
+
+
+def invalidate_settings_cache() -> None:
+    """使 get_settings 缓存失效(lazy;模块级包装供测试 patch)。"""
+    from official_agent.config import invalidate_settings_cache as _impl
+
+    _impl()

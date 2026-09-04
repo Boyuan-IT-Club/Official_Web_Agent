@@ -28,17 +28,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     AsyncPostgresSaver 是跨请求共享的连接(checkpointer 无会话态,thread_id 隔离会话),
     get_checkpointer() 进入建连+建表,退出关闭(与 CLI cli.py:169-176 同语义)。
     """
-    from official_agent.state import conversation
+    from official_agent.state import config_store, conversation
     from official_agent.state.pg import get_checkpointer
     from official_agent.state.threads import ensure_agent_threads_table
-
     async with get_checkpointer() as saver:
         app.state.checkpointer = saver
         try:
-            # L-1:幂等建 agent_threads + agent_conversation_log 表(SEC-07/M6 #110)。
-            # 缺 conversation_log 表时落行失败仅 warning(fail-open),不降级 checkpointer。
+            # L-1:幂等建 agent_threads + agent_conversation_log + agent_config 表
+            # (SEC-07 / M6 #110 / #111)。缺表时降级(fail-open,ADR-0005)。
             ensure_agent_threads_table()
             conversation.ensure_conversation_table()
+            config_store.ensure_config_table()
         except Exception:  # noqa: BLE001 — PG 未起/配置错 → 降级(fail-open,ADR-0005)
             app.state.checkpointer = None
         yield
