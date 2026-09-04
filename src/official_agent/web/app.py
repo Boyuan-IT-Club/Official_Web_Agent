@@ -48,6 +48,10 @@ def create_app() -> FastAPI:
     """构建 FastAPI app。uvicorn 入口:``uvicorn official_agent.web.app:create_app``
     (factory 模式,便于测试注入)。"""
     settings = get_settings()
+    # M6 #113:日志 stdout + 落盘 RotatingFileHandler(幂等,测试安全)
+    from official_agent.logging_conf import setup_logging
+
+    setup_logging()
     app = FastAPI(title="official-web-agent", version="0.1.0", lifespan=lifespan)
 
     origins = [o.strip() for o in settings.agent_cors_origins.split(",") if o.strip()]

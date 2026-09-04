@@ -253,6 +253,13 @@ async def _stream_turn(
     tools_called: list[str] = []
     reply_chunks: list[str] = []
     error_code: str | None = None
+    usage_acc: dict[str, int | None] = {  # 跨 model 步累计(#113 MAJOR:ReAct 多步求和)
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_hit_tokens": 0,
+        "cache_miss_tokens": 0,
+    }
+    _last_usage: dict[str, int | None] | None = None
     try:
         async for mode, payload in session.agent.astream(  # type: ignore[attr-defined]
             {"messages": messages}, config=config, stream_mode=["messages", "updates"]
@@ -265,6 +272,21 @@ async def _stream_turn(
                     if text:
                         reply_chunks.append(text)
                         yield sse({"type": "delta", "role": "assistant", "content": text})
+                # M6 #113 usage:原始响应 usage(response_metadata.token_usage 保留
+                # DeepSeek 顶层 cache 字段;usage_metadata 会被 langchain 转换丢弃)。
+                # 只在 usage 终块(usage_metadata 非 None)累计,且同值去重防重复计数
+                # (传统流式 provider 在最终 usage-only chunk 才带 usage)。
+                um = getattr(chunk, "usage_metadata", None)
+                raw_usage = (chunk.response_metadata or {}).get("token_usage")
+                if um is not None and raw_usage:
+                    extracted = extract_usage(raw_usage)
+                    if extracted != _last_usage:  # 同值跳过(跨 chunk 累计值重复)
+                        _last_usage = extracted
+                        for k in usage_acc:
+                            v = extracted.get(k)
+                            cur = usage_acc.get(k) or 0
+                            if v is not None:
+                                usage_acc[k] = cur + v
             elif mode == "updates":
                 for _ns, node_update in payload.items():
                     if isinstance(node_update, dict):
@@ -285,7 +307,22 @@ async def _stream_turn(
         error_code = _ERR_DISCONNECTED
 
     # 单一写入路径:正常(error_code None)/错误/断连三态合一,落一行。
-    # 回复摘要 = 流式拼接的文本全文(非摘要,#110 仅先落全文本,M6 后续压缩/#108)。
+    # M6 #113 命中证据:缓存前缀稳定性 hash(system prompt + 角色工具名)。
+    # 同 role 的会话前缀应逐字节稳定;hash 变化 = 前缀失效(命中率不可信)。
+    from official_agent.graphs.assistant import _ROLE_TOOL_NAMES, load_system_prompt
+
+    role = session.identity.get("role") or "unknown"
+    tool_names = list(_ROLE_TOOL_NAMES.get(role, ()))
+    p_hash = prefix_hash(load_system_prompt(), tool_names)
+    if any(usage_acc.values()):
+        usage = usage_acc
+    else:
+        usage = {
+            "input_tokens": None,
+            "output_tokens": None,
+            "cache_hit_tokens": None,
+            "cache_miss_tokens": None,
+        }
     _log_conversation(
         session,
         user_message=message,
@@ -293,6 +330,8 @@ async def _stream_turn(
         tools=tools_called,
         duration_ms=_elapsed_ms(started),
         error_code=error_code,
+        usage=usage,
+        prefix_hash=p_hash,
     )
     if error_code is None:
         yield sse({"type": "done", "session_id": session.session_id})
@@ -306,6 +345,8 @@ def _log_conversation(
     tools: list[str],
     duration_ms: int,
     error_code: str | None = None,
+    usage: dict[str, int | None] | None = None,
+    prefix_hash: str | None = None,
 ) -> None:
     """落一行 conversation_log(fail-open,非阻塞)。
 
@@ -326,15 +367,31 @@ def _log_conversation(
                 tools=tools,
                 duration_ms=duration_ms,
                 error_code=error_code,
+                prefix_hash=prefix_hash,
+                **(usage or {}),
             )
         except Exception:  # noqa: BLE001 — 观测写入失败不拖垮对话(ADR-0005)
             logger.warning("conversation_log 写入失败(已忽略)", exc_info=True)
 
     asyncio.create_task(_write())
 
+
 def _elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
 
+
+def extract_usage(usage_metadata: dict[str, Any] | None) -> dict[str, int | None]:
+    """从 LLM usage_metadata 提取 token 数(lazy;模块级包装供测试 patch)。"""
+    from official_agent.state.conversation import extract_usage as _impl
+
+    return _impl(usage_metadata)
+
+
+def prefix_hash(system_prompt: str, tool_names: list[str]) -> str:
+    """缓存前缀稳定性 hash(lazy;模块级包装供测试 patch)。"""
+    from official_agent.state.conversation import prefix_hash as _impl
+
+    return _impl(system_prompt, tool_names)
 
 # ── M6 #111 管理 API:配置热生效 ────────────────────────────────────────
 

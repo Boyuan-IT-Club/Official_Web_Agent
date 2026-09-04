@@ -198,3 +198,101 @@ def test_list_conversations_sql_projects_no_full_message() -> None:
     assert "reply_summary" not in select_part
     # 无 "user_message" 作为独立 SELECT 列(仅作为 left() 参数)
     assert re.search(r"(?<!left\()\buser_message\b(?!, 20\))", select_part) is None
+
+
+# ── usage(#113) ─────────────────────────────────────────────────────────
+
+def test_extract_usage_from_metadata() -> None:
+    """从 usage_metadata 提取 token 数(含 DeepSeek cache 字段)。"""
+    usage = conversation.extract_usage(
+        {
+            "input_tokens": 150,
+            "output_tokens": 80,
+            "total_tokens": 230,
+            "input_token_details": {
+                "cache_read": 100,
+                "cache_creation": 50,
+            },
+        }
+    )
+    assert usage["input_tokens"] == 150
+    assert usage["output_tokens"] == 80
+    assert usage["cache_hit_tokens"] == 100  # cache_read = hit
+    assert usage["cache_miss_tokens"] == 50  # cache_creation = miss
+
+
+def test_extract_usage_empty() -> None:
+    """无 usage → 全 None(不崩)。"""
+    assert conversation.extract_usage(None) == {
+        "input_tokens": None,
+        "output_tokens": None,
+        "cache_hit_tokens": None,
+        "cache_miss_tokens": None,
+    }
+
+
+def test_write_conversation_stores_usage() -> None:
+    """write 传 usage → INSERT 含 token/cache 列(#113)。"""
+    row = _conversation_row()
+    row.update(
+        input_tokens=150, output_tokens=80,
+        cache_hit_tokens=100, cache_miss_tokens=50,
+    )
+    conn = _mock_conn(row)
+    with patch.object(conversation, "_conn", return_value=conn):
+        rec = conversation.write_conversation(
+            thread_id="web:u7:8f3a9c2b",
+            user_id=7,
+            user_message="hi",
+            input_tokens=150,
+            output_tokens=80,
+            cache_hit_tokens=100,
+            cache_miss_tokens=50,
+        )
+    params = conn.execute.call_args.args[1]
+    joined = "|".join(str(p) for p in params)
+    assert "150" in joined and "80" in joined
+    assert "100" in joined and "50" in joined
+    assert rec.input_tokens == 150
+    assert rec.cache_hit_tokens == 100
+
+
+def test_prefix_stability_hash_is_deterministic() -> None:
+    """prefix 稳定性 hash:同输入同值,变输入变值(#113 命中证据)。"""
+    from official_agent.state.conversation import prefix_hash
+
+    h1 = prefix_hash("system prompt A", ["tool_a", "tool_b"])
+    h2 = prefix_hash("system prompt A", ["tool_a", "tool_b"])
+    h3 = prefix_hash("system prompt A", ["tool_a", "tool_c"])
+    h4 = prefix_hash("system prompt B", ["tool_a", "tool_b"])
+    assert h1 == h2  # 稳定
+    assert h1 != h3  # 工具变 → hash 变
+    assert h1 != h4  # prompt 变 → hash 变
+
+
+def test_extract_usage_deepseek_top_level_cache_fields() -> None:
+    """DeepSeek 原生顶层 prompt_cache_* 字段(原始 response usage 形状)。"""
+    usage = conversation.extract_usage(
+        {
+            "input_tokens": 200,
+            "output_tokens": 60,
+            "prompt_cache_hit_tokens": 120,
+            "prompt_cache_miss_tokens": 80,
+        }
+    )
+    assert usage["input_tokens"] == 200
+    assert usage["cache_hit_tokens"] == 120
+    assert usage["cache_miss_tokens"] == 80
+
+
+def test_extract_usage_langchain_cached_tokens_mapping() -> None:
+    """langchain 映射形状:input_token_details.cached_tokens 也认。"""
+    usage = conversation.extract_usage(
+        {
+            "input_tokens": 150,
+            "output_tokens": 80,
+            "input_token_details": {"cached_tokens": 90, "cache_write_tokens": 60},
+        }
+    )
+    assert usage["cache_hit_tokens"] == 90
+    assert usage["cache_miss_tokens"] == 60

@@ -62,6 +62,7 @@ class ConversationRecord:
     output_tokens: int | None
     cache_hit_tokens: int | None
     cache_miss_tokens: int | None
+    prefix_hash: str | None
     compress_event: str | None
     created_at: Any
 
@@ -98,6 +99,62 @@ def ensure_conversation_table() -> None:
                 ON agent_conversation_log (thread_id, created_at DESC);
             """
         )
+        # M6 #113:prefix_hash 列(命中证据)为增量加列,老库幂等补齐
+        conn.execute(
+            "ALTER TABLE agent_conversation_log ADD COLUMN IF NOT EXISTS prefix_hash text"
+        )
+
+def prefix_hash(system_prompt: str, tool_names: list[str]) -> str:
+    """prefix 稳定性 hash(#113 命中证据):system prompt + 工具名的确定性指纹。
+
+    同输入同值;prompt/工具任一变化 hash 即变——配合响应 cache 字段,
+    双证据判断缓存前缀是否真的稳定(命中率可信的前提)。
+    """
+    import hashlib
+
+    material = f"{system_prompt}\x00{'|'.join(sorted(tool_names))}"
+    return hashlib.sha256(material.encode()).hexdigest()[:16]
+
+
+def extract_usage(usage_data: dict[str, Any] | None) -> dict[str, int | None]:
+    """从 LLM usage 数据提取 token 数(#113,DeepSeek/OpenAI-compatible)。
+
+    usage_data 接受两种形状(由调用方传原始响应 usage 或 usage_metadata):
+    - 原始响应 token_usage(dict):DeepSeek 顶层
+      prompt_cache_hit_tokens / prompt_cache_miss_tokens 在此(原生字段);
+      langchain-openai 转换会丢这两个字段,故必须读原始。
+    - langchain usage_metadata(InputTokenDetails):cache 在
+      input_token_details.cache_read / cache_creation(OpenAI 规范),
+      或 cached_tokens / cache_write_tokens(langchain 映射键)。
+    无数据 → 全 None(fail-open)。
+    """
+    if not usage_data or not isinstance(usage_data, dict):
+        return {
+            "input_tokens": None,
+            "output_tokens": None,
+            "cache_hit_tokens": None,
+            "cache_miss_tokens": None,
+        }
+    # 原始响应形状:DeepSeek 顶层 cache 字段 / OpenAI prompt_tokens/completion_tokens
+    hit = usage_data.get("prompt_cache_hit_tokens")
+    miss = usage_data.get("prompt_cache_miss_tokens")
+    input_tokens = usage_data.get("input_tokens", usage_data.get("prompt_tokens"))
+    output_tokens = usage_data.get("output_tokens", usage_data.get("completion_tokens"))
+
+    # usage_metadata 形状:cache 在 input_token_details
+    if hit is None or miss is None:
+        details = usage_data.get("input_token_details") or {}
+        if hit is None:
+            hit = details.get("cache_read", details.get("cached_tokens"))
+        if miss is None:
+            miss = details.get("cache_creation", details.get("cache_write_tokens"))
+
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_hit_tokens": hit,
+        "cache_miss_tokens": miss,
+    }
 
 
 def write_conversation(
@@ -110,12 +167,18 @@ def write_conversation(
     tools: list[str] | None = None,
     duration_ms: int | None = None,
     error_code: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cache_hit_tokens: int | None = None,
+    cache_miss_tokens: int | None = None,
+    prefix_hash: str | None = None,
 ) -> ConversationRecord:
     """落一行对话运营数据(SSE 每轮结束调用)。
 
     PII 过滤:user_message / reply_summary 写入前强制 mask_pii。
     错误行(error_code 非空):只存 error_code + 元数据,user_message/reply_summary 置空。
-    tools 序列化为 jsonb。
+    tools 序列化为 jsonb;usage 列(#113)由调用方传 extract_usage 结果;
+    prefix_hash 为缓存前缀稳定性证据。
     """
     if error_code:
         # 异常/错误行不存对话内容(决策 #102/#110)
@@ -130,11 +193,13 @@ def write_conversation(
             """
             INSERT INTO agent_conversation_log
                 (thread_id, user_id, channel, user_message, reply_summary,
-                tools, duration_ms, error_code)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                tools, duration_ms, error_code, input_tokens, output_tokens,
+                cache_hit_tokens, cache_miss_tokens, prefix_hash)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id, thread_id, user_id, channel, user_message, reply_summary,
                       tools, duration_ms, error_code, input_tokens, output_tokens,
-                      cache_hit_tokens, cache_miss_tokens, compress_event, created_at
+                      cache_hit_tokens, cache_miss_tokens, prefix_hash,
+                      compress_event, created_at
             """,
             (
                 thread_id,
@@ -145,6 +210,11 @@ def write_conversation(
                 Jsonb(tools or []),
                 duration_ms,
                 error_code,
+                input_tokens,
+                output_tokens,
+                cache_hit_tokens,
+                cache_miss_tokens,
+                prefix_hash,
             ),
         ).fetchone()
     if row is None:
@@ -169,6 +239,7 @@ def _record(row: dict[str, Any]) -> ConversationRecord:
         output_tokens=row["output_tokens"],
         cache_hit_tokens=row["cache_hit_tokens"],
         cache_miss_tokens=row["cache_miss_tokens"],
+        prefix_hash=row.get("prefix_hash"),
         compress_event=row["compress_event"],
         created_at=row["created_at"],
     )
@@ -214,7 +285,8 @@ def get_conversation(conversation_id: int) -> dict[str, Any] | None:
         row = conn.execute(
             """
             SELECT id, thread_id, user_id, channel, user_message, reply_summary,
-                   tools, duration_ms, error_code, created_at
+                   tools, duration_ms, error_code, input_tokens, output_tokens,
+                   cache_hit_tokens, cache_miss_tokens, prefix_hash, created_at
             FROM agent_conversation_log
             WHERE id = %s
             """,
