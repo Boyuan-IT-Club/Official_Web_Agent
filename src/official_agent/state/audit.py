@@ -74,14 +74,21 @@ def write_audit(
     action: dict[str, Any],
     decision: str,
     result: str,
-    trace_id: str,
+    trace_id: str | None = None,
 ) -> AuditRecord:
     """写一条审计行。action 是操作指纹字典(工具名+参数,与确认令牌同指纹)。
 
     decision:approve(批准执行)/ reject(拒绝)——interrupt 恢复决策。
     result:执行结果摘要(成功/失败的可行动文案,TOOL-06)。
-    trace_id 串 Langfuse(OBS-02)全过程。
+    trace_id 串 Langfuse(OBS-02)全过程;缺省取 current_trace_id()
+    (优先级 span > 轮 id > 全零,永非空)。
     """
+    if trace_id is None:
+        # 延迟导入:#95(OBS-02)先合 main,本分支 rebase 后缺省路径自然生效;
+        # 在此之前显式传 trace_id 的调用方不受影响。
+        from official_agent.observability import current_trace_id
+
+        trace_id = current_trace_id()
     with _conn() as conn:
         row = conn.execute(
             """
