@@ -31,6 +31,7 @@ from official_agent.observability import (
     reset_turn_trace_id,
     set_turn_trace_id,
 )
+from official_agent.state.audit import ensure_audit_table
 from official_agent.state.pg import get_checkpointer
 from official_agent.state.threads import (
     create_thread,
@@ -172,6 +173,7 @@ async def _chat(username: str, password: str, session: str) -> None:
         try:
             saver = await stack.enter_async_context(get_checkpointer())
             ensure_agent_threads_table()  # L-1:幂等建 agent_threads 档案表
+            ensure_audit_table()  # L-1:幂等建 agent_audit_log(SEC-03,空库自举)
         except Exception as exc:  # noqa: BLE001 — PG 未起/配置错 → 降级
             msg = "[dim]Postgres 未连接,本轮无持久化(MEM-01 需启动 Langfuse PG):[/dim]"
             console.print(f"{msg} {exc}")
