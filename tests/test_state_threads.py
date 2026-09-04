@@ -6,6 +6,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from official_agent.state import threads
 
 
@@ -128,6 +130,62 @@ def test_soft_delete_returns_false_when_not_found() -> None:
     conn = _mock_conn([])  # rowcount=0 → False
     with patch.object(threads, "_conn", return_value=conn):
         assert threads.soft_delete_thread("nope", owner_user_id=7) is False
+
+
+def test_create_thread_terminated_tid_rejected() -> None:
+    """Review Fix 1:已终结 tid 二次建档必须拒绝(终结即终结,ADR-0008 §4)。"""
+    conn = MagicMock()
+    conn.__enter__.return_value = conn
+    conn.__exit__.return_value = False
+    terminated = _row(tid="cli:u7:abc12345", subject="qa-1")
+    terminated["status"] = "terminated"
+    conn.execute.side_effect = [
+        MagicMock(fetchone=lambda: None),  # INSERT ON CONFLICT → None
+        MagicMock(fetchone=lambda: terminated),  # SELECT → 已终结记录
+    ]
+    with (
+        patch.object(threads, "_conn", return_value=conn),
+        pytest.raises(ValueError, match="已终结"),
+    ):
+        threads.create_thread("cli", 7, thread_id="cli:u7:abc12345")
+
+
+def test_create_thread_cross_owner_tid_rejected() -> None:
+    """Review Fix 5:他人 tid 二次建档必须拒绝(跨属主借用)。"""
+    conn = MagicMock()
+    conn.__enter__.return_value = conn
+    conn.__exit__.return_value = False
+    other = _row(tid="cli:u8:abc12345")  # owner=8
+    other["owner_user_id"] = 8
+    conn.execute.side_effect = [
+        MagicMock(fetchone=lambda: None),
+        MagicMock(fetchone=lambda: other),
+    ]
+    with (
+        patch.object(threads, "_conn", return_value=conn),
+        pytest.raises(ValueError, match="他人占用"),
+    ):
+        threads.create_thread("cli", 7, thread_id="cli:u8:abc12345")
+
+
+def test_resolve_thread_rejects_terminated() -> None:
+    """Review Fix 2:resolve_thread 拒绝已终结 thread(含属主校验)。"""
+    terminated = _row(tid="cli:u7:abc")
+    terminated["status"] = "terminated"
+    conn = _mock_conn([terminated])
+    with patch.object(threads, "_conn", return_value=conn):
+        assert threads.resolve_thread("cli:u7:abc", 7) is None  # 属主对但已终结
+
+
+def test_soft_delete_always_scoped_by_owner() -> None:
+    """Review Fix 4:soft_delete 恒带 owner 过滤(SQL 无 None 分支)。"""
+    conn = _mock_conn([{"dummy": 1}])
+    with patch.object(threads, "_conn", return_value=conn):
+        assert threads.soft_delete_thread("t1", owner_user_id=7) is True
+    sql, params = conn.execute.call_args.args
+    assert "AND owner_user_id = %s" in sql
+    assert "owner_user_id" in sql
+    assert params[2] == 7
 
 
 def test_soft_delete_requires_owner_match() -> None:

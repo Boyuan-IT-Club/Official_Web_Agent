@@ -32,6 +32,8 @@ from official_agent.state.threads import (
     create_thread,
     ensure_agent_threads_table,
     find_active_by_subject,
+    new_thread_id,
+    resolve_thread,
 )
 from official_agent.tools.client import BackendClient, BackendError
 from official_agent.tools.readonly import get_backend_client
@@ -80,7 +82,9 @@ async def _login(username: str, password: str) -> None:
     except httpx.HTTPError as exc:
         console.print(f"[red]登录失败:[/red] 网络异常({exc})")
         raise typer.Exit(1) from None
-    claims = cli_mod_claims(token)
+    from official_agent.graphs.identity import _decode_jwt_payload
+
+    claims = _decode_jwt_payload(token)
     credentials.save(
         token,
         exp=int(claims.get("exp") or (time.time() + 7 * 24 * 3600)),
@@ -89,12 +93,6 @@ async def _login(username: str, password: str) -> None:
     )
     await client.aclose()
     console.print(f"[green]已保存凭证[/green](用户 {claims.get('userId')},7 天内免登录)")
-
-
-def cli_mod_claims(token: str) -> dict:
-    from official_agent.graphs.identity import _decode_jwt_payload
-
-    return _decode_jwt_payload(token)
 
 
 async def _settings_base_url() -> str:
@@ -147,7 +145,9 @@ async def _chat(username: str, password: str, session: str) -> None:
         try:
             existing = find_active_by_subject(user_id, "cli", session)
             if existing is not None:
-                tid = existing.thread_id
+                # 双重校验:恢复路径统一走 resolve_thread(属主+active 硬门禁)
+                resolved = resolve_thread(existing.thread_id, user_id)
+                tid = resolved.thread_id if resolved else ""
             else:
                 tid = create_thread("cli", user_id, subject=session).thread_id
         except Exception as exc:  # noqa: BLE001 — 建档失败不阻断对话
@@ -157,8 +157,10 @@ async def _chat(username: str, password: str, session: str) -> None:
         try:
             tid = create_thread("cli", user_id).thread_id
         except Exception as exc:  # noqa: BLE001 — 建档失败不阻断对话
-            console.print(f"[dim]建档失败(将用 dev 会话):[/dim] {exc}")
-            tid = "dev"
+            # 降级:不用共享/可猜 dev —— 生成随机唯一 tid 保 trace 隔离
+            # (PG 挂了无持久化,但 thread_id 不跨用户共享,不违反 SEC-07 §1)
+            console.print(f"[dim]建档失败(PG 不可用,本会话不持久化):[/dim] {exc}")
+            tid = new_thread_id("cli", user_id or 0)
 
     # checkpointer(fail-open,ADR-0005):PG 不可达则降级无 checkpointer,
     # CLI 仍可用(持久化是增强,不阻断对话)。
@@ -207,9 +209,11 @@ async def _chat(username: str, password: str, session: str) -> None:
                 return
 
             if saver is not None:
-                # 持久化事实判据:该 thread 已有历史则只发增量(续接),否则带前缀
+                # 持久化事实判据:checkpointer 有该 thread 状态即视为续接
+                # (含 pending interrupt 断点——无 messages 也算有历史),
+                # 只发增量;全空 = 新线程,带身份前缀。
                 state = await agent.aget_state({"configurable": {"thread_id": tid}})
-                has_history = bool(state and state.values.get("messages"))
+                has_history = state is not None
                 messages = (
                     [first_input, HumanMessage(content=user_input)]
                     if not has_history

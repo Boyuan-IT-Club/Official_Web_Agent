@@ -22,6 +22,8 @@ from official_agent.config import get_settings
 _STATUS_ACTIVE = "active"
 _STATUS_TERMINATED = "terminated"
 
+# 与 agent_threads 表列一致;多处 SELECT 共用,防投影漂移
+_COLUMNS = "thread_id, owner_user_id, channel, status, subject, created_at, deleted_at"
 
 @dataclass(frozen=True)
 class ThreadRecord:
@@ -65,13 +67,13 @@ def ensure_agent_threads_table() -> None:
         )
 
 
-def new_thread_id(channel: str, owner_user_id: int, *, random_chars: int = 8) -> str:
-    """SEC-07 规范生成 thread_id:{channel}:{user}:{random8}。
+def new_thread_id(channel: str, owner_user_id: int) -> str:
+    """SEC-07 规范生成 thread_id:{channel}:u{user}:{random8}。
 
-    channel=cli/web/feishu;owner 段防猜(用户标识)+ random8 防碰撞。
+    channel=cli/web/feishu;owner 段防猜(用户标识)+ random8(secrets)防碰撞。
     thread_id 自带属主维度,恢复路径可据此校验。
     """
-    return f"{channel}:u{owner_user_id}:{secrets.token_hex(random_chars // 2)}"
+    return f"{channel}:u{owner_user_id}:{secrets.token_hex(4)}"
 
 
 def create_thread(
@@ -99,12 +101,20 @@ def create_thread(
             (tid, owner_user_id, channel, _STATUS_ACTIVE, subject),
         ).fetchone()
         if row is None:
-            # 冲突:已存在,取既有记录返回(幂等)
-            row = conn.execute(
-                "SELECT thread_id, owner_user_id, channel, status, subject, created_at, deleted_at "
+            # 冲突:tid 已存在。幂等仅限「同属主 + 仍 active」——
+            # 跨属主借用 / 已终结复活都是 SEC-07 明令禁止的。
+            existing = conn.execute(
+                "SELECT " + _COLUMNS + " "
                 "FROM agent_threads WHERE thread_id = %s",
                 (tid,),
             ).fetchone()
+            if existing is None:
+                raise RuntimeError(f"建档失败:{tid}")
+            if existing["owner_user_id"] != owner_user_id:
+                raise ValueError(f"thread_id 已被他人占用:{tid}(属主不匹配,拒绝)")
+            if existing["status"] != _STATUS_ACTIVE:
+                raise ValueError(f"thread_id 已终结,不可复活/复用:{tid}")
+            row = existing
     if row is None:
         raise RuntimeError(f"建档失败:{tid}")
     return _record(row)
@@ -114,7 +124,7 @@ def get_thread(thread_id: str) -> ThreadRecord | None:
     """按 thread_id 取记录;不存在返回 None。不做属主校验(留给调用方按需)。"""
     with _conn() as conn:
         row = conn.execute(
-            "SELECT thread_id, owner_user_id, channel, status, subject, created_at, deleted_at "
+            "SELECT " + _COLUMNS + " "
             "FROM agent_threads WHERE thread_id = %s",
             (thread_id,),
         ).fetchone()
@@ -122,12 +132,15 @@ def get_thread(thread_id: str) -> ThreadRecord | None:
 
 
 def resolve_thread(thread_id: str, actor_user_id: int) -> ThreadRecord | None:
-    """恢复/读取路径的属主硬校验入口(SEC-07):非属主返回 None(拒绝)。
+    """恢复/读取路径的属主硬校验入口(SEC-07):非属主 / 已终结返回 None(拒绝)。
 
-    调用方(CLI/GRA 恢复历史前)统一走这里,防可枚举跨会话翻看(PII)。
+    调用方(CLI/GRA 恢复历史前)统一走这里,防可枚举跨会话翻看(PII),
+    且终结即终结(ADR-0008 §4)——已终结 thread 一律拒绝恢复。
     """
     rec = get_thread(thread_id)
     if rec is None or rec.owner_user_id != actor_user_id:
+        return None
+    if rec.status != _STATUS_ACTIVE:
         return None
     return rec
 
@@ -141,7 +154,7 @@ def find_active_by_subject(
     """
     with _conn() as conn:
         row = conn.execute(
-            "SELECT thread_id, owner_user_id, channel, status, subject, created_at, deleted_at "
+            "SELECT " + _COLUMNS + " "
             "FROM agent_threads WHERE owner_user_id = %s AND channel = %s "
             "AND subject = %s AND status = %s "
             "ORDER BY created_at DESC LIMIT 1",
@@ -153,7 +166,7 @@ def find_active_by_subject(
 def list_active_threads(owner_user_id: int | None = None) -> list[ThreadRecord]:
     """活动线程列表(软删除之外的)。owner_user_id 给则只列该属主。"""
     sql = (
-        "SELECT thread_id, owner_user_id, channel, status, subject, created_at, deleted_at "
+        "SELECT " + _COLUMNS + " "
         "FROM agent_threads WHERE status = %s"
     )
     params: list[Any] = [_STATUS_ACTIVE]
@@ -166,17 +179,16 @@ def list_active_threads(owner_user_id: int | None = None) -> list[ThreadRecord]:
 
 
 def soft_delete_thread(thread_id: str, *, owner_user_id: int) -> bool:
-    """软删除:置 status='terminated' + deleted_at=now()。属主必填(SEC-07)。
+    """软删除:置 status='terminated' + deleted_at=now(),仅限属主本人。
 
-    owner_user_id 为必填关键字参数——防调用方漏传导致跨属主误删(M-3)。
+    owner_user_id 为必填关键字参数(M-3):恒带属主过滤,杜绝跨属主误删。
     """
-    sql = "UPDATE agent_threads SET status = %s, deleted_at = now() WHERE thread_id = %s"
-    params: list[Any] = [_STATUS_TERMINATED, thread_id]
-    if owner_user_id is not None:
-        sql += " AND owner_user_id = %s"
-        params.append(owner_user_id)
     with _conn() as conn:
-        cur = conn.execute(sql, params)
+        cur = conn.execute(
+            "UPDATE agent_threads SET status = %s, deleted_at = now() "
+            "WHERE thread_id = %s AND owner_user_id = %s",
+            (_STATUS_TERMINATED, thread_id, owner_user_id),
+        )
         return cur.rowcount > 0
 
 
