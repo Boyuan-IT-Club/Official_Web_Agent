@@ -29,13 +29,11 @@ def require_confirmation(summary: str) -> str:
     图上下文内:interrupt() 自行挂起(抛 GraphInterrupt 由 LangGraph 捕获),
     恢复后返回 resume 值——不要 try/except 干扰,否则破坏恢复匹配。
     非图上下文:interrupt() 抛 RuntimeError,由调用方转 ConfirmationRequired。
+    NOTE: 脆弱点在 write.py 的 `except RuntimeError`——那是对「interrupt 无法
+    挂起」的降级;将来任何人在这加宽 except 吞掉 GraphInterrupt,恢复匹配即坏。
     """
     decision = interrupt({"summary": summary, "confirm": True})
     if decision not in (APPROVE, REJECT):
         raise ConfirmationRequired(f"非法确认决策:{decision!r}(仅接受 approve/reject)")
     return decision
 
-
-def is_operation_approved(summary: str) -> bool:
-    """便捷封装:只关心批准与否(拒绝/取消都视为不执行)。"""
-    return require_confirmation(summary) == APPROVE
