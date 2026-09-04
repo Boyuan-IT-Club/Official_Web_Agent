@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)
     postgres_url: str = "postgresql://localhost:5432/official_agent"
 
+    # FastAPI 服务(INF-04):官网候选人客服通道
+    agent_host: str = "127.0.0.1"
+    agent_port: int = 8001
+    # CORS 白名单:官网前端域名(默认 dev:React CRA http://localhost:3000)
+    agent_cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+
     # 飞书(M3)
     feishu_app_id: str = ""
     feishu_app_secret: str = ""

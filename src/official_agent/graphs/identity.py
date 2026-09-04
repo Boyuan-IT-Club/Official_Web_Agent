@@ -17,7 +17,7 @@ state/checkpointer(落库即泄漏面,SEC-07 thread 契约亦禁止)。
 
 import base64
 import json
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict
 
 from official_agent.tools.client import BackendClient, BackendError
 from official_agent.tools.readonly import get_backend_client, set_backend_client
@@ -60,10 +60,33 @@ async def resolve(credential: IdentityCredential) -> ResolvedIdentity:
     if kind == "cli":
         return await _resolve_cli(credential)
     if kind == "web":
-        raise NotImplementedError(
-            "官网通道身份解析待 SEC-01 落地(GET /api/auth/me),见 issue #52"
-        )
+        return await _resolve_web(credential)
     raise NotImplementedError("飞书通道待 M3(open_id→用户映射),见 issue #5")
+
+
+async def _resolve_web(
+    credential: IdentityCredential,
+    settings: Any | None = None,
+) -> ResolvedIdentity:
+    """官网通道身份解析:官网 JWT → GET /api/auth/me 换身份(#89 A2)。
+
+    与 CLI 通道统一:身份从后端 /auth/me 返回(仅 userId/roleNames/permissionCodes,
+    最小暴露,不含 PII);数据查询的 user_token 由入口层原样转工具(本函数只解析身份)。
+    settings 供测试注入;生产默认读 .env。
+    """
+    token = credential.get("token")
+    if not token:
+        raise BackendError("缺少官网 JWT(token),无法解析身份")
+    from official_agent.tools.client import BackendClient
+
+    client = BackendClient(settings=settings)
+    try:
+        # /auth/me:sse 通道用单独 client;get_as_user 裸发官网 JWT
+        # (不走服务账号 login/不覆盖 Authorization/不做服务账号重试)
+        data = await client.get_as_user("/api/auth/me", user_token=token)
+    finally:
+        await client.aclose()
+    return _identity_from_claims(data, "web")
 
 
 async def _resolve_cli(credential: IdentityCredential) -> ResolvedIdentity:

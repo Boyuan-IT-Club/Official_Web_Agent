@@ -14,6 +14,7 @@ from official_agent.graphs.identity import (
     ResolvedIdentity,
     _decode_jwt_payload,
     _map_role,
+    _resolve_web,
     resolve,
 )
 from official_agent.graphs.router import AgentState, build_router_graph, resolve_identity
@@ -173,9 +174,56 @@ async def test_resolve_cli_missing_user_id_degrades() -> None:
         await cleanup_shared_client()
 
 
-async def test_resolve_web_and_feishu_reserved_with_guidance() -> None:
-    with pytest.raises(NotImplementedError, match="api/auth/me"):
-        await resolve(IdentityCredential(kind="web", token="x"))
+@respx.mock
+async def test_resolve_web_full_chain_calls_auth_me() -> None:
+    """官网通道:官网 JWT → GET /api/auth/me → ResolvedIdentity(source=web)。"""
+    auth_me = respx.get(f"{BASE}/api/auth/me").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": 200,
+                "message": "ok",
+                "data": {
+                    "userId": 7,
+                    "roleNames": ["申请人"],
+                    "permissionCodes": ["candidate:read:own"],
+                },
+            },
+        )
+    )
+    identity = await _resolve_web(
+        IdentityCredential(kind="web", token="official-jwt"), settings=mock_settings()
+    )
+    assert identity == ResolvedIdentity(
+        user_id=7,
+        role="candidate",
+        role_names=["申请人"],
+        permission_codes=["candidate:read:own"],
+        source="web",
+    )
+    # 官网 JWT 以 Bearer 原样转发,agent 不解/不验签 token
+    sent_auth = auth_me.calls.last.request.headers["Authorization"]
+    assert sent_auth == "Bearer official-jwt"
+
+
+@respx.mock
+async def test_resolve_web_auth_failure_raises() -> None:
+    """官网通道凭证错:后端 /auth/me 拒绝 → 抛 BackendError(入口层转 401)。"""
+    respx.get(f"{BASE}/api/auth/me").mock(
+        return_value=httpx.Response(401, json={"code": 401, "message": "token 无效"})
+    )
+    with pytest.raises(BackendError):
+        await _resolve_web(IdentityCredential(kind="web", token="bad"), settings=mock_settings())
+
+
+async def test_resolve_web_missing_token_raises() -> None:
+    """官网通道缺 token:直接拒绝,不发请求。"""
+    with pytest.raises(BackendError, match="官网 JWT"):
+        await _resolve_web(IdentityCredential(kind="web"), settings=mock_settings())
+
+
+async def test_resolve_feishu_still_reserved() -> None:
+    """飞书通道仍未实现(M3):保持 NotImplementedError。"""
     with pytest.raises(NotImplementedError, match="M3"):
         await resolve(IdentityCredential(kind="feishu"))
 
