@@ -172,3 +172,57 @@ def _record(row: dict[str, Any]) -> ConversationRecord:
         compress_event=row["compress_event"],
         created_at=row["created_at"],
     )
+
+
+def list_conversations(
+    user_id: int | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """运营列表投影(#112):id/thread/user/问题首字/错误码/时间,不含完整消息。
+
+    列表不返回 user_message/reply_summary 全文(轻量,要全文走详情)。
+    可按 user_id 过滤;LIMIT/OFFSET 分页(调用方限上限)。
+    """
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
+    sql = (
+        "SELECT id, thread_id, user_id, channel, error_code, created_at, "
+        "left(user_message, 20) AS user_message_head "
+        "FROM agent_conversation_log"
+    )
+    params: list[Any] = []
+    conds: list[str] = []
+    if user_id is not None:
+        conds.append("user_id = %s")
+        params.append(user_id)
+    if conds:
+        sql += " WHERE " + " AND ".join(conds)
+    sql += " ORDER BY id DESC LIMIT %s OFFSET %s"
+    params.extend([limit, offset])
+    with _conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_conversation(conversation_id: int) -> dict[str, Any] | None:
+    """单行详情(#112):含完整 user_message/reply_summary/tools。
+
+    错误行的 user_message/reply_summary 在写入时已剥离(为空),此处原样返回。
+    """
+    with _conn() as conn:
+        row = conn.execute(
+            """
+            SELECT id, thread_id, user_id, channel, user_message, reply_summary,
+                   tools, duration_ms, error_code, created_at
+            FROM agent_conversation_log
+            WHERE id = %s
+            """,
+            (conversation_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    tools = result.get("tools")
+    result["tools"] = tools if isinstance(tools, list) else []
+    return result

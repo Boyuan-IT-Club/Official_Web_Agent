@@ -459,3 +459,50 @@ def invalidate_settings_cache() -> None:
     from official_agent.config import invalidate_settings_cache as _impl
 
     _impl()
+
+
+# ── M6 #112 管理 API:运营视图(对话列表/详情) ───────────────────────────
+
+def list_conversations(**kwargs: Any) -> list[dict[str, Any]]:
+    """运营列表(lazy;模块级包装供测试 patch)。"""
+    from official_agent.state.conversation import list_conversations as _impl
+
+    return _impl(**kwargs)
+
+
+def get_conversation(conversation_id: int) -> dict[str, Any] | None:
+    """对话详情(lazy;模块级包装供测试 patch)。"""
+    from official_agent.state.conversation import get_conversation as _impl
+
+    return _impl(conversation_id)
+
+
+@router.get("/admin/conversations")
+async def get_admin_conversations(
+    request: Request,
+    _: Annotated[ResolvedIdentity, Depends(_require_monitor)],
+) -> dict[str, Any]:
+    """运营列表:时间/用户/问题首字/状态,按 user_id 过滤 + 分页(#112)。"""
+    user_id_raw = request.query_params.get("user_id")
+    limit_raw = request.query_params.get("limit", "50")
+    offset_raw = request.query_params.get("offset", "0")
+    try:
+        user_id = int(user_id_raw) if user_id_raw is not None else None
+        limit = max(1, min(int(limit_raw), 200))
+        offset = max(0, int(offset_raw))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="user_id/limit/offset 必须为整数") from None
+    items = list_conversations(user_id=user_id, limit=limit, offset=offset)
+    return {"items": items, "limit": limit, "offset": offset}
+
+
+@router.get("/admin/conversations/{conversation_id}")
+async def get_admin_conversation_detail(
+    conversation_id: int,
+    _: Annotated[ResolvedIdentity, Depends(_require_monitor)],
+) -> dict[str, Any]:
+    """对话详情:轮次/工具/耗时/错误码 + 可展开回复摘要(#112)。"""
+    row = get_conversation(conversation_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return row
