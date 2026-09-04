@@ -109,6 +109,7 @@ async def test_resolve_cli_full_chain_registers_identity_client() -> None:
             )
         assert identity == ResolvedIdentity(
             user_id=7,
+            name=None,  # CLI 解 JWT claims,JWT 无 name 字段
             role="admin",
             role_names=["管理员"],
             permission_codes=["user:view", "resume:view"],
@@ -182,9 +183,9 @@ async def test_resolve_web_full_chain_calls_auth_me() -> None:
             200,
             json={
                 "code": 200,
-                "message": "ok",
                 "data": {
                     "userId": 7,
+                    "name": "申请人甲",
                     "roleNames": ["申请人"],
                     "permissionCodes": ["candidate:read:own"],
                 },
@@ -196,6 +197,7 @@ async def test_resolve_web_full_chain_calls_auth_me() -> None:
     )
     assert identity == ResolvedIdentity(
         user_id=7,
+        name="申请人甲",  # /auth/me 补的档案字段
         role="candidate",
         role_names=["申请人"],
         permission_codes=["candidate:read:own"],

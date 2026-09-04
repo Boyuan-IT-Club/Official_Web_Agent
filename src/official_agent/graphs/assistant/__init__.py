@@ -4,8 +4,9 @@
 装配粗粒度三档(SEC-02 后续细化到权限码级并补安全测试):
 - admin:9 个只读工具全量
 - member:公共查询面(open_cycle/search/统计/场次容量)
-- candidate:仅 get_my_interview,且装配时绑定用户令牌——模型只见
-  cycle_id,永不接触凭证(凭证红线,GRA-01 同款纪律)
+- candidate:get_open_cycle + get_my_interview,且装配时绑定用户令牌——模型只见
+  cycle_id,永不接触凭证(凭证红线,GRA-01 同款纪律);加 get_open_cycle 是为让
+  候选人自动拿「当前开放周期」再查本人面试(候选入口无周期管理,需自己能取)
 - unknown:空集(无工具,纯问答;装配层是第一道闸,ADR-0005)
 
 静态前缀纪律(prompt cache,参考 ai-agent-book ch2):
@@ -47,7 +48,7 @@ _ROLE_TOOL_NAMES: dict[str, tuple[str, ...]] = {
         "get_recruit_statistics",
         "find_available_sessions",
     ),
-    "candidate": ("get_my_interview",),
+    "candidate": ("get_open_cycle", "get_my_interview"),
     "unknown": (),
 }
 
@@ -107,17 +108,31 @@ def assemble_tools(identity: ResolvedIdentity, user_token: str = "") -> list:
 
 
 def identity_message(identity: ResolvedIdentity) -> str:
-    """身份注入文案:作为首条用户消息(动态信息不进 system)。"""
+    """身份注入文案:作为首条用户消息(动态信息不进 system)。
+
+    只含对话需要的档案:称呼、职位、权限边界。不含 user_id/source 等内部
+    标识(用户明确要求)——agent 面对用户时应像面对一个人,不暴露内部字段。
+    """
     role_label = {
         "admin": "管理员",
         "member": "社员",
         "candidate": "候选人",
-        "unknown": "未识别身份",
-    }.get(identity.get("role", "unknown"), "未识别身份")
+        "unknown": "用户",
+    }.get(identity.get("role", "unknown"), "用户")
+    name = identity.get("name")
+    greeting = f"{name}同学" if name and identity.get("role") == "candidate" else (
+        name or role_label
+    )
+    perms = identity.get("permission_codes") or []
+    perm_note = (
+        f",可访问权限: {', '.join(perms[:6])}{' 等' if len(perms) > 6 else ''}"
+        if perms
+        else ",当前无额外数据访问权限"
+    )
     return (
-        f"[会话身份] {role_label}(用户 {identity.get('user_id') or '未知'},"
-        f"来源 {identity.get('source', 'unknown')})。"
-        "后续对话均以此身份为准。"
+        f"当前对话用户是{greeting}({role_label})。"
+        f"{perm_note}。"
+        "回答时用自然称呼,不要提及内部字段。"
     )
 
 

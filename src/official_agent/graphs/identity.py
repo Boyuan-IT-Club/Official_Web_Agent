@@ -38,6 +38,7 @@ class ResolvedIdentity(TypedDict):
     """解析结果。可进 state/checkpointer(不含凭证)。"""
 
     user_id: int | None  # claims 缺失/非法时 None→图节点降级 unknown
+    name: str | None  # 身份档案:姓名(/auth/me 查库补充,JWT 里没有)
     role: Role
     role_names: list[str]  # 后端原始角色名(中文),供审计与展示
     permission_codes: list[str]  # 供 SEC-02 工具装配
@@ -124,6 +125,7 @@ def _identity_from_claims(claims: dict, source: str) -> ResolvedIdentity:
         user_id = None
     return ResolvedIdentity(
         user_id=user_id,
+        name=claims.get("name") or None,
         role=_map_role(claims.get("roleNames") or []),
         role_names=claims.get("roleNames") or [],
         permission_codes=claims.get("permissionCodes") or [],

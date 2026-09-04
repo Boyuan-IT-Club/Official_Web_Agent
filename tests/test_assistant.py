@@ -54,7 +54,7 @@ class _FakeToolCallingModel(BaseChatModel):
 def identity_of(role: str) -> ResolvedIdentity:
     return cast(
         ResolvedIdentity,
-        {"user_id": 7, "role": role, "role_names": [role], "permission_codes": [], "source": "cli"},
+        {"user_id": 7, "name": "测试用户", "role": role, "role_names": [role], "permission_codes": [], "source": "cli"},
     )
 
 
@@ -75,9 +75,10 @@ def test_assemble_member_public_query_face() -> None:
     }
 
 
-def test_assemble_candidate_only_my_interview() -> None:
+def test_assemble_candidate_gets_open_cycle_and_my_interview() -> None:
+    """候选入口:能取当前周期 + 查本人面试(后者绑定用户令牌)。"""
     tools = assemble_tools(identity_of("candidate"), user_token="tok")
-    assert [t.__name__ for t in tools] == ["get_my_interview"]
+    assert [t.__name__ for t in tools] == ["get_open_cycle", "get_my_interview"]
 
 
 def test_assemble_unknown_gets_nothing() -> None:
@@ -118,7 +119,10 @@ def test_system_prompt_is_role_agnostic_static_prefix() -> None:
 
 def test_identity_message_carries_role() -> None:
     msg = identity_message(identity_of("admin"))
-    assert "管理员" in msg and "7" in msg
+    # 身份文案:含职位,不含内部字段(user_id/source)
+    assert "管理员" in msg
+    assert "7" not in msg
+    assert "来源" not in msg
 
 
 async def test_react_loop_with_fake_model_tool_roundtrip(monkeypatch: pytest.MonkeyPatch):

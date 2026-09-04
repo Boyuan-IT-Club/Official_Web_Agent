@@ -82,8 +82,15 @@ async def _get_or_create_session(
     identity: ResolvedIdentity,
     user_token: str,
     session_id: str | None,
-) -> _SessionState:
-    """取会话;无则(或未给)新建并建档。同一 session_id 只能被同 user 续传(SEC-07)。"""
+) -> tuple[_SessionState, bool]:
+    """取会话;无则(或未给)新建并建档。同一 session_id 只能被同 user 续传(SEC-07)。
+
+    返回 (session, is_new):is_new=True 表示本会话是进程内新建(首轮须注身份前缀),
+    False 表示续传既有会话。进程重启后带旧 session_id 续传会命中新建分支 → is_new
+    误判 True,但身份注入幂等(同身份重注无害),可接受;不依赖 aget_state
+    (LangGraph 对无 checkpoint 的 thread 可能返回非 None,导致 is_new 恒 False,
+    身份永不在首轮注入——实测坑)。
+    """
     async with _sessions_lock:
         if session_id and session_id in _sessions:
             existing = _sessions[session_id]
@@ -98,7 +105,7 @@ async def _get_or_create_session(
                 )
                 existing.user_token = user_token
                 existing.identity = identity
-            return existing
+            return existing, False
 
         user_id = identity.get("user_id")
         # thread_id(SEC-07):建档优先;PG 不可用降级随机 thread_id(保隔离,不持久化)
@@ -115,7 +122,7 @@ async def _get_or_create_session(
         agent = build_assistant_agent(identity, user_token=user_token, checkpointer=checkpointer)
         session = _SessionState(session_id, identity, user_token, agent)
         _sessions[session_id] = session
-        return session
+        return session, True
 
 
 @router.post("/chat")
@@ -136,9 +143,9 @@ async def chat(
         raise HTTPException(status_code=400, detail="message 不能为空")
     session_id = (body.get("session_id") or "").strip() or None
 
-    session = await _get_or_create_session(request, identity, user_token, session_id)
+    session, is_new = await _get_or_create_session(request, identity, user_token, session_id)
     return StreamingResponse(
-        _stream_turn(session, message),
+        _stream_turn(session, message, is_new),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -174,8 +181,10 @@ def _error_code(exc: Exception) -> str:
         return _ERR_INVALID_REQUEST
     return _ERR_UNKNOWN
 
-async def _stream_turn(session: _SessionState, message: str) -> AsyncIterator[str]:
-    """跑一轮:流式吐 SSE。历史/首轮前缀判据复用 CLI 模式(cli.py:211-221)。"""
+async def _stream_turn(
+    session: _SessionState, message: str, is_new: bool
+) -> AsyncIterator[str]:
+    """跑一轮:流式吐 SSE。is_new 由会话层判定(新建才注身份前缀)。"""
     config = {
         "configurable": {"thread_id": session.session_id},
         "callbacks": langfuse_callbacks(),
@@ -184,14 +193,8 @@ async def _stream_turn(session: _SessionState, message: str) -> AsyncIterator[st
     def sse(payload: dict[str, Any]) -> str:
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-    # 首轮注入身份前缀:checkpointer 无该 thread 历史 = 新会话(cli.py 持久化判据)。
+    # 首轮注入身份前缀(仅进程内新建会话;续传不重复注)
     first_input = HumanMessage(content=identity_message(session.identity))
-    state = None
-    try:
-        state = await session.agent.aget_state(config)  # type: ignore[attr-defined]
-    except Exception:  # noqa: BLE001 — 无 checkpointer(降级)按新会话处理
-        state = None
-    is_new = state is None
     messages: list = (
         [first_input, HumanMessage(content=message)] if is_new else [HumanMessage(content=message)]
     )
