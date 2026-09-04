@@ -96,6 +96,27 @@ def _sse_events(resp) -> list[dict]:
     ]
 
 
+
+
+def test_error_code_classification() -> None:
+    """执行期异常 → 契约错误码(issue #90)。"""
+    import httpx
+
+    from official_agent.tools.client import BackendError
+    from official_agent.web.routes import _error_code
+
+    assert (
+        _error_code(BackendError("用户令牌无效或已过期,需用户重新登录后重试"))
+        == "auth_expired"
+    )
+    assert _error_code(BackendError("token 无效")) == "auth_expired"
+    assert _error_code(httpx.ConnectError("refused")) == "backend_unavailable"
+    assert _error_code(httpx.TimeoutException("slow")) == "backend_unavailable"
+    # 非 auth 的后端业务错误(如「未投递」)→ invalid_request
+    assert _error_code(BackendError("该周期未开放投递")) == "invalid_request"
+    assert _error_code(RuntimeError("boom")) == "unknown"
+
+
 def test_chat_without_token_returns_401(client: TestClient) -> None:
     resp = client.post("/api/agent/chat", json={"message": "你好"})
     assert resp.status_code == 401
@@ -142,9 +163,9 @@ def test_chat_valid_token_streams_session_and_done(
         assert resp.status_code == 200
         events = _sse_events(resp)
     types = [e["type"] for e in events]
-    assert "session_id" in types
+    assert "session" in types
     assert "done" in types
-    session_id = next(e["session_id"] for e in events if e["type"] == "session_id")
+    session_id = next(e["session_id"] for e in events if e["type"] == "session")
     assert session_id.startswith("web:u7:")
 
 
@@ -157,7 +178,7 @@ def test_chat_resume_same_session_reuses_thread(
         "POST", "/api/agent/chat", json={"message": "hi"}, headers={"Authorization": "Bearer tok"}
     ) as resp:
         events = _sse_events(resp)
-    sid = next(e["session_id"] for e in events if e["type"] == "session_id")
+    sid = next(e["session_id"] for e in events if e["type"] == "session")
 
     with client.stream(
         "POST",
@@ -166,7 +187,7 @@ def test_chat_resume_same_session_reuses_thread(
         headers={"Authorization": "Bearer tok"},
     ) as resp:
         events2 = _sse_events(resp)
-    sid2 = next(e["session_id"] for e in events2 if e["type"] == "session_id")
+    sid2 = next(e["session_id"] for e in events2 if e["type"] == "session")
     assert sid2 == sid  # 续传同 thread,不新开
 
 
@@ -179,7 +200,7 @@ def test_chat_other_user_same_session_returns_403(
         "POST", "/api/agent/chat", json={"message": "hi"}, headers={"Authorization": "Bearer tok"}
     ) as resp:
         events = _sse_events(resp)
-    sid = next(e["session_id"] for e in events if e["type"] == "session_id")
+    sid = next(e["session_id"] for e in events if e["type"] == "session")
 
     # 用户 8 带用户 7 的 session → 403
     resp = client.post(

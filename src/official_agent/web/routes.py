@@ -26,6 +26,7 @@ from official_agent.graphs.assistant import build_assistant_agent, identity_mess
 from official_agent.graphs.identity import ResolvedIdentity, resolve
 from official_agent.observability import langfuse_callbacks
 from official_agent.state.threads import create_thread, new_thread_id
+from official_agent.tools.client import BackendError
 
 router = APIRouter()
 
@@ -118,8 +119,8 @@ async def chat(
     """一轮对话(SSE 流)。body: {"message": str, "session_id": str | null}
 
     首次(session_id 空)→ 服务端生成 session_id 并随流返回;续传带原 session_id。
-    SSE 事件(data 为 JSON):{"type":"session_id","session_id":…} /
-    {"type":"token","content":…} / {"type":"done"}。工具状态以 token 流前置标注。
+    SSE 事件(契约 #90,data 为 JSON):session(带 created) / delta(role,content) /
+    tool(role,name) / done / error(code,message)。
     """
     identity, user_token = auth
     body = await request.json()
@@ -136,6 +137,36 @@ async def chat(
     )
 
 
+# SSE 流内 error 事件 code(契约 #90)。前端按 code 决定动作(见 issue #90 冻结评论)。
+_ERR_AUTH_EXPIRED = "auth_expired"
+_ERR_BACKEND_UNAVAILABLE = "backend_unavailable"
+_ERR_MODEL = "model_error"
+_ERR_INVALID_REQUEST = "invalid_request"
+_ERR_UNKNOWN = "unknown"
+
+# auth 失效的关键词(get_as_user 失败文案含之;message 判定的最后兜底)。
+_AUTH_FAIL_HINTS = ("令牌", "token", "登录", "JWT")
+
+
+def _error_code(exc: Exception) -> str:
+    """执行期异常 → 契约错误码。分类原则:
+    - 用户令牌失效(get_as_user 文案)或明确登录/token 问题 → auth_expired(#94 核心)
+    - httpx 传输/超时 → backend_unavailable(后端不可达/网关错)
+    - 其余 BackendError(业务错误)按其文案;未知 → unknown
+    观测/模型错误由 LangGraph 包装,不易精确识别,归 unknown(前端可重试)。
+    """
+    import httpx
+
+    text = str(exc)
+    if any(h in text for h in _AUTH_FAIL_HINTS):
+        return _ERR_AUTH_EXPIRED
+    if isinstance(exc, httpx.HTTPError):
+        return _ERR_BACKEND_UNAVAILABLE
+    if isinstance(exc, BackendError):
+        # 业务错误(如「未投递」)不是系统故障——按 invalid_request 让前端展示 message
+        return _ERR_INVALID_REQUEST
+    return _ERR_UNKNOWN
+
 async def _stream_turn(session: _SessionState, message: str) -> AsyncIterator[str]:
     """跑一轮:流式吐 SSE。历史/首轮前缀判据复用 CLI 模式(cli.py:211-221)。"""
     config = {
@@ -145,8 +176,6 @@ async def _stream_turn(session: _SessionState, message: str) -> AsyncIterator[st
 
     def sse(payload: dict[str, Any]) -> str:
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-    yield sse({"type": "session_id", "session_id": session.session_id})
 
     # 首轮注入身份前缀:checkpointer 无该 thread 历史 = 新会话(cli.py 持久化判据)。
     first_input = HumanMessage(content=identity_message(session.identity))
@@ -160,6 +189,9 @@ async def _stream_turn(session: _SessionState, message: str) -> AsyncIterator[st
         [first_input, HumanMessage(content=message)] if is_new else [HumanMessage(content=message)]
     )
 
+    # 契约 #90:首事件 session(带 created 标记新/续传)
+    yield sse({"type": "session", "session_id": session.session_id, "created": is_new})
+
     try:
         async for mode, payload in session.agent.astream(  # type: ignore[attr-defined]
             {"messages": messages}, config=config, stream_mode=["messages", "updates"]
@@ -167,16 +199,18 @@ async def _stream_turn(session: _SessionState, message: str) -> AsyncIterator[st
             if mode == "messages":
                 chunk, _meta = payload
                 if isinstance(chunk, AIMessageChunk) and chunk.content:
-                    yield sse({"type": "token", "content": chunk.content})
+                    yield sse({"type": "delta", "role": "assistant", "content": chunk.content})
             elif mode == "updates":
                 for _ns, node_update in payload.items():
                     if isinstance(node_update, dict):
                         for m in node_update.get("messages") or []:
-                            # 工具调用状态(CLI 以「→ 调用 X…」显示,SSE 发 tool_call 事件)
+                            # 工具调用状态(契约 #90:tool 事件,role=tool)
                             if getattr(m, "tool_calls", None):
                                 for tc in m.tool_calls:
-                                    yield sse({"type": "tool_call", "name": tc.get("name")})
+                                    yield sse(
+                                        {"type": "tool", "role": "tool", "name": tc.get("name")}
+                                    )
     except Exception as exc:  # noqa: BLE001 — 单轮失败不崩连接,吐 error 事件
-        yield sse({"type": "error", "message": str(exc)})
+        yield sse({"type": "error", "code": _error_code(exc), "message": str(exc)})
         return
-    yield sse({"type": "done"})
+    yield sse({"type": "done", "session_id": session.session_id})
