@@ -54,7 +54,14 @@ class _FakeToolCallingModel(BaseChatModel):
 def identity_of(role: str) -> ResolvedIdentity:
     return cast(
         ResolvedIdentity,
-        {"user_id": 7, "name": "测试用户", "role": role, "role_names": [role], "permission_codes": [], "source": "cli"},
+        {
+            "user_id": 7,
+            "name": "测试用户",
+            "role": role,
+            "role_names": [role],
+            "permission_codes": [],
+            "source": "cli",
+        },
     )
 
 
