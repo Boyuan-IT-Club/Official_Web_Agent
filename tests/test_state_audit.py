@@ -25,7 +25,9 @@ def _audit_row() -> dict:
         "channel": "cli",
         "agent": "graphs.assistant:1.2.3",
         "action": {"tool": "assign_interview", "resume_id": 1},
-        "decision": "approve",
+        "decision": "u7:approve",
+        "decision_summary": "将 1 号简历分配给 7 号用户",
+        "token": "tok-abc",
         "result": "已分配",
         "trace_id": "trace-1",
         "created_at": None,
@@ -42,7 +44,9 @@ def test_write_audit_inserts_fields() -> None:
             channel="cli",
             agent="graphs.assistant:1.2.3",
             action={"tool": "assign_interview", "resume_id": 1},
-            decision="approve",
+            decision="u7:approve",
+            decision_summary="将 1 号简历分配给 7 号用户",
+            token="tok-abc",
             result="已分配",
             trace_id="trace-1",
         )
@@ -52,8 +56,10 @@ def test_write_audit_inserts_fields() -> None:
     assert rec.action == {"tool": "assign_interview", "resume_id": 1}
     sql, params = conn.execute.call_args.args
     assert "INSERT INTO agent_audit_log" in sql
-    assert params[5] == "approve"  # decision
-    assert params[7] == "trace-1"  # trace_id
+    assert params[5] == "u7:approve"  # decision
+    assert params[6] == "将 1 号简历分配给 7 号用户"  # decision_summary
+    assert params[7] == "tok-abc"  # token
+    assert params[9] == "trace-1"  # trace_id
 
 
 def test_write_audit_action_is_json() -> None:
@@ -62,7 +68,7 @@ def test_write_audit_action_is_json() -> None:
     with patch.object(audit, "_conn", return_value=conn):
         audit.write_audit(
             thread_id="t", acting_user_id=1, channel="cli", agent="a",
-            action={"tool": "x"}, decision="approve", result="r", trace_id="tr",
+            action={"tool": "x"}, decision="u1:approve", result="r", trace_id="tr",
         )
     params = conn.execute.call_args.args[1]
     import json
@@ -76,7 +82,7 @@ def test_list_audit_filters() -> None:
     with patch.object(audit, "_conn", return_value=conn):
         recs = audit.list_audit(actor_user_id=7, thread_id="cli:u7:abc12345", limit=10)
     assert len(recs) == 1
-    assert recs[0].decision == "approve"
+    assert recs[0].decision == "u7:approve"
     sql, params = conn.execute.call_args.args
     assert "acting_user_id = %s" in sql
     assert "thread_id = %s" in sql

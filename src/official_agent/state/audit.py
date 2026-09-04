@@ -2,7 +2,14 @@
 
 权威存储:agent 侧 Postgres(ADR-0006 §审计与回溯契约;Langfuse 可删改,
 不作权威)。审计行字段契约见 ADR-0006:
-  acting_user_id / channel / agent / action / decision / result / trace_id / timestamp
+  acting_user_id / channel / agent / action / decision / decision_summary /
+  result / trace_id / timestamp
+
+decision 存 `u{user}:approve` / `u{user}:reject`(ADR-0006「谁批准/拒绝」):
+批准人 = decision 前缀(触发人 acting_user_id ≠ 批准人时仍可追溯,批处理管道
+「触发者≠批准者」场景不丢失)。
+decision_summary:agent 决策依据的人类可读摘要(interrupt 携带,TOOL-04 接线)。
+token:一次性确认令牌值(与 action 同指纹,ADR-0005)。
 
 写路径三重闸(ADR-0006):工具装配 → interrupt → 指纹令牌;审计行在
 确认执行后写(只有批准后才记录「执行」,拒绝记录「拒绝」决策)。
@@ -31,6 +38,8 @@ class AuditRecord:
     agent: str
     action: str
     decision: str
+    decision_summary: str
+    token: str
     result: str
     trace_id: str
     created_at: Any
@@ -46,16 +55,18 @@ def ensure_audit_table() -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS agent_audit_log (
-                id              bigserial  PRIMARY KEY,
-                thread_id       text       NOT NULL,
-                acting_user_id  integer    NOT NULL,
-                channel         text       NOT NULL,
-                agent           text       NOT NULL,
-                action          jsonb      NOT NULL,
-                decision        text       NOT NULL,
-                result          text       NOT NULL,
-                trace_id        text       NOT NULL,
-                created_at      timestamptz NOT NULL DEFAULT now()
+                id               bigserial  PRIMARY KEY,
+                thread_id        text       NOT NULL,
+                acting_user_id   integer    NOT NULL,
+                channel          text       NOT NULL,
+                agent            text       NOT NULL,
+                action           jsonb      NOT NULL,
+                decision         text       NOT NULL,
+                decision_summary text       NOT NULL DEFAULT '',
+                token            text       NOT NULL DEFAULT '',
+                result           text       NOT NULL,
+                trace_id         text       NOT NULL,
+                created_at       timestamptz NOT NULL DEFAULT now()
             );
             CREATE INDEX IF NOT EXISTS idx_audit_user
                 ON agent_audit_log (acting_user_id, created_at DESC);
@@ -73,19 +84,23 @@ def write_audit(
     agent: str,
     action: dict[str, Any],
     decision: str,
+    decision_summary: str = "",
+    token: str = "",
     result: str,
     trace_id: str | None = None,
 ) -> AuditRecord:
     """写一条审计行。action 是操作指纹字典(工具名+参数,与确认令牌同指纹)。
 
-    decision:approve(批准执行)/ reject(拒绝)——interrupt 恢复决策。
+    decision: `u{user}:approve`(批准执行)/ `u{user}:reject`(拒绝)——interrupt
+    恢复决策,批准人编码在前缀(ADR-0006「谁批准/拒绝」)。
+    decision_summary:agent 决策依据的人类可读摘要(interrupt 携带,TOOL-04 接线)。
+    token:一次性确认令牌值(与 action 同指纹,ADR-0005)。
     result:执行结果摘要(成功/失败的可行动文案,TOOL-06)。
     trace_id 串 Langfuse(OBS-02)全过程;缺省取 current_trace_id()
-    (优先级 span > 轮 id > 全零,永非空)。
+(优先级 span > 轮 id > 全零,永非空;延迟导入保 #95 前 CI 绿,
+    显式传 trace_id 的调用方不受影响)。
     """
     if trace_id is None:
-        # 延迟导入:#95(OBS-02)先合 main,本分支 rebase 后缺省路径自然生效;
-        # 在此之前显式传 trace_id 的调用方不受影响。
         from official_agent.observability import current_trace_id
 
         trace_id = current_trace_id()
@@ -93,10 +108,11 @@ def write_audit(
         row = conn.execute(
             """
             INSERT INTO agent_audit_log
-                (thread_id, acting_user_id, channel, agent, action, decision, result, trace_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                (thread_id, acting_user_id, channel, agent, action, decision,
+                decision_summary, token, result, trace_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id, thread_id, acting_user_id, channel, agent, action,
-                      decision, result, trace_id, created_at
+                      decision, decision_summary, token, result, trace_id, created_at
             """,
             (
                 thread_id,
@@ -105,6 +121,8 @@ def write_audit(
                 agent,
                 json.dumps(action, ensure_ascii=False),
                 decision,
+                decision_summary,
+                token,
                 result,
                 trace_id,
             ),
@@ -121,8 +139,8 @@ def list_audit(
 ) -> list[AuditRecord]:
     """审计列表;可过滤属主 / 线程。仅授权调用方使用(管理面)。"""
     sql = (
-        "SELECT id, thread_id, acting_user_id, channel, agent, action, "
-        "decision, result, trace_id, created_at FROM agent_audit_log"
+        "SELECT id, thread_id, acting_user_id, channel, agent, action, decision, "
+        "decision_summary, token, result, trace_id, created_at FROM agent_audit_log"
     )
     params: list[Any] = []
     conds: list[str] = []
@@ -153,6 +171,8 @@ def _record(row: dict[str, Any]) -> AuditRecord:
         agent=row["agent"],
         action=action,
         decision=row["decision"],
+        decision_summary=row["decision_summary"],
+        token=row["token"],
         result=row["result"],
         trace_id=row["trace_id"],
         created_at=row["created_at"],
