@@ -77,7 +77,6 @@ async def _resolve_web(
     token = credential.get("token")
     if not token:
         raise BackendError("缺少官网 JWT(token),无法解析身份")
-    from official_agent.tools.client import BackendClient
 
     client = BackendClient(settings=settings)
     try:

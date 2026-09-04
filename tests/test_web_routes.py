@@ -2,8 +2,7 @@
 
 用 FastAPI TestClient,验证:
 - 无 Authorization → 401
-- 坏 token(/auth/me 拒)→ 401
-- 后端 /auth/me 未落地(NotImplementedError)→ 501(显式护栏)
+- 坏 token(身份解析失败)→ 401
 - 合法 token → 200,SSE 流返回 session_id + done
 - 同 session_id 被不同 user 访问 → 403(SEC-07 属主)
 
@@ -132,21 +131,28 @@ def test_chat_empty_message_returns_400(
     assert resp.status_code == 400
 
 
-def test_chat_auth_me_not_implemented_returns_501(
+def test_chat_bad_token_returns_401(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """后端 /auth/me 未落地:#89 护栏拒绝,绝不放开模拟身份。"""
+    """身份解析失败(后端 /auth/me 拒/不可达)→ 401,不透出异常细节。"""
 
-    async def _raise(*_a: object, **_k: object):
-        raise NotImplementedError("官网通道身份解析待 /auth/me,见 issue #52")
+    async def _fail(*_a: object, **_k: object):
+        from official_agent.tools.client import BackendError
+
+        raise BackendError("用户令牌无效或已过期,需用户重新登录后重试")
 
     from official_agent.web import routes
 
-    monkeypatch.setattr(routes, "resolve", _raise)
+    monkeypatch.setattr(routes, "resolve", _fail)
     resp = client.post(
-        "/api/agent/chat", json={"message": "你好"}, headers={"Authorization": "Bearer tok"}
+        "/api/agent/chat", json={"message": "你好"}, headers={"Authorization": "Bearer bad"}
     )
-    assert resp.status_code == 501
+    assert resp.status_code == 401
+    # review:不透出内网/异常细节,只回通用文案
+    assert "身份解析失败" in resp.text
+    assert "backend" not in resp.text.lower()
+
+
 
 
 def test_chat_valid_token_streams_session_and_done(

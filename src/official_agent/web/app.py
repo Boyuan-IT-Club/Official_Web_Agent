@@ -4,7 +4,7 @@
 - 本模块:FastAPI app + lifespan(checkpointer 生命周期)+ 健康检查 + CORS
 - routes.py:业务路由(`/api/agent/chat` SSE)与会话管理
 - graphs/identity.resolve 的 kind=="web" 分支:官网 JWT → /auth/me 换身份(#89 A2,
-  后端 /auth/me 落地后接真实端点;当前 NotImplementedError stub)
+  已落地真实端点;解析失败由路由返回 401)
 
 与 CLI(INF-03)复用同一套装配:build_assistant_agent / langfuse_callbacks /
 get_checkpointer / threads 建档 —— agent 进程内直连工具函数,不走 MCP 回环(ADR-0003)。
@@ -29,9 +29,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     get_checkpointer() 进入建连+建表,退出关闭(与 CLI cli.py:169-176 同语义)。
     """
     from official_agent.state.pg import get_checkpointer
+    from official_agent.state.threads import ensure_agent_threads_table
 
     async with get_checkpointer() as saver:
         app.state.checkpointer = saver
+        try:
+            # L-1:幂等建 agent_threads 档案表(SEC-07 属主载体)——与 CLI cli.py:172
+            # 同语义。缺这张表时 web 建档会失败 → 降级随机 thread_id 不持久化,
+            # 「重启续传」承诺失效(空库首跑必经此路径)。
+            ensure_agent_threads_table()
+        except Exception:  # noqa: BLE001 — PG 未起/配置错 → 降级(fail-open,ADR-0005)
+            app.state.checkpointer = None
         yield
 
 
@@ -56,7 +64,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict[str, str]:
-        """探活(不鉴权)。检查 checkpointer 是否就绪。"""
-        return {"status": "ok"}
-
+        """探活(不鉴权)。checkpointer 就绪(PG 连通)才算健康。"""
+        ready = getattr(app.state, "checkpointer", None) is not None
+        return {"status": "ok" if ready else "degraded"}
     return app

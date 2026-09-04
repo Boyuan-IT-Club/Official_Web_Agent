@@ -7,8 +7,8 @@
 - agent 按「身份 × user_token」装配(assemble_tools 把官网 JWT 闭包绑定到
   get_my_interview,#93/#89 决策:数据查询 JWT 直转),故每会话持有一个 agent;
   待工具改为从图 state 取 token(M3)后可共享单 graph。
-- 权限:身份经 resolve(kind=web,#89 A2:调后端 /auth/me)。后端未落地前 resolve
-  抛 NotImplementedError → 本路由 501,绝不放开匿名/模拟身份进生产路径。
+- 权限:身份经 resolve(kind=web,#89 A2:调后端 /auth/me,官网通道唯一入口)。
+  身份解析失败 → 401;不放开匿名/模拟身份进生产路径。
 """
 
 from __future__ import annotations
@@ -52,6 +52,8 @@ class _SessionState:
 
 
 # 会话注册表:session_id → 运行时状态。进程内存,单 worker 语义(多副本 INF-11)。
+# NOTE: 无上限无过期——淘汰/限流留给 M3 会话层(Ably 调研):断线跨端/取消恢复
+# 需要会话层,届时换持久会话而非进程内存表。
 _sessions: dict[str, _SessionState] = {}
 _sessions_lock = asyncio.Lock()
 
@@ -70,12 +72,8 @@ async def _authenticate(request: Request, authorization: Annotated[str | None, H
 
     try:
         identity = await resolve({"kind": "web", "token": token})  # type: ignore[typeddict-item]
-    except NotImplementedError as exc:
-        # #89 后端 /auth/me 未落地:真实身份通道未接通,显式拒绝(501),
-        # 不放开匿名/模拟身份进生产路径。
-        raise HTTPException(status_code=501, detail=str(exc)) from exc
     except Exception as exc:  # BackendError/httpx:凭证错/后端不可达
-        raise HTTPException(status_code=401, detail=f"身份解析失败: {exc}") from exc
+        raise HTTPException(status_code=401, detail="身份解析失败") from exc
     return identity, token
 
 
@@ -91,6 +89,15 @@ async def _get_or_create_session(
             existing = _sessions[session_id]
             if existing.identity.get("user_id") != identity.get("user_id"):
                 raise HTTPException(status_code=403, detail="无权访问该会话")
+            # 续传但 token 变了(官网 JWT 轮换/过期重登):重建 agent 绑定新 token,
+            # thread_id 不变(记忆在 checkpointer,agent 无会话态,ADR-0006 token 有生命周期)。
+            if existing.user_token != user_token:
+                checkpointer = getattr(request.app.state, "checkpointer", None)
+                existing.agent = build_assistant_agent(
+                    identity, user_token=user_token, checkpointer=checkpointer
+                )
+                existing.user_token = user_token
+                existing.identity = identity
             return existing
 
         user_id = identity.get("user_id")
