@@ -26,7 +26,11 @@ from official_agent.graphs.assistant import (
     identity_message,
 )
 from official_agent.graphs.identity import resolve
-from official_agent.observability import langfuse_callbacks
+from official_agent.observability import (
+    langfuse_callbacks,
+    reset_turn_trace_id,
+    set_turn_trace_id,
+)
 from official_agent.state.pg import get_checkpointer
 from official_agent.state.threads import (
     create_thread,
@@ -103,9 +107,7 @@ async def _settings_base_url() -> str:
 
 @app.command()
 def chat(
-    username: str = typer.Option(
-        "", "--username", "-u", help="模拟身份账号(空=用 .env 服务账号)"
-    ),
+    username: str = typer.Option("", "--username", "-u", help="模拟身份账号(空=用 .env 服务账号)"),
     password: str = typer.Option("", "--password", "-p", help="密码(空且指定了账号则交互输入)"),
     session: str = typer.Option(
         "", "--session", "-s", help="会话别名:续接该别名最近会话,无则新开(空=每次新会话)"
@@ -239,34 +241,42 @@ async def _chat(username: str, password: str, session: str) -> None:
                 if saver is None:
                     chat_history.append(HumanMessage(content=user_input))
 
+
 async def _run_turn(agent: object, history: list, session: str, callbacks: list) -> list:
     """跑一轮:流式打印 token 与工具状态,返回本轮增量累积的消息历史。
 
     历史也由 checkpointer 持久化(MEM-01);返回值供调用方在无 checkpointer
     场景(如测试替身)继续累积。
+
+    OBS-02:轮开头设轮级 trace id(= thread_id),client 层据此兜底注入
+    traceparent;Langfuse 生效时 span 优先,该值实际不生效。
     """
     console.print("[bold green]agent>[/bold green] ", end="")
+    trace_token = set_turn_trace_id(session)
     config = {
         "callbacks": callbacks,
         "configurable": {"thread_id": session},  # MEM-01:thread_id 即线程档主键
     }
     new_messages: list = []  # 本轮增量(create_agent 的 updates 每节点只吐新增)
-    async for mode, payload in agent.astream(  # type: ignore[attr-defined]
-        {"messages": history}, config=config, stream_mode=["messages", "updates"]
-    ):
-        if mode == "messages":
-            chunk, _meta = payload
-            if isinstance(chunk, AIMessageChunk):
-                if chunk.content:
-                    console.print(chunk.content, end="", markup=False, highlight=False)
-                # 工具调用状态:参数块到达时显示工具名
-                for tc in chunk.tool_call_chunks or []:
-                    if tc.get("name"):
-                        console.print(f"\n[dim]→ 调用 {tc['name']}…[/dim] ", end="")
-        elif mode == "updates":
-            for _ns, node_update in payload.items():
-                if isinstance(node_update, dict):
-                    new_messages.extend(node_update.get("messages") or [])
+    try:
+        async for mode, payload in agent.astream(  # type: ignore[attr-defined]
+            {"messages": history}, config=config, stream_mode=["messages", "updates"]
+        ):
+            if mode == "messages":
+                chunk, _meta = payload
+                if isinstance(chunk, AIMessageChunk):
+                    if chunk.content:
+                        console.print(chunk.content, end="", markup=False, highlight=False)
+                    # 工具调用状态:参数块到达时显示工具名
+                    for tc in chunk.tool_call_chunks or []:
+                        if tc.get("name"):
+                            console.print(f"\n[dim]→ 调用 {tc['name']}…[/dim] ", end="")
+            elif mode == "updates":
+                for _ns, node_update in payload.items():
+                    if isinstance(node_update, dict):
+                        new_messages.extend(node_update.get("messages") or [])
+    finally:
+        reset_turn_trace_id(trace_token)
     console.print()
     # 增量累积:历史=原历史+本轮全部节点新增;空消息过滤防呆。
     # 勿用末节点整体替换——真实图每节点只吐增量,替换会丢身份与提问

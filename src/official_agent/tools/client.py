@@ -1,5 +1,7 @@
 """后端 API 客户端(TOOL-01):服务账号登录、token 续期、统一错误映射、瞬时错误重试。
 
+OBS-02:除登录外所有出站请求统一携带 W3C traceparent 头,两侧日志可对账。
+
 契约(对齐后端 openapi.yaml 与 BusinessExceptionEnum):
 - 登录 POST /api/auth/login(body: auth_id/auth_type/verify,HTTP 201),
   返回 {code, message, data:{token, user_id, roleNames}};业务码 200=成功。
@@ -15,7 +17,7 @@ from typing import Any, cast
 
 import httpx
 
-from official_agent import credentials
+from official_agent import credentials, observability
 from official_agent.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -111,7 +113,13 @@ class BackendClient:
             raise BackendError("缺少用户本人令牌(user_token),该操作必须以最终用户身份执行")
         try:
             resp = await self._http.request(
-                "GET", path, params=params, headers={"Authorization": f"Bearer {user_token}"}
+                "GET",
+                path,
+                params=params,
+                headers={
+                    "Authorization": f"Bearer {user_token}",
+                    **observability.traceparent_header(),
+                },
             )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             # 用户令牌通道不自动重试(非幂等语义不明确),只映射成可行动文案
@@ -217,7 +225,10 @@ class BackendClient:
         last_exc: Exception | None = None
         for attempt in range(attempts):
             try:
-                merged_headers = {"Authorization": f"Bearer {token}"}
+                merged_headers = {
+                    "Authorization": f"Bearer {token}",
+                    **observability.traceparent_header(),
+                }
                 if headers:
                     merged_headers.update(
                         {k: v for k, v in headers.items() if k.lower() != "authorization"}
@@ -231,7 +242,12 @@ class BackendClient:
                     delay = _RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)]
                     logger.warning(
                         "backend %s %s 瞬时错误(%s),第 %d/%d 次重试前等待 %.1fs",
-                        method, path, type(exc).__name__, attempt + 2, attempts, delay,
+                        method,
+                        path,
+                        type(exc).__name__,
+                        attempt + 2,
+                        attempts,
+                        delay,
                     )
                     await asyncio.sleep(delay)
                     continue
@@ -251,9 +267,7 @@ def _parse_json(resp: httpx.Response) -> dict[str, Any]:
         body = None
     if isinstance(body, dict):
         return body
-    raise BackendError(
-        f"后端返回非 JSON(HTTP {resp.status_code}),服务可能不可用或网关异常"
-    )
+    raise BackendError(f"后端返回非 JSON(HTTP {resp.status_code}),服务可能不可用或网关异常")
 
 
 def _interpret(resp: httpx.Response) -> Any:
