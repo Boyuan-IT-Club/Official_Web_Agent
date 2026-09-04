@@ -1,8 +1,10 @@
-"""写工具集(TOOL-04):全部强制校验 interrupt 确认令牌。
+"""写工具集(TOOL-04 机制先行 + GRA-05):写操作经 interrupt 人工确认。
 
-令牌契约(ADR-0005):唯一发行方是 LangGraph interrupt 恢复路径
-(Command(resume=...) 的恢复值即令牌);令牌绑定操作指纹
-hash(工具名+关键参数),一次性,执行即作废;拒绝也走恢复流程。
+确认契约(ADR-0005):写工具执行前必须经人工确认——图内挂起(interrupt,
+携带人类可读操作摘要),用户批准(approve)/拒绝(reject)后恢复;批准后仍
+校验确认令牌(指纹绑定,TOOL-04 完整实现)。非图上下文(直接调用)一律
+转 ConfirmationRequired,写路径 fail-closed。
+
 权限边界在这一层的代码里,不依赖模型自觉。每次执行记审计行(SEC-03,
 字段契约见 ADR-0006)。
 
@@ -10,9 +12,28 @@ move_interview 已砍除(后端 manual-adjust 端点 deprecated,
 改用 assign_interview → preferences/{resumeId}/assign)。
 """
 
+from official_agent.tools.interrupt_guard import (
+    APPROVE,
+    ConfirmationRequired,
+    require_confirmation,
+)
 
-class ConfirmationRequired(Exception):
-    """缺少或不匹配的人工确认令牌。写操作必须先经 interrupt 确认(GRA-05)。"""
+
+def _confirm_or_fail(summary: str) -> bool:
+    """统一确认入口:图内挂起等用户决策;非图上下文转 ConfirmationRequired。
+
+    返回 True=批准继续执行;False=用户拒绝/取消(调用方立即短路返回,
+    绝不继续写流程)。写路径 fail-closed(ADR-0005):不在确认流程内 = 拒绝。
+    """
+    try:
+        decision = require_confirmation(summary)
+    except ConfirmationRequired:
+        raise
+    except RuntimeError as exc:  # 非图上下文:interrupt 无法挂起
+        raise ConfirmationRequired(
+            "此操作需要人工确认,但当前不在图确认流程内。"
+        ) from exc
+    return decision == APPROVE
 
 
 def _require_token(confirmation_token: str | None) -> None:
@@ -30,6 +51,10 @@ async def assign_interview(
     场次已满返回业务码 3604 的可行动文案。同意改期后的重排也走本工具。
     对应 POST /api/interview/admin/preferences/{resumeId}/assign。⚠ 写操作。
     """
+    if not _confirm_or_fail(
+        f"将把简历 #{resume_id} 分配到目标场次 #{target_session_id},请确认"
+    ):
+        return {"cancelled": True, "message": "操作已取消:用户拒绝,未执行"}
     _require_token(confirmation_token)
     raise NotImplementedError("TOOL-04")
 
@@ -42,6 +67,15 @@ async def handle_reschedule(
     同意仅取消原安排,不自动重排——随后用 assign_interview 调剂到新场次。
     对应 PUT /api/interview/reschedule/admin/{id}/handle。⚠ 写操作。
     """
+    if status not in (1, 2):
+        # 操作摘要是给用户看的安全界面(ADR-0005):非 1/2 不许渲染成「拒绝」,
+        # 直接拒——标签必须与将执行的动作一致,否则用户可能误批。
+        return {"cancelled": True, "message": f"无效的改期处理状态:{status}(仅 1 同意/2 拒绝)"}
+    action = "同意" if status == 1 else "拒绝"
+    if not _confirm_or_fail(
+        f"将{action}改期申请 #{request_id}(备注:{admin_note or '无'}),请确认"
+    ):
+        return {"cancelled": True, "message": "操作已取消:用户拒绝,未执行"}
     _require_token(confirmation_token)
     raise NotImplementedError("TOOL-04")
 
@@ -55,5 +89,7 @@ async def submit_resume_score(
     尚不存在,已列入 SEC-01 后端谈判清单)。⚠ 写操作;B 流水线批量写回走
     评审确认语义,不经本对话令牌(ADR-0005)。
     """
+    if not _confirm_or_fail(f"将给简历 #{resume_id} 打 {score} 分,请确认"):
+        return {"cancelled": True, "message": "操作已取消:用户拒绝,未执行"}
     _require_token(confirmation_token)
     raise NotImplementedError("TOOL-04")
