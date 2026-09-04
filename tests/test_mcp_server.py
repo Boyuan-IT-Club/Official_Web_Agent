@@ -15,9 +15,9 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.server.mcpserver.exceptions import ToolError
 
-from boyuan_agent.config import Settings
-from boyuan_agent.tools import readonly
-from boyuan_agent.tools.client import BackendClient
+from official_agent.config import Settings
+from official_agent.tools import readonly
+from official_agent.tools.client import BackendClient
 
 EXPECTED_TOOLS = {
     "auth_status",
@@ -54,7 +54,7 @@ def mock_backend():
 
 
 async def test_exposes_exactly_the_eight_readonly_tools():
-    from boyuan_agent.mcp_server import server
+    from official_agent.mcp_server import server
 
     names = {t.name for t in await server.list_tools()}
     assert names == EXPECTED_TOOLS
@@ -63,7 +63,7 @@ async def test_exposes_exactly_the_eight_readonly_tools():
 
 async def test_every_tool_has_model_facing_description():
     """docstring 即模型看到的工具描述(ADR-0003)——缺失等于模型盲选。"""
-    from boyuan_agent.mcp_server import server
+    from official_agent.mcp_server import server
 
     for tool in await server.list_tools():
         assert tool.description and len(tool.description.strip()) > 10, f"{tool.name} 缺描述"
@@ -71,7 +71,7 @@ async def test_every_tool_has_model_facing_description():
 
 async def test_required_params_present_in_schema():
     """cycle_id 等必填参数必须进 inputSchema.required,模型才不会盲调。"""
-    from boyuan_agent.mcp_server import server
+    from official_agent.mcp_server import server
 
     tools = {t.name: t for t in await server.list_tools()}
     schema = tools["find_available_sessions"].input_schema
@@ -89,7 +89,7 @@ async def test_call_tool_through_mcp_pipeline(mock_backend):
         200, json={"code": 200, "message": "ok", "data": [{"cycleId": 2}]}
     )
 
-    from boyuan_agent.mcp_server import server
+    from official_agent.mcp_server import server
 
     result = await server.call_tool("get_open_cycle", {})
     text = result.content[0].text
@@ -100,7 +100,7 @@ async def test_call_tool_through_mcp_pipeline(mock_backend):
 @respx.mock
 async def test_call_tool_validates_arguments(mock_backend):
     """缺必填参数:MCP 层抛校验错误(SDK v2 语义),不打后端。"""
-    from boyuan_agent.mcp_server import server
+    from official_agent.mcp_server import server
 
     with pytest.raises(ToolError, match="cycle_id"):
         await server.call_tool("find_available_sessions", {})
@@ -113,7 +113,7 @@ async def test_stdio_transport_protocol_handshake():
     """真 stdio 协议级冒烟:子进程起 server,ClientSession 握手并 list_tools。"""
     params = StdioServerParameters(
         command="uv",
-        args=["run", "python", "-m", "boyuan_agent.mcp_server"],
+        args=["run", "python", "-m", "official_agent.mcp_server"],
         cwd=str(REPO_ROOT),
     )
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
@@ -130,7 +130,7 @@ async def test_http_transport_protocol_handshake():
 
     import uvicorn
 
-    from boyuan_agent.mcp_server import server
+    from official_agent.mcp_server import server
 
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -167,7 +167,7 @@ async def test_empty_list_result_still_has_content(mock_backend):
         200, json={"code": 200, "message": "ok", "data": []}
     )
 
-    from boyuan_agent.mcp_server import server
+    from official_agent.mcp_server import server
 
     result = await server.call_tool("get_open_cycle", {})
     assert not result.is_error
@@ -187,7 +187,7 @@ async def test_nonempty_list_result_is_single_json_block(mock_backend):
         )
     )
 
-    from boyuan_agent.mcp_server import server
+    from official_agent.mcp_server import server
 
     result = await server.call_tool("list_unassigned", {"cycle_id": 1})
     assert len(result.content) == 1
@@ -196,7 +196,7 @@ async def test_nonempty_list_result_is_single_json_block(mock_backend):
 
 async def test_wrapper_preserves_signature_for_schema():
     """wrapper 必须继承原签名,否则 add_tool 生成的参数 schema 退化。"""
-    from boyuan_agent.mcp_server import server
+    from official_agent.mcp_server import server
 
     tools = {t.name: t for t in await server.list_tools()}
     schema = tools["find_available_sessions"].input_schema
@@ -215,7 +215,7 @@ async def test_backend_error_message_survives_to_model(mock_backend):
         404, json={"code": 3001, "message": "简历不存在"}
     )
 
-    from boyuan_agent.mcp_server import server
+    from official_agent.mcp_server import server
 
     # 进程内便捷方法抛 ToolError(SDK v2 语义);协议路径(session.call_tool)
     # 将其转成 is_error result 且文案进 content——两条路径文案都必须保住
@@ -227,7 +227,7 @@ async def test_backend_error_message_survives_to_model(mock_backend):
 
 def test_main_flag_without_value_fails_gracefully(capsys) -> None:
     """#74 review nit 回归:--host 缺值不裸 IndexError。"""
-    from boyuan_agent.mcp_server import main
+    from official_agent.mcp_server import main
 
     with pytest.raises(SystemExit, match="--host"):
         main(["--http", "--host"])

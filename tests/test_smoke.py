@@ -2,8 +2,8 @@
 
 import pytest
 
-from boyuan_agent.config import Settings
-from boyuan_agent.tools.write import ConfirmationRequired, assign_interview
+from official_agent.config import Settings
+from official_agent.tools.write import ConfirmationRequired, assign_interview
 
 
 def test_settings_defaults() -> None:

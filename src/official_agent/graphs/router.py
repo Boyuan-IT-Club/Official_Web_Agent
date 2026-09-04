@@ -14,7 +14,7 @@ from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from boyuan_agent.graphs.identity import Role
+from official_agent.graphs.identity import Role
 
 _VALID_ROLES: tuple[Role, ...] = ("admin", "member", "candidate", "unknown")
 

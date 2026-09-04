@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     backend_service_username: str = ""
     backend_service_password: str = ""
 
+    # 凭证存储位置(可 env CREDENTIALS_DIR 覆盖;测试指向临时目录)
+    credentials_dir: str = "~/.official-agent"
+
     # 模型(分级路由,GRA-08)。provider=anthropic 走 ANTHROPIC_API_KEY;
     # provider=openai-compatible 走 OpenAI 兼容端点(DeepSeek 等),
     # llm_api_key+llm_base_url 决定接入
@@ -24,7 +27,7 @@ class Settings(BaseSettings):
     model_strong: str = "claude-sonnet-5"
 
     # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)
-    postgres_url: str = "postgresql://localhost:5432/boyuan_agent"
+    postgres_url: str = "postgresql://localhost:5432/official_agent"
 
     # 飞书(M3)
     feishu_app_id: str = ""

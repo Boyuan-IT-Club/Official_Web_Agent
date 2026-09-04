@@ -22,7 +22,7 @@ from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
 
-from boyuan_agent.config import get_settings
+from official_agent.config import get_settings
 
 logger = logging.getLogger(__name__)
 

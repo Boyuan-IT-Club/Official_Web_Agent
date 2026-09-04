@@ -2,12 +2,12 @@
 
 import pytest
 
-from boyuan_agent.config import Settings
+from official_agent.config import Settings
 
 
 def test_no_config_returns_empty_and_warns_once(caplog) -> None:
     settings = Settings(_env_file=None)  # langfuse_* 全空
-    import boyuan_agent.observability as obs
+    import official_agent.observability as obs
 
     obs._warned_no_config = False
     with pytest.MonkeyPatch.context() as mp:
@@ -42,7 +42,7 @@ def test_build_failure_degrades_to_empty(monkeypatch) -> None:
     def boom(_settings):  # noqa: ANN001 — 模拟 SDK 导入/构造失败
         raise RuntimeError("sdk exploded")
 
-    import boyuan_agent.observability as obs
+    import official_agent.observability as obs
 
     monkeypatch.setattr(obs, "_build_handler", boom)
     with pytest.MonkeyPatch.context() as mp:
@@ -58,7 +58,7 @@ def test_build_handler_uses_settings(monkeypatch) -> None:
         def __init__(self, **kwargs: object) -> None:
             captured.update(kwargs)
 
-    import boyuan_agent.observability as obs
+    import official_agent.observability as obs
 
     monkeypatch.setattr("langfuse.Langfuse", FakeLangfuse, raising=False)
     import langfuse
@@ -79,7 +79,7 @@ def test_build_handler_uses_settings(monkeypatch) -> None:
 
 
 def langfuse_callbacks_with(settings: Settings) -> list:
-    import boyuan_agent.observability as obs
+    import official_agent.observability as obs
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(obs, "get_settings", lambda: settings)

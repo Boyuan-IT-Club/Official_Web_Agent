@@ -1,6 +1,6 @@
 """凭证保管(SEC-09):login 换取的 token 存本地,生命周期感知。
 
-存储:~/.boyuan-agent/credentials.json,mode 600,内容
+存储:~/.official-agent/credentials.json,mode 600,内容
     {"token": "...", "exp": 1700000000, "user_id": 1, "username": "..."}
 
 红线(ADR-0006):token 只在本文件与 client 内存;**不进模型可见面、
@@ -16,7 +16,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-_CREDENTIALS_DIR = Path.home() / ".boyuan-agent"
+from official_agent.config import get_settings
+
+
+def _default_credentials_dir() -> Path:
+    """凭证目录:config 配置(可 env CREDENTIALS_DIR 覆盖),默认 ~/.official-agent。"""
+    return Path(get_settings().credentials_dir).expanduser()
+
+
+_CREDENTIALS_DIR = _default_credentials_dir()
 _CREDENTIALS_FILE = _CREDENTIALS_DIR / "credentials.json"
 
 

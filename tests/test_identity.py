@@ -8,17 +8,17 @@ import httpx
 import pytest
 import respx
 
-from boyuan_agent.config import Settings
-from boyuan_agent.graphs.identity import (
+from official_agent.config import Settings
+from official_agent.graphs.identity import (
     IdentityCredential,
     ResolvedIdentity,
     _decode_jwt_payload,
     _map_role,
     resolve,
 )
-from boyuan_agent.graphs.router import AgentState, build_router_graph, resolve_identity
-from boyuan_agent.tools import readonly
-from boyuan_agent.tools.client import BackendClient, BackendError
+from official_agent.graphs.router import AgentState, build_router_graph, resolve_identity
+from official_agent.tools import readonly
+from official_agent.tools.client import BackendClient, BackendError
 
 BASE = "http://backend.test"
 LOGIN = f"{BASE}/api/auth/login"
@@ -102,7 +102,7 @@ async def test_resolve_cli_full_chain_registers_identity_client() -> None:
     install_shared_client()
     try:
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr("boyuan_agent.config.get_settings", mock_settings)
+            mp.setattr("official_agent.config.get_settings", mock_settings)
             identity = await resolve(
                 IdentityCredential(kind="cli", username="manager1", password="pass1234")
             )
@@ -133,7 +133,7 @@ async def test_resolve_cli_login_failure_leaves_singleton_untouched() -> None:
     )
     try:
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr("boyuan_agent.config.get_settings", mock_settings)
+            mp.setattr("official_agent.config.get_settings", mock_settings)
             with pytest.raises(BackendError):
                 await resolve(IdentityCredential(kind="cli", username="x", password="y"))
         # 单例仍是原 client(未被失败登录替换)
@@ -165,7 +165,7 @@ async def test_resolve_cli_missing_user_id_degrades() -> None:
     install_shared_client()
     try:
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr("boyuan_agent.config.get_settings", mock_settings)
+            mp.setattr("official_agent.config.get_settings", mock_settings)
             identity = await resolve(IdentityCredential(kind="cli", username="ghost", password="x"))
         assert identity["user_id"] is None
         assert resolve_identity(cast(AgentState, dict(identity)))["role"] == "unknown"
@@ -189,7 +189,7 @@ async def test_resolve_kind_none_defaults_to_cli_not_feishu() -> None:
     install_shared_client()
     try:
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr("boyuan_agent.config.get_settings", mock_settings)
+            mp.setattr("official_agent.config.get_settings", mock_settings)
             # 走到 cli 登录(失败)而非飞书 NotImplementedError,即证明落对分支
             with pytest.raises(BackendError):
                 await resolve(cast(IdentityCredential, {"username": "u", "password": "p"}))

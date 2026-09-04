@@ -7,21 +7,21 @@
 import time
 from typing import Any
 
-from boyuan_agent import credentials
+from official_agent import credentials
 
 
 async def auth_status() -> dict[str, Any]:
     """查询当前后端凭证状态:是否有效、以谁的身份、剩余时长。
 
     本工具不触碰任何数据查询,仅报告凭证;token 本身不会出现在结果中。
-    过期时返回可行动提示(重新运行 boyuan-agent login)。
+    过期时返回可行动提示(重新运行 official-agent login)。
     """
     raw = credentials.load_raw()
     if raw is None:
         return {
             "authenticated": False,
             "expired": False,
-            "hint": "尚未登录:请在本机运行 boyuan-agent login(勿把密码发给模型)",
+            "hint": "尚未登录:请在本机运行 official-agent login(勿把密码发给模型)",
         }
     remaining = max(0, int(raw.get("exp", 0)) - int(time.time()))
     expired = remaining <= 0
@@ -33,5 +33,5 @@ async def auth_status() -> dict[str, Any]:
         "remaining_minutes": remaining // 60,
     }
     if expired:
-        status["hint"] = "凭证已过期:请重新运行 boyuan-agent login"
+        status["hint"] = "凭证已过期:请重新运行 official-agent login"
     return status

@@ -4,10 +4,10 @@ import httpx
 import pytest
 import respx
 
-from boyuan_agent.config import Settings
-from boyuan_agent.tools import readonly
-from boyuan_agent.tools.client import BackendClient, BackendError
-from boyuan_agent.tools.readonly import (
+from official_agent.config import Settings
+from official_agent.tools import readonly
+from official_agent.tools.client import BackendClient, BackendError
+from official_agent.tools.readonly import (
     get_backend_client,
     get_candidate_card,
     get_my_interview,

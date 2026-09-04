@@ -20,7 +20,7 @@ cd deploy/langfuse && docker compose up -d   # web: http://127.0.0.1:3001
 
 凭证在 `deploy/langfuse/.env`(gitignore,模板 `.env.example`);同目录 PG 暴露
 127.0.0.1:5432,checkpointer/审计(MEM-01/SEC-03)复用该实例。trace 接线:
-`from boyuan_agent.observability import langfuse_callbacks`——fail-open,未配置自动降级。
+`from official_agent.observability import langfuse_callbacks`——fail-open,未配置自动降级。
 
 ## 架构要点
 

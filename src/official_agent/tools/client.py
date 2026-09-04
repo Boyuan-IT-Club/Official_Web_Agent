@@ -15,8 +15,8 @@ from typing import Any, cast
 
 import httpx
 
-from boyuan_agent import credentials
-from boyuan_agent.config import Settings, get_settings
+from official_agent import credentials
+from official_agent.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -132,8 +132,8 @@ class BackendClient:
 
     async def _ensure_token(self) -> str:
         """token 获取优先级(SEC-09):
-        内存缓存 → 本地存储凭证(boyuan-agent login 的产物)→ 账密 login。
-        .env 无账密且无存储凭证时,报可行动指引(运行 boyuan-agent login)。
+        内存缓存 → 本地存储凭证(official-agent login 的产物)→ 账密 login。
+        .env 无账密且无存储凭证时,报可行动指引(运行 official-agent login)。
         """
         if self._token:
             return self._token
@@ -145,7 +145,7 @@ class BackendClient:
             if self._token is None:
                 if not self._settings.backend_service_username:
                     raise BackendAuthError(
-                        "未配置凭证:请先运行 boyuan-agent login,或在 .env 设置 "
+                        "未配置凭证:请先运行 official-agent login,或在 .env 设置 "
                         "BACKEND_SERVICE_USERNAME/PASSWORD"
                     )
                 self._token = await self._do_login()

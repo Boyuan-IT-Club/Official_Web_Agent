@@ -19,8 +19,8 @@ import base64
 import json
 from typing import Literal, TypedDict
 
-from boyuan_agent.tools.client import BackendClient, BackendError
-from boyuan_agent.tools.readonly import get_backend_client, set_backend_client
+from official_agent.tools.client import BackendClient, BackendError
+from official_agent.tools.readonly import get_backend_client, set_backend_client
 
 Role = Literal["admin", "member", "candidate", "unknown"]
 
@@ -111,7 +111,7 @@ def _identity_from_claims(claims: dict, source: str) -> ResolvedIdentity:
 
 def _client_as(username: str, password: str) -> BackendClient:
     """以模拟身份凭证构造独立 client(覆盖服务账号凭证)。"""
-    from boyuan_agent.config import get_settings
+    from official_agent.config import get_settings
 
     settings = get_settings().model_copy(
         update={"backend_service_username": username, "backend_service_password": password}
