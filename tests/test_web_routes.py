@@ -215,3 +215,79 @@ def test_chat_other_user_same_session_returns_403(
         headers={"Authorization": "Bearer tok2"},
     )
     assert resp.status_code == 403
+
+
+def test_chat_writes_conversation_log_row(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """一轮 /chat 在 conversation_log 落一行(#110):_log_conversation 被调用。
+
+    _log_conversation 内部 fire-and-forget(异步写,不阻塞流),此处 patch 它
+    同步捕获调用以验证「每轮落一行 + 字段齐全」;PII 过滤在数据层
+    (test_state_conversation 单测覆盖)。
+    """
+    from official_agent.web import routes
+
+    logged: list[dict] = []
+
+    def _fake_log(*_args, **kwargs):
+        logged.append(kwargs)
+
+    monkeypatch.setattr(routes, "_log_conversation", _fake_log)
+    _install_fakes(monkeypatch)
+    with client.stream(
+        "POST",
+        "/api/agent/chat",
+        json={"message": "我的电话是 13812345678"},
+        headers={"Authorization": "Bearer tok"},
+    ) as resp:
+        events = _sse_events(resp)
+    assert resp.status_code == 200
+    assert any(e["type"] == "done" for e in events)
+    assert logged, "_log_conversation 未被调用"
+    assert len(logged) == 1  # 一轮只落一行(单一写入路径)
+    row = logged[0]
+    assert row["user_message"] == "我的电话是 13812345678"
+    assert row["duration_ms"] >= 0
+    assert row["error_code"] is None  # 正常轮无错误码
+
+
+
+
+def test_chat_error_path_logs_error_row(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """agent 抛异常 → error 事件 + conversation_log 落 error_code 行(#110)。"""
+    from official_agent.web import routes
+
+    class _FailingAgent:
+        async def astream(self, *args, **kwargs):
+            """async generator:首次迭代即抛(模拟 agent 执行期异常)。"""
+            if False:
+                yield None
+            raise RuntimeError("boom")
+
+        async def aget_state(self, config):
+            return None
+
+    logged: list[dict] = []
+
+    def _fake_log(*_args, **kwargs):
+        logged.append(kwargs)
+
+    monkeypatch.setattr(routes, "_log_conversation", _fake_log)
+    monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: _FailingAgent())
+    monkeypatch.setattr(routes, "resolve", fake_resolve(auth_ok_data()))
+    with client.stream(
+        "POST",
+        "/api/agent/chat",
+        json={"message": "你好"},
+        headers={"Authorization": "Bearer tok"},
+    ) as resp:
+        events = _sse_events(resp)
+    assert resp.status_code == 200
+    assert any(e["type"] == "error" for e in events)
+    assert logged, "_log_conversation 未被调用"
+    assert len(logged) == 1
+    assert logged[0]["error_code"] == "unknown"  # RuntimeError → unknown
+    assert logged[0]["reply_summary"] == ""  # 错误行不存回复

@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
@@ -27,8 +29,9 @@ from official_agent.graphs.identity import ResolvedIdentity, resolve
 from official_agent.observability import langfuse_callbacks
 from official_agent.state.threads import create_thread, new_thread_id
 from official_agent.tools.client import BackendError
-
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 
 class _SessionState:
@@ -157,7 +160,8 @@ _ERR_BACKEND_UNAVAILABLE = "backend_unavailable"
 _ERR_MODEL = "model_error"
 _ERR_INVALID_REQUEST = "invalid_request"
 _ERR_UNKNOWN = "unknown"
-
+# 客户端断连中止(CancelledError):非 #90 契约码,运营侧新码——断连轮次留痕专用
+_ERR_DISCONNECTED = "client_disconnected"
 # auth 失效的关键词(get_as_user 失败文案含之;message 判定的最后兜底)。
 _AUTH_FAIL_HINTS = ("令牌", "token", "登录", "JWT")
 
@@ -184,7 +188,13 @@ def _error_code(exc: Exception) -> str:
 async def _stream_turn(
     session: _SessionState, message: str, is_new: bool
 ) -> AsyncIterator[str]:
-    """跑一轮:流式吐 SSE。is_new 由会话层判定(新建才注身份前缀)。"""
+    """跑一轮:流式吐 SSE。is_new 由会话层判定(新建才注身份前缀)。
+
+    每轮结束在 conversation_log 落一行(M6 #110):
+    - 正常:user_message(问题原文) + reply_summary(回复摘要非全文) + tools/耗时
+    - 异常(error 事件):只存 error_code + 耗时,不存对话内容(决策 #102/#110)
+    落行失败(fail-open)不阻断对话——观测绝不拖垮主流程(ADR-0005)。
+    """
     config = {
         "configurable": {"thread_id": session.session_id},
         "callbacks": langfuse_callbacks(),
@@ -202,6 +212,10 @@ async def _stream_turn(
     # 契约 #90:首事件 session(带 created 标记新/续传)
     yield sse({"type": "session", "session_id": session.session_id, "created": is_new})
 
+    started = time.monotonic()
+    tools_called: list[str] = []
+    reply_chunks: list[str] = []
+    error_code: str | None = None
     try:
         async for mode, payload in session.agent.astream(  # type: ignore[attr-defined]
             {"messages": messages}, config=config, stream_mode=["messages", "updates"]
@@ -209,7 +223,11 @@ async def _stream_turn(
             if mode == "messages":
                 chunk, _meta = payload
                 if isinstance(chunk, AIMessageChunk) and chunk.content:
-                    yield sse({"type": "delta", "role": "assistant", "content": chunk.content})
+                    # 只收文本块;多模态 content(list)跳过文本拼接(回复摘要仅文本)
+                    text = chunk.content if isinstance(chunk.content, str) else ""
+                    if text:
+                        reply_chunks.append(text)
+                        yield sse({"type": "delta", "role": "assistant", "content": text})
             elif mode == "updates":
                 for _ns, node_update in payload.items():
                     if isinstance(node_update, dict):
@@ -217,10 +235,65 @@ async def _stream_turn(
                             # 工具调用状态(契约 #90:tool 事件,role=tool)
                             if getattr(m, "tool_calls", None):
                                 for tc in m.tool_calls:
+                                    tools_called.append(tc.get("name") or "")
                                     yield sse(
                                         {"type": "tool", "role": "tool", "name": tc.get("name")}
                                     )
     except Exception as exc:  # noqa: BLE001 — 单轮失败不崩连接,吐 error 事件
-        yield sse({"type": "error", "code": _error_code(exc), "message": str(exc)})
-        return
-    yield sse({"type": "done", "session_id": session.session_id})
+        error_code = _error_code(exc)
+        yield sse({"type": "error", "code": error_code, "message": str(exc)})
+    except asyncio.CancelledError:
+        # 客户端断连(CancelledError 非 Exception):中止轮次也要留痕
+        # (partial reply/已调工具不丢失),error_code 记断连中止。
+        error_code = _ERR_DISCONNECTED
+
+    # 单一写入路径:正常(error_code None)/错误/断连三态合一,落一行。
+    # 回复摘要 = 流式拼接的文本全文(非摘要,#110 仅先落全文本,M6 后续压缩/#108)。
+    _log_conversation(
+        session,
+        user_message=message,
+        reply_summary="".join(reply_chunks),
+        tools=tools_called,
+        duration_ms=_elapsed_ms(started),
+        error_code=error_code,
+    )
+    if error_code is None:
+        yield sse({"type": "done", "session_id": session.session_id})
+
+
+def _log_conversation(
+    session: _SessionState,
+    *,
+    user_message: str,
+    reply_summary: str,
+    tools: list[str],
+    duration_ms: int,
+    error_code: str | None = None,
+) -> None:
+    """落一行 conversation_log(fail-open,非阻塞)。
+
+    lazy import:web 入口不顶层依赖 psycopg(无 PG 环境可跑服务,
+    观测侧不给主链路加硬依赖,同 app.py lifespan 先例)。
+    fire-and-forget:写入放后台任务,不阻塞 SSE 流尾(ADR-0005 fail-open)。
+    """
+    from official_agent.state.conversation import write_conversation
+
+    async def _write() -> None:
+        try:
+            write_conversation(
+                thread_id=session.session_id,
+                user_id=session.identity.get("user_id"),
+                channel=session.identity.get("source") or "web",
+                user_message=user_message,
+                reply_summary=reply_summary,
+                tools=tools,
+                duration_ms=duration_ms,
+                error_code=error_code,
+            )
+        except Exception:  # noqa: BLE001 — 观测写入失败不拖垮对话(ADR-0005)
+            logger.warning("conversation_log 写入失败(已忽略)", exc_info=True)
+
+    asyncio.create_task(_write())
+
+def _elapsed_ms(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)
