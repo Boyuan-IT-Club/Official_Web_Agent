@@ -138,6 +138,28 @@ def test_conversations_list_passes_filters(
     assert seen.get("limit") == 20
 
 
+def test_conversations_list_passes_thread_filter(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M6 #115:thread_id 过滤透传(详情页拉同会话轮次)。"""
+    from official_agent.web import routes
+
+    _install_resolve(monkeypatch, _admin_identity())
+    seen: dict = {}
+
+    def _fake_list(**kw):
+        seen.update(kw)
+        return []
+
+    monkeypatch.setattr(routes, "list_conversations", _fake_list)
+    resp = client.get(
+        "/api/agent/admin/conversations?thread_id=web:u7:abc1",
+        headers={"Authorization": "Bearer tok"},
+    )
+    assert resp.status_code == 200
+    assert seen.get("thread_id") == "web:u7:abc1"
+
+
 def test_conversations_detail_returns_row(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -617,8 +617,9 @@ async def get_admin_conversations(
     request: Request,
     _: Annotated[ResolvedIdentity, Depends(_require_monitor)],
 ) -> dict[str, Any]:
-    """运营列表:时间/用户/问题首字/状态,按 user_id 过滤 + 分页(#112)。"""
+    """运营列表:时间/用户/问题首字/状态,按 user_id / thread_id 过滤 + 分页(#112/#115)。"""
     user_id_raw = request.query_params.get("user_id")
+    thread_id = (request.query_params.get("thread_id") or "").strip() or None
     limit_raw = request.query_params.get("limit", "50")
     offset_raw = request.query_params.get("offset", "0")
     try:
@@ -627,7 +628,7 @@ async def get_admin_conversations(
         offset = max(0, int(offset_raw))
     except ValueError:
         raise HTTPException(status_code=400, detail="user_id/limit/offset 必须为整数") from None
-    items = list_conversations(user_id=user_id, limit=limit, offset=offset)
+    items = list_conversations(user_id=user_id, thread_id=thread_id, limit=limit, offset=offset)
     return {"items": items, "limit": limit, "offset": offset}
 
 

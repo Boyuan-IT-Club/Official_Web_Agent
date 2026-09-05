@@ -188,6 +188,29 @@ def test_list_conversations_filters_by_user() -> None:
     assert "OFFSET %s" in sql
 
 
+def test_list_conversations_filters_by_thread() -> None:
+    """M6 #115:详情页按 thread_id 拉同会话全部轮次。"""
+    conn = _mock_conn([])
+    conn.execute.return_value.fetchall.return_value = []
+    with patch.object(conversation, "_conn", return_value=conn):
+        conversation.list_conversations(thread_id="web:u7:8f3a9c2b", limit=10)
+    sql = str(conn.execute.call_args.args[0])
+    params = conn.execute.call_args.args[1]
+    assert "thread_id = %s" in sql
+    assert "web:u7:8f3a9c2b" in params
+
+
+def test_list_conversations_projects_usage_fields() -> None:
+    """M6 #115:用量页从列表投影取 token/缓存字段(聚合看板归 #65)。"""
+    conn = _mock_conn([])
+    conn.execute.return_value.fetchall.return_value = []
+    with patch.object(conversation, "_conn", return_value=conn):
+        conversation.list_conversations(limit=10)
+    sql = str(conn.execute.call_args.args[0])
+    for field in ("input_tokens", "output_tokens", "cache_hit_tokens", "cache_miss_tokens"):
+        assert field in sql, f"列表投影缺 {field}"
+
+
 def test_get_conversation_returns_row() -> None:
     row = _conversation_row()
     conn = _mock_conn(row)

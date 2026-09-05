@@ -255,19 +255,23 @@ def _record(row: dict[str, Any]) -> ConversationRecord:
 
 def list_conversations(
     user_id: int | None = None,
+    thread_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     """运营列表投影(#112):id/thread/user/问题首字/错误码/时间,不含完整消息。
 
     列表不返回 user_message/reply_summary 全文(轻量,要全文走详情)。
-    可按 user_id 过滤;LIMIT/OFFSET 分页(调用方限上限)。
+    可按 user_id / thread_id(#115 详情页拉同会话轮次)过滤;
+    LIMIT/OFFSET 分页(调用方限上限)。
+    用量字段(#115 投影):token/缓存命中数据随行返回,看板级聚合归 #65。
     """
     limit = max(1, min(int(limit), 200))
     offset = max(0, int(offset))
     sql = (
         "SELECT id, thread_id, user_id, channel, error_code, created_at, "
-        "left(user_message, 20) AS user_message_head "
+        "left(user_message, 20) AS user_message_head, "
+        "input_tokens, output_tokens, cache_hit_tokens, cache_miss_tokens "
         "FROM agent_conversation_log"
     )
     params: list[Any] = []
@@ -275,6 +279,9 @@ def list_conversations(
     if user_id is not None:
         conds.append("user_id = %s")
         params.append(user_id)
+    if thread_id is not None:
+        conds.append("thread_id = %s")
+        params.append(thread_id)
     if conds:
         sql += " WHERE " + " AND ".join(conds)
     sql += " ORDER BY id DESC LIMIT %s OFFSET %s"
