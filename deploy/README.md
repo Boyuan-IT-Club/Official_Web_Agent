@@ -50,3 +50,10 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/api/agent/admin/c
   会话层外置(Ably,M3)后才放开 —— #116 已声明单 worker 起步。
 - 回滚:`AGENT_VERSION=<上一 tag> docker compose -f docker-compose.prod.yml up -d`。
 - 限流:nginx `limit_req_zone/limit_req` 与 agent 层位置均已预留,参数等 #56/SEC-05。
+
+## 本地测试账号与种子数据
+
+- 统一调试账号:`10245101666@stu.ecnu.edu.cn` / `12345678`(超级管理员;3000/3001 通用)。种子候选人(9002-9006)密码同为 `12345678`。
+- Agent 服务账号:`svc-agent-local`(见仓库 .env;SEC-01,不复用 admin)。
+- 种子:`docker exec -i official-agent-local-mysql-1 mysql -uroot -proot --default-character-set=utf8mb4 < deploy/seed/local-test-data.sql`
+  (幂等;覆盖周期/简历含 PII/场次/安排/结果/调剂/获奖;候选人覆盖待分配、已安排、已通过、调剂中四种状态)。
