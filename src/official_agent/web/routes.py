@@ -22,9 +22,14 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage, RemoveMessage
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from official_agent.graphs.assistant import build_assistant_agent, identity_message
+from official_agent.graphs.assistant.compression import (
+    maybe_compress,
+    summarize_messages,
+)
 from official_agent.graphs.identity import ResolvedIdentity, resolve
 from official_agent.observability import langfuse_callbacks
 from official_agent.state.threads import create_thread, new_thread_id
@@ -219,10 +224,58 @@ def _ensure_fresh_agent_config(session: _SessionState, checkpointer: Any) -> Non
     )
     session.applied_config_fingerprint = current
 
+async def _compress_if_needed(
+    session: _SessionState, config: dict, user_query: str
+) -> str | None:
+    """M6 #114:轮末检查会话 token,超阈值则压缩回写 checkpoint。
+
+    回写 = update_state 产生 checkpoint **新版本**(先 REMOVE_ALL_MESSAGES
+    再加「摘要 + 近几轮」);PostgresSaver 不删旧版本行,全量历史仍可
+    get_state_history 回溯——checkpointer 始终是对话原文权威源(#102)。
+    返回事件描述串(触发 token/覆盖/保留/摘要体积)随 conversation_log
+    落行;未触发或任何失败返回 None(fail-open,ADR-0005)。
+    """
+    try:
+        state = await session.agent.aget_state(config)
+        messages = (getattr(state, "values", None) or {}).get("messages") or []
+        if not messages:
+            return None
+        from official_agent.config import get_effective_settings
+        from official_agent.graphs.assistant import _build_model
+
+        settings = get_effective_settings()
+        # 摘要走轻量模型;未配 model_light(如单模型部署)回退 strong
+        summarizer = _build_model(
+            settings, model=settings.model_light or settings.model_strong
+        ).bind(temperature=0)
+        result = await maybe_compress(
+            messages,
+            summarize_fn=lambda older, query: summarize_messages(
+                older, query, summarizer
+            ),
+            threshold=settings.context_compress_threshold_tokens,
+            recent_keep=settings.context_recent_keep_messages,
+            query=user_query,
+        )
+        if result is None:
+            return None
+        await session.agent.update_state(
+            config,
+            {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *result.new_messages]},
+        )
+        return (
+            f"trigger_tokens={result.trigger_tokens};covered={result.covered};"
+            f"kept={len(result.new_messages) - 1};summary_tokens={result.summary_tokens}"
+        )
+    except Exception:  # noqa: BLE001 — 压缩失败不拖垮对话(ADR-0005)
+        logger.warning("会话压缩失败(已忽略)", exc_info=True)
+        return None
+
+
 async def _stream_turn(
     session: _SessionState, message: str, is_new: bool, checkpointer: Any = None
 ) -> AsyncIterator[str]:
-    """跑一轮:流式吐 SSE。is_new 由会话层判定(新建才注身份前缀)。
+    """跑一轮:流式吐 SSE。is_new 仅作 SSE session 事件的 created 标记。
 
     每轮结束在 conversation_log 落一行(M6 #110):
     - 正常:user_message(问题原文) + reply_summary(回复摘要非全文) + tools/耗时
@@ -241,11 +294,11 @@ async def _stream_turn(
     def sse(payload: dict[str, Any]) -> str:
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-    # 首轮注入身份前缀(仅进程内新建会话;续传不重复注)
+    # M6 #114:身份消息每轮注入(含续传轮,决策 #108 质量优先)——
+    # 压缩掉早期上下文后身份边界仍在最近窗口;前缀含首轮身份段,
+    # 同 session 内缓存仍命中(身份块小,重注成本可忽略)。
     first_input = HumanMessage(content=identity_message(session.identity))
-    messages: list = (
-        [first_input, HumanMessage(content=message)] if is_new else [HumanMessage(content=message)]
-    )
+    messages: list = [first_input, HumanMessage(content=message)]
 
     # 契约 #90:首事件 session(带 created 标记新/续传)
     yield sse({"type": "session", "session_id": session.session_id, "created": is_new})
@@ -312,6 +365,10 @@ async def _stream_turn(
     # 同 role 的会话前缀应逐字节稳定;hash 变化 = 前缀失效(命中率不可信)。
     from official_agent.graphs.assistant import _ROLE_TOOL_NAMES, load_system_prompt
 
+    # M6 #114:轮末按需压缩(先压缩后落行,同一行携带 compress_event)。
+    # 在 done 事件前执行:失败 fail-open 返回 None,不阻断 done。
+    compress_event = await _compress_if_needed(session, config, message)
+
     role = session.identity.get("role") or "unknown"
     tool_names = list(_ROLE_TOOL_NAMES.get(role, ()))
     p_hash = prefix_hash(load_system_prompt(), tool_names)
@@ -333,6 +390,7 @@ async def _stream_turn(
         error_code=error_code,
         usage=usage,
         prefix_hash=p_hash,
+        compress_event=compress_event,
     )
     if error_code is None:
         yield sse({"type": "done", "session_id": session.session_id})
@@ -348,6 +406,7 @@ def _log_conversation(
     error_code: str | None = None,
     usage: dict[str, int | None] | None = None,
     prefix_hash: str | None = None,
+    compress_event: str | None = None,
 ) -> None:
     """落一行 conversation_log(fail-open,非阻塞)。
 
@@ -369,6 +428,7 @@ def _log_conversation(
                 duration_ms=duration_ms,
                 error_code=error_code,
                 prefix_hash=prefix_hash,
+                compress_event=compress_event,
                 **(usage or {}),
             )
         except Exception:  # noqa: BLE001 — 观测写入失败不拖垮对话(ADR-0005)

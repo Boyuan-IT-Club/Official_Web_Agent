@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_api_key: str = ""
     anthropic_api_key: str = ""
-    model_light: str = "claude-haiku-4-5-20251001"
+    model_light: str = ""  # 轻量模型(压缩摘要);空 = 用 model_strong(兼容单模型部署)
     model_strong: str = "claude-sonnet-5"
 
     # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)
@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     langfuse_host: str = ""
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
+
+    # 运行时上下文(M6 #114):会话超阈值压缩。调优参数,冷启动生效(不入 HOT_KEYS
+    # ——改它们无需重建 LLM client,仅影响下一轮压缩判定)
+    context_compress_threshold_tokens: int = 24000
+    context_recent_keep_messages: int = 12
 
 
 @lru_cache

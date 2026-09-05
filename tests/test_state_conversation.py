@@ -91,6 +91,24 @@ def test_write_conversation_inserts_fields() -> None:
     assert rec.error_code is None
 
 
+def test_write_conversation_records_compress_event() -> None:
+    """M6 #114:压缩事件(触发轮/token/覆盖)随轮落行。"""
+    row = _conversation_row()
+    conn = _mock_conn(row)
+    with patch.object(conversation, "_conn", return_value=conn):
+        conversation.write_conversation(
+            thread_id="web:u7:8f3a9c2b",
+            user_id=7,
+            user_message="继续问",
+            reply_summary="继续答",
+            compress_event="trigger_tokens=31500;covered=38;kept=13;summary_tokens=812",
+        )
+    sql = str(conn.execute.call_args.args[0])
+    assert "compress_event" in sql
+    params = conn.execute.call_args.args[1]
+    assert params[-1] == "trigger_tokens=31500;covered=38;kept=13;summary_tokens=812"
+
+
 def test_write_conversation_masks_pii_before_insert() -> None:
     conn = _mock_conn(_conversation_row())
     with patch.object(conversation, "_conn", return_value=conn):

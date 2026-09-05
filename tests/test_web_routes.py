@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import types
 from collections.abc import AsyncIterator
 
 import pytest
@@ -197,6 +198,51 @@ def test_chat_resume_same_session_reuses_thread(
     assert sid2 == sid  # 续传同 thread,不新开
 
 
+def test_chat_injects_identity_every_round_including_resume(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M6 #114:身份消息每轮注入(含续传轮,决策 #108 质量优先)。
+
+    新建轮与续传轮的 agent 输入都必须以身份消息开头——续传轮也不例外,
+    保证压缩掉早期上下文后身份边界仍在最近窗口内。
+    """
+    from official_agent.web import routes
+
+    seen_inputs: list[list] = []
+
+    class _RecordingAgent:
+        async def astream(self, inp, config=None, **kwargs):
+            seen_inputs.append(list(inp["messages"]))
+            yield "messages", (AIMessage(content="好的"), {})
+            yield "updates", {"agent": {"messages": []}}
+
+        async def aget_state(self, config):
+            return None
+
+    agent = _RecordingAgent()
+    _install_fakes(monkeypatch)
+    monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: agent)
+
+    with client.stream(
+        "POST", "/api/agent/chat", json={"message": "hi"}, headers={"Authorization": "Bearer tok"}
+    ) as resp:
+        events = _sse_events(resp)
+    sid = next(e["session_id"] for e in events if e["type"] == "session")
+
+    with client.stream(
+        "POST",
+        "/api/agent/chat",
+        json={"message": "hi again", "session_id": sid},
+        headers={"Authorization": "Bearer tok"},
+    ) as resp:
+        _sse_events(resp)
+
+    assert len(seen_inputs) == 2
+    for messages in seen_inputs:
+        assert "当前对话用户是" in messages[0].content, "每轮输入首条必须是身份消息"
+        assert messages[-1].content in ("hi", "hi again")
+
+
 def test_chat_other_user_same_session_returns_403(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -215,6 +261,123 @@ def test_chat_other_user_same_session_returns_403(
         headers={"Authorization": "Bearer tok2"},
     )
     assert resp.status_code == 403
+
+
+def _stateful_agent(updates: list, state_messages: list | None):
+    """带 checkpoint 状态的假 agent:astream 吐一条消息,可查/可写状态。"""
+
+    class _StatefulAgent:
+        async def astream(self, inp, config=None, **kwargs):
+            yield "messages", (AIMessage(content="答"), {})
+            yield "updates", {"agent": {"messages": []}}
+
+        async def aget_state(self, config):
+            return types.SimpleNamespace(values={"messages": state_messages or []})
+
+        async def update_state(self, config, values):
+            updates.append(list(values["messages"]))
+
+    return _StatefulAgent()
+
+
+def test_chat_compresses_long_state_and_logs_event(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M6 #114:轮末超阈值压缩——摘要回写 checkpoint 新版本,事件随行落日志。"""
+    from langchain_core.messages import HumanMessage, RemoveMessage
+    from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+    from official_agent.graphs.assistant.compression import CompressionResult
+    from official_agent.web import routes
+
+    updates: list[list] = []
+    logged: list[dict] = []
+    monkeypatch.setattr(routes, "_log_conversation", lambda *a, **k: logged.append(k))
+    _install_fakes(monkeypatch)
+    monkeypatch.setattr(
+        routes,
+        "build_assistant_agent",
+        lambda *a, **k: _stateful_agent(updates, [HumanMessage("旧" * 50), AIMessage("旧答")]),
+    )
+
+    async def _fake_compress(*_a: object, **_k: object) -> CompressionResult:
+        return CompressionResult(
+            new_messages=[HumanMessage("[历史摘要] 摘要"), HumanMessage("近轮")],
+            trigger_tokens=31500,
+            covered=38,
+            summary_tokens=812,
+        )
+
+    monkeypatch.setattr(routes, "maybe_compress", _fake_compress)
+
+    with client.stream(
+        "POST", "/api/agent/chat", json={"message": "hi"}, headers={"Authorization": "Bearer tok"}
+    ) as resp:
+        events = _sse_events(resp)
+    assert any(e["type"] == "done" for e in events)
+    assert len(updates) == 1
+    # 回写形状:先全删(产生新版本),再加「摘要 + 近几轮」;旧版本仍可回溯
+    first = updates[0][0]
+    assert isinstance(first, RemoveMessage) and first.id == REMOVE_ALL_MESSAGES
+    assert updates[0][1].content.startswith("[历史摘要]")
+    assert logged[0]["compress_event"] == (
+        "trigger_tokens=31500;covered=38;kept=1;summary_tokens=812"
+    )
+
+
+def test_chat_no_compression_under_threshold(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M6 #114:状态未超阈值 → 不压缩不回写,compress_event 为 None。"""
+    from official_agent.web import routes
+
+    updates: list[list] = []
+    logged: list[dict] = []
+    monkeypatch.setattr(routes, "_log_conversation", lambda *a, **k: logged.append(k))
+    _install_fakes(monkeypatch)
+    monkeypatch.setattr(
+        routes,
+        "build_assistant_agent",
+        lambda *a, **k: _stateful_agent(updates, [AIMessage("短")]),
+    )
+
+    with client.stream(
+        "POST", "/api/agent/chat", json={"message": "hi"}, headers={"Authorization": "Bearer tok"}
+    ) as resp:
+        events = _sse_events(resp)
+    assert any(e["type"] == "done" for e in events)
+    assert updates == []
+    assert logged[0]["compress_event"] is None
+
+
+def test_chat_compression_failure_fail_open(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M6 #114:压缩失败不影响本轮对话(fail-open,ADR-0005)。"""
+    from official_agent.web import routes
+
+    updates: list[list] = []
+    logged: list[dict] = []
+    monkeypatch.setattr(routes, "_log_conversation", lambda *a, **k: logged.append(k))
+    _install_fakes(monkeypatch)
+    monkeypatch.setattr(
+        routes,
+        "build_assistant_agent",
+        lambda *a, **k: _stateful_agent(updates, [AIMessage("旧" * 50)]),
+    )
+
+    async def _boom(*_a: object, **_k: object):
+        raise RuntimeError("压缩炸了")
+
+    monkeypatch.setattr(routes, "maybe_compress", _boom)
+
+    with client.stream(
+        "POST", "/api/agent/chat", json={"message": "hi"}, headers={"Authorization": "Bearer tok"}
+    ) as resp:
+        events = _sse_events(resp)
+    assert any(e["type"] == "done" for e in events)
+    assert updates == []
+    assert logged[0]["compress_event"] is None
 
 
 def test_chat_writes_conversation_log_row(

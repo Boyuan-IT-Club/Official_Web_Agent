@@ -173,13 +173,14 @@ def write_conversation(
     cache_hit_tokens: int | None = None,
     cache_miss_tokens: int | None = None,
     prefix_hash: str | None = None,
+    compress_event: str | None = None,
 ) -> ConversationRecord:
     """落一行对话运营数据(SSE 每轮结束调用)。
 
     PII 过滤:user_message / reply_summary 写入前强制 mask_pii。
     错误行(error_code 非空):只存 error_code + 元数据,user_message/reply_summary 置空。
     tools 序列化为 jsonb;usage 列(#113)由调用方传 extract_usage 结果;
-    prefix_hash 为缓存前缀稳定性证据。
+    prefix_hash 为缓存前缀稳定性证据;compress_event(#114)为压缩事件留痕。
     """
     if error_code:
         # 异常/错误行不存对话内容(决策 #102/#110)
@@ -195,8 +196,8 @@ def write_conversation(
             INSERT INTO agent_conversation_log
                 (thread_id, user_id, channel, user_message, reply_summary,
                 tools, duration_ms, error_code, input_tokens, output_tokens,
-                cache_hit_tokens, cache_miss_tokens, prefix_hash)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                cache_hit_tokens, cache_miss_tokens, prefix_hash, compress_event)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id, thread_id, user_id, channel, user_message, reply_summary,
                       tools, duration_ms, error_code, input_tokens, output_tokens,
                       cache_hit_tokens, cache_miss_tokens, prefix_hash,
@@ -216,6 +217,7 @@ def write_conversation(
                 cache_hit_tokens,
                 cache_miss_tokens,
                 prefix_hash,
+                compress_event,
             ),
         ).fetchone()
     if row is None:
