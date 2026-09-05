@@ -28,16 +28,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     AsyncPostgresSaver 是跨请求共享的连接(checkpointer 无会话态,thread_id 隔离会话),
     get_checkpointer() 进入建连+建表,退出关闭(与 CLI cli.py:169-176 同语义)。
     """
+    from official_agent.state import config_store, conversation
     from official_agent.state.pg import get_checkpointer
     from official_agent.state.threads import ensure_agent_threads_table
-
     async with get_checkpointer() as saver:
         app.state.checkpointer = saver
         try:
-            # L-1:幂等建 agent_threads 档案表(SEC-07 属主载体)——与 CLI cli.py:172
-            # 同语义。缺这张表时 web 建档会失败 → 降级随机 thread_id 不持久化,
-            # 「重启续传」承诺失效(空库首跑必经此路径)。
+            # L-1:幂等建 agent_threads + agent_conversation_log + agent_config 表
+            # (SEC-07 / M6 #110 / #111)。缺表时降级(fail-open,ADR-0005)。
             ensure_agent_threads_table()
+            conversation.ensure_conversation_table()
+            config_store.ensure_config_table()
         except Exception:  # noqa: BLE001 — PG 未起/配置错 → 降级(fail-open,ADR-0005)
             app.state.checkpointer = None
         yield
@@ -47,6 +48,10 @@ def create_app() -> FastAPI:
     """构建 FastAPI app。uvicorn 入口:``uvicorn official_agent.web.app:create_app``
     (factory 模式,便于测试注入)。"""
     settings = get_settings()
+    # M6 #113:日志 stdout + 落盘 RotatingFileHandler(幂等,测试安全)
+    from official_agent.logging_conf import setup_logging
+
+    setup_logging()
     app = FastAPI(title="official-web-agent", version="0.1.0", lifespan=lifespan)
 
     origins = [o.strip() for o in settings.agent_cors_origins.split(",") if o.strip()]

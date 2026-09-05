@@ -193,11 +193,9 @@ async def _chat(username: str, password: str, session: str) -> None:
             f"exit/退出 结束"
         )
 
-        # 身份前缀首轮注入(SEC-07 静态前缀纪律)。
-        # 判据用持久化事实而非进程内计数:有 checkpointer 时,new thread
-        # (aget_state 无历史)才注入前缀;续接/已有历史只发增量——避免跨进程
-        # 续接重复注入身份(H-1)。失败轮未持久化 → 下次 aget_state 仍无 →
-        # 自动重发前缀(H-2)。降级路径用本地累积(原 CLI 语义)。
+        # 身份每轮注入(M6 #114,决策 #108 质量优先):压缩掉早期上下文后
+        # 身份边界仍在最近窗口;重复注入幂等无害(同身份同文案,块很小)。
+        # 失败轮未持久化 → 下轮照常重注,天然覆盖 H-2 场景。
         first_input = HumanMessage(content=identity_message(identity))
         chat_history: list = []  # 仅降级路径使用:本地历史累积
         while True:
@@ -213,16 +211,9 @@ async def _chat(username: str, password: str, session: str) -> None:
                 return
 
             if saver is not None:
-                # 持久化事实判据:checkpointer 有该 thread 状态即视为续接
-                # (含 pending interrupt 断点——无 messages 也算有历史),
-                # 只发增量;全空 = 新线程,带身份前缀。
-                state = await agent.aget_state({"configurable": {"thread_id": tid}})
-                has_history = state is not None
-                messages = (
-                    [first_input, HumanMessage(content=user_input)]
-                    if not has_history
-                    else [HumanMessage(content=user_input)]
-                )
+                # M6 #114:持久化路径同样每轮注入身份(与 web 通道一致,
+                # 决策 #108 质量优先;不再依赖 aget_state 判新旧的 H-1 逻辑)
+                messages = [first_input, HumanMessage(content=user_input)]
             else:
                 # 降级:本地累积,保证多轮不失忆(原 CLI 语义)
                 messages = [first_input, *chat_history, HumanMessage(content=user_input)]

@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_api_key: str = ""
     anthropic_api_key: str = ""
-    model_light: str = "claude-haiku-4-5-20251001"
+    model_light: str = "claude-haiku-4-5-20251001"  # GRA-08 降档预留;当前无消费方
     model_strong: str = "claude-sonnet-5"
 
     # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)
@@ -46,7 +46,50 @@ class Settings(BaseSettings):
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
 
+    # 运行时上下文(M6 #114):会话超阈值压缩。调优参数,冷启动生效(不入 HOT_KEYS
+    # ——改它们无需重建 LLM client,仅影响下一轮压缩判定)
+    context_compress_threshold_tokens: int = 24000
+    context_recent_keep_messages: int = 12
+
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+# 可热载低敏键白名单(M6 #111):这些键可被 agent_config 表覆盖并热生效。
+# 高敏/启动必需键(真实 key/密码/连接串/host/port)永远只在 .env,不可入库覆盖。
+HOT_KEYS: frozenset[str] = frozenset(
+    {
+        "llm_provider",
+        "llm_base_url",
+        "model_light",
+        "model_strong",
+    }
+)
+
+
+def invalidate_settings_cache() -> None:
+    """使 get_settings 的 lru_cache 失效(M6 #111 热生效)。
+
+    调用后下次 get_settings() 重新读 .env;依赖该配置的组件
+    (LLM client 等)在下次构造时自然用新值。
+    """
+    get_settings.cache_clear()
+
+
+def get_effective_settings():
+    """返回合并 DB 覆盖的 Settings(DB 低敏值优先于 env;#111 热生效)。
+
+    lazy import 避免循环:config_store 依赖本模块的 get_settings。
+    """
+    settings = get_settings()
+    try:
+        from official_agent.state.config_store import get_all_config
+
+        overrides = get_all_config()
+    except Exception:  # noqa: BLE001 — PG 未起/配置错 → 用 env 原值(fail-open)
+        return settings
+    # 只合并白名单键;确保类型为 str
+    updates = {k: v for k, v in overrides.items() if k in HOT_KEYS and isinstance(v, str)}
+    return settings.model_copy(update=updates) if updates else settings

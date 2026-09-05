@@ -1,0 +1,18 @@
+# 构建上下文只装运行必需物;密钥/本地态永不进镜像(SEC-01 红线)
+.venv
+.env
+.env.*
+__pycache__
+**/__pycache__
+*.pyc
+.git
+.pytest_cache
+.ruff_cache
+tests
+evals
+docs
+deploy
+build*
+*.log
+logs
+context

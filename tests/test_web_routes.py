@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import types
 from collections.abc import AsyncIterator
 
 import pytest
@@ -197,6 +198,51 @@ def test_chat_resume_same_session_reuses_thread(
     assert sid2 == sid  # 续传同 thread,不新开
 
 
+def test_chat_injects_identity_every_round_including_resume(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M6 #114:身份消息每轮注入(含续传轮,决策 #108 质量优先)。
+
+    新建轮与续传轮的 agent 输入都必须以身份消息开头——续传轮也不例外,
+    保证压缩掉早期上下文后身份边界仍在最近窗口内。
+    """
+    from official_agent.web import routes
+
+    seen_inputs: list[list] = []
+
+    class _RecordingAgent:
+        async def astream(self, inp, config=None, **kwargs):
+            seen_inputs.append(list(inp["messages"]))
+            yield "messages", (AIMessage(content="好的"), {})
+            yield "updates", {"agent": {"messages": []}}
+
+        async def aget_state(self, config):
+            return None
+
+    agent = _RecordingAgent()
+    _install_fakes(monkeypatch)
+    monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: agent)
+
+    with client.stream(
+        "POST", "/api/agent/chat", json={"message": "hi"}, headers={"Authorization": "Bearer tok"}
+    ) as resp:
+        events = _sse_events(resp)
+    sid = next(e["session_id"] for e in events if e["type"] == "session")
+
+    with client.stream(
+        "POST",
+        "/api/agent/chat",
+        json={"message": "hi again", "session_id": sid},
+        headers={"Authorization": "Bearer tok"},
+    ) as resp:
+        _sse_events(resp)
+
+    assert len(seen_inputs) == 2
+    for messages in seen_inputs:
+        assert "当前对话用户是" in messages[0].content, "每轮输入首条必须是身份消息"
+        assert messages[-1].content in ("hi", "hi again")
+
+
 def test_chat_other_user_same_session_returns_403(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -215,3 +261,316 @@ def test_chat_other_user_same_session_returns_403(
         headers={"Authorization": "Bearer tok2"},
     )
     assert resp.status_code == 403
+
+
+def test_chat_usage_from_usage_metadata_only(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#115 实测回归:langchain-openai 1.x 流式只有 usage_metadata
+    (response_metadata.token_usage 已消失)→ token 仍须正确落行。"""
+    from langchain_core.messages import AIMessageChunk
+
+    from official_agent.web import routes
+
+    class _UsageAgent:
+        async def astream(self, inp, config=None, **kwargs):
+            yield "messages", (
+                AIMessageChunk(
+                    content="你好",
+                    usage_metadata={
+                        "input_tokens": 87,
+                        "output_tokens": 22,
+                        "total_tokens": 109,
+                        "input_token_details": {"cache_read": 12, "cache_creation": 75},
+                    },
+                ),
+                {},
+            )
+            yield "updates", {"agent": {"messages": []}}
+
+        async def aget_state(self, config):
+            return types.SimpleNamespace(values={"messages": [AIMessage("短")]})
+
+        async def update_state(self, config, values):
+            pass
+
+    logged: list[dict] = []
+    monkeypatch.setattr(routes, "_log_conversation", lambda *a, **k: logged.append(k))
+    _install_fakes(monkeypatch)
+    monkeypatch.setattr(
+        routes, "build_assistant_agent", lambda *a, **k: _UsageAgent()
+    )
+
+    with client.stream(
+        "POST", "/api/agent/chat", json={"message": "hi"}, headers={"Authorization": "Bearer tok"}
+    ) as resp:
+        events = _sse_events(resp)
+    assert any(e["type"] == "done" for e in events)
+
+    usage = logged[0]["usage"]
+    assert usage["input_tokens"] == 87
+    assert usage["output_tokens"] == 22
+    assert usage["cache_hit_tokens"] == 12
+    assert usage["cache_miss_tokens"] == 75
+
+
+def _stateful_agent(updates: list, state_messages: list | None):
+    """带 checkpoint 状态的假 agent:astream 吐一条消息,可查/可写状态。"""
+
+    class _StatefulAgent:
+        async def astream(self, inp, config=None, **kwargs):
+            yield "messages", (AIMessage(content="答"), {})
+            yield "updates", {"agent": {"messages": []}}
+
+        async def aget_state(self, config):
+            return types.SimpleNamespace(values={"messages": state_messages or []})
+
+        async def update_state(self, config, values):
+            updates.append(list(values["messages"]))
+
+    return _StatefulAgent()
+
+
+def test_chat_compresses_long_state_and_logs_event(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M6 #114:轮末超阈值压缩——摘要回写 checkpoint 新版本,事件随行落日志。"""
+    from langchain_core.messages import HumanMessage, RemoveMessage
+    from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+    from official_agent.graphs.assistant.compression import CompressionResult
+    from official_agent.web import routes
+
+    updates: list[list] = []
+    logged: list[dict] = []
+    monkeypatch.setattr(routes, "_log_conversation", lambda *a, **k: logged.append(k))
+    _install_fakes(monkeypatch)
+    monkeypatch.setattr(
+        routes,
+        "build_assistant_agent",
+        lambda *a, **k: _stateful_agent(updates, [HumanMessage("旧" * 50), AIMessage("旧答")]),
+    )
+
+    async def _fake_compress(*_a: object, **_k: object) -> CompressionResult:
+        return CompressionResult(
+            new_messages=[HumanMessage("[历史摘要] 摘要"), HumanMessage("近轮")],
+            trigger_tokens=31500,
+            covered=38,
+            summary_tokens=812,
+        )
+
+    monkeypatch.setattr(routes, "maybe_compress", _fake_compress)
+
+    with client.stream(
+        "POST", "/api/agent/chat", json={"message": "hi"}, headers={"Authorization": "Bearer tok"}
+    ) as resp:
+        events = _sse_events(resp)
+    assert any(e["type"] == "done" for e in events)
+    assert len(updates) == 1
+    # 回写形状:先全删(产生新版本),再加「摘要 + 近几轮」;旧版本仍可回溯
+    first = updates[0][0]
+    assert isinstance(first, RemoveMessage) and first.id == REMOVE_ALL_MESSAGES
+    assert updates[0][1].content.startswith("[历史摘要]")
+    assert logged[0]["compress_event"] == (
+        "turn=1;trigger_tokens=31500;covered=38;kept=1;summary_tokens=812"
+    )
+
+
+def test_chat_no_compression_under_threshold(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M6 #114:状态未超阈值 → 不压缩不回写,compress_event 为 None。"""
+    from official_agent.web import routes
+
+    updates: list[list] = []
+    logged: list[dict] = []
+    monkeypatch.setattr(routes, "_log_conversation", lambda *a, **k: logged.append(k))
+    _install_fakes(monkeypatch)
+    monkeypatch.setattr(
+        routes,
+        "build_assistant_agent",
+        lambda *a, **k: _stateful_agent(updates, [AIMessage("短")]),
+    )
+
+    with client.stream(
+        "POST", "/api/agent/chat", json={"message": "hi"}, headers={"Authorization": "Bearer tok"}
+    ) as resp:
+        events = _sse_events(resp)
+    assert any(e["type"] == "done" for e in events)
+    assert updates == []
+    assert logged[0]["compress_event"] is None
+
+
+def test_chat_compression_failure_fail_open(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M6 #114:压缩失败不影响本轮对话(fail-open,ADR-0005)。"""
+    from official_agent.graphs.assistant.compression import (
+        record_compression_success,
+    )
+    from official_agent.web import routes
+
+    record_compression_success()  # 隔离其他用例留下的熔断计数
+    updates: list[list] = []
+    logged: list[dict] = []
+    monkeypatch.setattr(routes, "_log_conversation", lambda *a, **k: logged.append(k))
+    _install_fakes(monkeypatch)
+    monkeypatch.setattr(
+        routes,
+        "build_assistant_agent",
+        lambda *a, **k: _stateful_agent(updates, [AIMessage("旧" * 50)]),
+    )
+
+    async def _boom(*_a: object, **_k: object):
+        raise RuntimeError("压缩炸了")
+
+    monkeypatch.setattr(routes, "maybe_compress", _boom)
+
+    with client.stream(
+        "POST", "/api/agent/chat", json={"message": "hi"}, headers={"Authorization": "Bearer tok"}
+    ) as resp:
+        events = _sse_events(resp)
+    assert any(e["type"] == "done" for e in events)
+    assert updates == []
+    assert logged[0]["compress_event"] is None
+
+
+def test_compression_circuit_breaker_pauses_after_repeated_failures() -> None:
+    """M6 #114:连续失败达阈值 → 熔断暂停尝试(ADR-0004),成功后复位。"""
+    from official_agent.graphs.assistant import compression as comp
+
+    comp.record_compression_success()
+    for _ in range(comp._MAX_CONSECUTIVE_FAILURES - 1):
+        comp.record_compression_failure()
+    assert not comp.compression_paused()
+    comp.record_compression_failure()
+    assert comp.compression_paused()  # 达阈值:暂停尝试
+    comp.record_compression_success()
+    assert not comp.compression_paused()  # 成功复位
+
+
+def test_chat_writes_conversation_log_row(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """一轮 /chat 在 conversation_log 落一行(#110):_log_conversation 被调用。
+
+    _log_conversation 内部 fire-and-forget(异步写,不阻塞流),此处 patch 它
+    同步捕获调用以验证「每轮落一行 + 字段齐全」;PII 过滤在数据层
+    (test_state_conversation 单测覆盖)。
+    """
+    from official_agent.web import routes
+
+    logged: list[dict] = []
+
+    def _fake_log(*_args, **kwargs):
+        logged.append(kwargs)
+
+    monkeypatch.setattr(routes, "_log_conversation", _fake_log)
+    _install_fakes(monkeypatch)
+    with client.stream(
+        "POST",
+        "/api/agent/chat",
+        json={"message": "我的电话是 13812345678"},
+        headers={"Authorization": "Bearer tok"},
+    ) as resp:
+        events = _sse_events(resp)
+    assert resp.status_code == 200
+    assert any(e["type"] == "done" for e in events)
+    assert logged, "_log_conversation 未被调用"
+    assert len(logged) == 1  # 一轮只落一行(单一写入路径)
+    row = logged[0]
+    assert row["user_message"] == "我的电话是 13812345678"
+    assert row["duration_ms"] >= 0
+    assert row["error_code"] is None  # 正常轮无错误码
+
+
+
+
+def test_chat_error_path_logs_error_row(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """agent 抛异常 → error 事件 + conversation_log 落 error_code 行(#110)。"""
+    from official_agent.web import routes
+
+    class _FailingAgent:
+        async def astream(self, *args, **kwargs):
+            """async generator:首次迭代即抛(模拟 agent 执行期异常)。"""
+            if False:
+                yield None
+            raise RuntimeError("boom")
+
+        async def aget_state(self, config):
+            return None
+
+    logged: list[dict] = []
+
+    def _fake_log(*_args, **kwargs):
+        logged.append(kwargs)
+
+    monkeypatch.setattr(routes, "_log_conversation", _fake_log)
+    monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: _FailingAgent())
+    monkeypatch.setattr(routes, "resolve", fake_resolve(auth_ok_data()))
+    with client.stream(
+        "POST",
+        "/api/agent/chat",
+        json={"message": "你好"},
+        headers={"Authorization": "Bearer tok"},
+    ) as resp:
+        events = _sse_events(resp)
+    assert resp.status_code == 200
+    assert any(e["type"] == "error" for e in events)
+    assert logged, "_log_conversation 未被调用"
+    assert len(logged) == 1
+    assert logged[0]["error_code"] == "unknown"  # RuntimeError → unknown
+    assert logged[0]["reply_summary"] == ""  # 错误行不存回复
+
+
+def test_chat_rebuilds_agent_after_config_change(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M6 #111 热生效:PUT /admin/config 后,续传会话下一轮重建 agent。"""
+    from official_agent.web import routes
+
+    builds: list[dict] = []
+
+    # 先装 fakes(resolve + 默认 fake agent);再包计数层,避免被 _install_fakes 覆盖
+    _install_fakes(monkeypatch)
+
+    def _counting_build(*args, **kwargs):
+        builds.append(kwargs)
+        return _FakeAgent()
+
+    monkeypatch.setattr(routes, "build_assistant_agent", _counting_build)
+    monkeypatch.setattr(routes, "_config_fingerprint", lambda: "fp-1")
+
+    # 第一轮:新建 session,agent 构建 1 次
+    with client.stream(
+        "POST",
+        "/api/agent/chat",
+        json={"message": "hi"},
+        headers={"Authorization": "Bearer tok"},
+    ) as resp:
+        events = _sse_events(resp)
+    sid = next(e["session_id"] for e in events if e["type"] == "session")
+    assert len(builds) == 1
+
+    # 配置变化(指纹变)→ 下一轮重建
+    monkeypatch.setattr(routes, "_config_fingerprint", lambda: "fp-2")
+    with client.stream(
+        "POST",
+        "/api/agent/chat",
+        json={"message": "hi again", "session_id": sid},
+        headers={"Authorization": "Bearer tok"},
+    ) as resp:
+        _sse_events(resp)
+    assert len(builds) == 2  # 配置变更后重建
+
+    # 指纹不变 → 不重建
+    with client.stream(
+        "POST",
+        "/api/agent/chat",
+        json={"message": "hi 3", "session_id": sid},
+        headers={"Authorization": "Bearer tok"},
+    ) as resp:
+        _sse_events(resp)
+    assert len(builds) == 2

@@ -54,7 +54,14 @@ class _FakeToolCallingModel(BaseChatModel):
 def identity_of(role: str) -> ResolvedIdentity:
     return cast(
         ResolvedIdentity,
-        {"user_id": 7, "role": role, "role_names": [role], "permission_codes": [], "source": "cli"},
+        {
+            "user_id": 7,
+            "name": "测试用户",
+            "role": role,
+            "role_names": [role],
+            "permission_codes": [],
+            "source": "cli",
+        },
     )
 
 
@@ -75,9 +82,10 @@ def test_assemble_member_public_query_face() -> None:
     }
 
 
-def test_assemble_candidate_only_my_interview() -> None:
+def test_assemble_candidate_gets_open_cycle_and_my_interview() -> None:
+    """候选入口:能取当前周期 + 查本人面试(后者绑定用户令牌)。"""
     tools = assemble_tools(identity_of("candidate"), user_token="tok")
-    assert [t.__name__ for t in tools] == ["get_my_interview"]
+    assert [t.__name__ for t in tools] == ["get_open_cycle", "get_my_interview"]
 
 
 def test_assemble_unknown_gets_nothing() -> None:
@@ -118,7 +126,10 @@ def test_system_prompt_is_role_agnostic_static_prefix() -> None:
 
 def test_identity_message_carries_role() -> None:
     msg = identity_message(identity_of("admin"))
-    assert "管理员" in msg and "7" in msg
+    # 身份文案:含职位,不含内部字段(user_id/source)
+    assert "管理员" in msg
+    assert "7" not in msg
+    assert "来源" not in msg
 
 
 async def test_react_loop_with_fake_model_tool_roundtrip(monkeypatch: pytest.MonkeyPatch):
@@ -147,6 +158,19 @@ async def test_react_loop_with_fake_model_tool_roundtrip(monkeypatch: pytest.Mon
     fake_get_open_cycle.__name__ = "get_open_cycle"  # 注册名与真工具一致
 
     import official_agent.graphs.assistant as assistant_mod
+
+    # 强制 anthropic 假分支:本地 .env 是 openai-compatible 时不钉住 provider
+    # 会构造真 ChatOpenAI → 真调 DeepSeek(历史意外路径),既慢又不确定
+    class _FakeSettings:
+        llm_provider = "anthropic"
+        model_strong = "fake"
+        anthropic_api_key = ""
+        llm_base_url = ""
+        llm_api_key = ""
+
+    monkeypatch.setattr(
+        assistant_mod, "get_effective_settings", lambda: _FakeSettings(), raising=True
+    )
 
     # _ALL_TOOLS 在 import 时捕获原函数引用,patch 装配表本身
     patched_tools = dict(assistant_mod._ALL_TOOLS, get_open_cycle=fake_get_open_cycle)
@@ -179,7 +203,7 @@ def test_build_model_openai_compatible_branch() -> None:
     from langchain_openai import ChatOpenAI
 
     from official_agent.config import Settings
-    from official_agent.graphs.assistant import _build_model
+    from official_agent.graphs.assistant import build_model
 
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None,
@@ -188,18 +212,18 @@ def test_build_model_openai_compatible_branch() -> None:
         llm_api_key="sk-test",
         model_strong="deepseek-v4-flash",
     )
-    model = _build_model(settings)
+    model = build_model(settings)
     assert isinstance(model, ChatOpenAI)
     assert model.model_name == "deepseek-v4-flash"
 
 
 def test_build_model_openai_compatible_missing_config_fails() -> None:
     from official_agent.config import Settings
-    from official_agent.graphs.assistant import _build_model
+    from official_agent.graphs.assistant import build_model
 
     settings = Settings(  # type: ignore[call-arg]
         _env_file=None, llm_provider="openai-compatible",
         llm_base_url="", llm_api_key="",
     )
     with pytest.raises(ValueError, match="LLM_BASE_URL"):
-        _build_model(settings)
+        build_model(settings)

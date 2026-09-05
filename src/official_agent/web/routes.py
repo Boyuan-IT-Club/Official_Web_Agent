@@ -15,20 +15,29 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage, RemoveMessage
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from official_agent.graphs.assistant import build_assistant_agent, identity_message
+from official_agent.graphs.assistant.compression import (
+    maybe_compress,
+    summarize_messages,
+)
 from official_agent.graphs.identity import ResolvedIdentity, resolve
 from official_agent.observability import langfuse_callbacks
 from official_agent.state.threads import create_thread, new_thread_id
 from official_agent.tools.client import BackendError
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 
 class _SessionState:
@@ -49,6 +58,11 @@ class _SessionState:
         self.identity = identity
         self.user_token = user_token
         self.agent = agent
+        # M6 #111 热生效:agent 装配时的配置指纹(HOT_KEYS 值哈希)。
+        # PUT /admin/config 后下一轮比对发现不同 → 重建 agent 用新配置。
+        self.applied_config_fingerprint: str | None = None
+        # M6 #114:轮计数(1 起),压缩事件留痕「触发轮」用
+        self.turns = 0
 
 
 # 会话注册表:session_id → 运行时状态。进程内存,单 worker 语义(多副本 INF-11)。
@@ -82,8 +96,15 @@ async def _get_or_create_session(
     identity: ResolvedIdentity,
     user_token: str,
     session_id: str | None,
-) -> _SessionState:
-    """取会话;无则(或未给)新建并建档。同一 session_id 只能被同 user 续传(SEC-07)。"""
+) -> tuple[_SessionState, bool]:
+    """取会话;无则(或未给)新建并建档。同一 session_id 只能被同 user 续传(SEC-07)。
+
+    返回 (session, is_new):is_new=True 表示本会话是进程内新建(首轮须注身份前缀),
+    False 表示续传既有会话。进程重启后带旧 session_id 续传会命中新建分支 → is_new
+    误判 True,但身份注入幂等(同身份重注无害),可接受;不依赖 aget_state
+    (LangGraph 对无 checkpoint 的 thread 可能返回非 None,导致 is_new 恒 False,
+    身份永不在首轮注入——实测坑)。
+    """
     async with _sessions_lock:
         if session_id and session_id in _sessions:
             existing = _sessions[session_id]
@@ -98,7 +119,7 @@ async def _get_or_create_session(
                 )
                 existing.user_token = user_token
                 existing.identity = identity
-            return existing
+            return existing, False
 
         user_id = identity.get("user_id")
         # thread_id(SEC-07):建档优先;PG 不可用降级随机 thread_id(保隔离,不持久化)
@@ -114,8 +135,10 @@ async def _get_or_create_session(
         checkpointer = getattr(request.app.state, "checkpointer", None)
         agent = build_assistant_agent(identity, user_token=user_token, checkpointer=checkpointer)
         session = _SessionState(session_id, identity, user_token, agent)
+        # 新建即记录当前配置指纹,避免首轮 _ensure_fresh_agent_config 误重建
+        session.applied_config_fingerprint = _config_fingerprint()
         _sessions[session_id] = session
-        return session
+        return session, True
 
 
 @router.post("/chat")
@@ -136,9 +159,10 @@ async def chat(
         raise HTTPException(status_code=400, detail="message 不能为空")
     session_id = (body.get("session_id") or "").strip() or None
 
-    session = await _get_or_create_session(request, identity, user_token, session_id)
+    session, is_new = await _get_or_create_session(request, identity, user_token, session_id)
+    checkpointer = getattr(request.app.state, "checkpointer", None)
     return StreamingResponse(
-        _stream_turn(session, message),
+        _stream_turn(session, message, is_new, checkpointer),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -150,7 +174,8 @@ _ERR_BACKEND_UNAVAILABLE = "backend_unavailable"
 _ERR_MODEL = "model_error"
 _ERR_INVALID_REQUEST = "invalid_request"
 _ERR_UNKNOWN = "unknown"
-
+# 客户端断连中止(CancelledError):非 #90 契约码,运营侧新码——断连轮次留痕专用
+_ERR_DISCONNECTED = "client_disconnected"
 # auth 失效的关键词(get_as_user 失败文案含之;message 判定的最后兜底)。
 _AUTH_FAIL_HINTS = ("令牌", "token", "登录", "JWT")
 
@@ -174,8 +199,110 @@ def _error_code(exc: Exception) -> str:
         return _ERR_INVALID_REQUEST
     return _ERR_UNKNOWN
 
-async def _stream_turn(session: _SessionState, message: str) -> AsyncIterator[str]:
-    """跑一轮:流式吐 SSE。历史/首轮前缀判据复用 CLI 模式(cli.py:211-221)。"""
+
+def _config_fingerprint() -> str:
+    """当前生效配置(HOT_KEYS 值)的指纹;配置变更即变化。"""
+    from official_agent.config import HOT_KEYS, get_effective_settings
+
+    settings = get_effective_settings()
+    return repr(tuple((k, getattr(settings, k, None)) for k in sorted(HOT_KEYS)))
+
+
+def _ensure_fresh_agent_config(session: _SessionState, checkpointer: Any) -> None:
+    """M6 #111 热生效:比对配置指纹,变了则重建 session 的 agent。
+
+    PUT /admin/config 只失效 get_settings 缓存;活跃会话的 agent 是进程内
+    复用的(见模块 docstring),不重建就一直用旧 model/provider。此处每轮
+    比对指纹,发现变化即用新配置重建 agent(身份/token 不变)。
+    """
+    try:
+        current = _config_fingerprint()
+    except Exception:  # noqa: BLE001 — PG 不可用 → 指纹取 env(不重建)
+        return
+    if session.applied_config_fingerprint == current:
+        return
+    session.agent = build_assistant_agent(
+        session.identity, user_token=session.user_token, checkpointer=checkpointer
+    )
+    session.applied_config_fingerprint = current
+
+async def _compress_if_needed(
+    session: _SessionState, config: dict, user_query: str
+) -> str | None:
+    """M6 #114:轮末检查会话 token,超阈值则压缩回写 checkpoint。
+
+    回写 = update_state 产生 checkpoint **新版本**(先 REMOVE_ALL_MESSAGES
+    再加「摘要 + 近几轮」);PostgresSaver 不删旧版本行,全量历史仍可
+    get_state_history 回溯——checkpointer 始终是对话原文权威源(#102)。
+    返回事件描述串(触发轮/token/覆盖/保留/摘要体积)随 conversation_log
+    落行;未触发或任何失败返回 None(fail-open,ADR-0005)。
+    熔断(ADR-0004):连续失败达阈值后暂停压缩尝试,降级为不压缩。
+    """
+    from official_agent.config import get_effective_settings
+    from official_agent.graphs.assistant import build_model
+    from official_agent.graphs.assistant.compression import (
+        SUMMARY_MAX_TOKENS,
+        compression_paused,
+        record_compression_failure,
+        record_compression_success,
+    )
+
+    if compression_paused():  # 熔断中:降级为不压缩,不再打扰主链路
+        return None
+    try:
+        state = await session.agent.aget_state(config)
+        messages = (getattr(state, "values", None) or {}).get("messages") or []
+        if not messages:
+            return None
+        settings = get_effective_settings()
+        # 摘要用 strong 模型(ADR-0004「压缩即理解」,降 light 须 eval 证明);
+        # 温度 0 + 输出预算 = reasoning-safe
+        summarizer = build_model(settings).bind(
+            temperature=0, max_tokens=SUMMARY_MAX_TOKENS
+        )
+        result = await maybe_compress(
+            messages,
+            summarize_fn=lambda older, query: summarize_messages(
+                older, query, summarizer
+            ),
+            threshold=settings.context_compress_threshold_tokens,
+            recent_keep=settings.context_recent_keep_messages,
+            query=user_query,
+        )
+        if result is None:
+            return None
+        await session.agent.update_state(
+            config,
+            {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *result.new_messages]},
+        )
+        record_compression_success()
+        return (
+            f"turn={session.turns};trigger_tokens={result.trigger_tokens};"
+            f"covered={result.covered};kept={len(result.new_messages) - 1};"
+            f"summary_tokens={result.summary_tokens}"
+        )
+    except Exception:  # noqa: BLE001 — 压缩失败不拖垮对话(ADR-0005)
+        record_compression_failure()
+        logger.warning("会话压缩失败(已忽略)", exc_info=True)
+        return None
+
+
+async def _stream_turn(
+    session: _SessionState, message: str, is_new: bool, checkpointer: Any = None
+) -> AsyncIterator[str]:
+    """跑一轮:流式吐 SSE。is_new 仅作 SSE session 事件的 created 标记。
+
+    每轮结束在 conversation_log 落一行(M6 #110):
+    - 正常:user_message(问题原文) + reply_summary(回复摘要非全文) + tools/耗时
+    - 异常(error 事件):只存 error_code + 耗时,不存对话内容(决策 #102/#110)
+    落行失败(fail-open)不阻断对话——观测绝不拖垮主流程(ADR-0005)。
+    checkpointer:配置变更后重建 agent 需要(见 _ensure_fresh_agent_config)。
+    """
+    # M6 #111 热生效:配置指纹变了 → 重建 agent(新 model/provider 立即作用于本轮)
+    _ensure_fresh_agent_config(session, checkpointer)
+    # M6 #114:轮计数(1 起),压缩事件「触发轮」留痕用
+    session.turns += 1
+
     config = {
         "configurable": {"thread_id": session.session_id},
         "callbacks": langfuse_callbacks(),
@@ -184,21 +311,26 @@ async def _stream_turn(session: _SessionState, message: str) -> AsyncIterator[st
     def sse(payload: dict[str, Any]) -> str:
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-    # 首轮注入身份前缀:checkpointer 无该 thread 历史 = 新会话(cli.py 持久化判据)。
+    # M6 #114:身份消息每轮注入(含续传轮,决策 #108 质量优先)——
+    # 压缩掉早期上下文后身份边界仍在最近窗口;前缀含首轮身份段,
+    # 同 session 内缓存仍命中(身份块小,重注成本可忽略)。
     first_input = HumanMessage(content=identity_message(session.identity))
-    state = None
-    try:
-        state = await session.agent.aget_state(config)  # type: ignore[attr-defined]
-    except Exception:  # noqa: BLE001 — 无 checkpointer(降级)按新会话处理
-        state = None
-    is_new = state is None
-    messages: list = (
-        [first_input, HumanMessage(content=message)] if is_new else [HumanMessage(content=message)]
-    )
+    messages: list = [first_input, HumanMessage(content=message)]
 
     # 契约 #90:首事件 session(带 created 标记新/续传)
     yield sse({"type": "session", "session_id": session.session_id, "created": is_new})
 
+    started = time.monotonic()
+    tools_called: list[str] = []
+    reply_chunks: list[str] = []
+    error_code: str | None = None
+    usage_acc: dict[str, int | None] = {  # 跨 model 步累计(#113 MAJOR:ReAct 多步求和)
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_hit_tokens": 0,
+        "cache_miss_tokens": 0,
+    }
+    _last_usage: dict[str, int | None] | None = None
     try:
         async for mode, payload in session.agent.astream(  # type: ignore[attr-defined]
             {"messages": messages}, config=config, stream_mode=["messages", "updates"]
@@ -206,7 +338,27 @@ async def _stream_turn(session: _SessionState, message: str) -> AsyncIterator[st
             if mode == "messages":
                 chunk, _meta = payload
                 if isinstance(chunk, AIMessageChunk) and chunk.content:
-                    yield sse({"type": "delta", "role": "assistant", "content": chunk.content})
+                    # 只收文本块;多模态 content(list)跳过文本拼接(回复摘要仅文本)
+                    text = chunk.content if isinstance(chunk.content, str) else ""
+                    if text:
+                        reply_chunks.append(text)
+                        yield sse({"type": "delta", "role": "assistant", "content": text})
+                # M6 #113 usage:只在 usage 终块累计,同值去重防重复计数。
+                # 两种形状二选一(#115 实测 langchain-openai 1.x 流式 raw
+                # token_usage 已消失,只剩 usage_metadata;DeepSeek 原始形状
+                # 保留兼容)。stream_options 在 _build_model(chat 模型)开启。
+                um = getattr(chunk, "usage_metadata", None)
+                raw_usage = (chunk.response_metadata or {}).get("token_usage")
+                usage_payload = raw_usage if raw_usage else um
+                if um is not None and usage_payload:
+                    extracted = extract_usage(usage_payload)
+                    if extracted != _last_usage:  # 同值跳过(跨 chunk 累计值重复)
+                        _last_usage = extracted
+                        for k in usage_acc:
+                            v = extracted.get(k)
+                            cur = usage_acc.get(k) or 0
+                            if v is not None:
+                                usage_acc[k] = cur + v
             elif mode == "updates":
                 for _ns, node_update in payload.items():
                     if isinstance(node_update, dict):
@@ -214,10 +366,280 @@ async def _stream_turn(session: _SessionState, message: str) -> AsyncIterator[st
                             # 工具调用状态(契约 #90:tool 事件,role=tool)
                             if getattr(m, "tool_calls", None):
                                 for tc in m.tool_calls:
+                                    tools_called.append(tc.get("name") or "")
                                     yield sse(
                                         {"type": "tool", "role": "tool", "name": tc.get("name")}
                                     )
     except Exception as exc:  # noqa: BLE001 — 单轮失败不崩连接,吐 error 事件
-        yield sse({"type": "error", "code": _error_code(exc), "message": str(exc)})
-        return
-    yield sse({"type": "done", "session_id": session.session_id})
+        error_code = _error_code(exc)
+        yield sse({"type": "error", "code": error_code, "message": str(exc)})
+    except asyncio.CancelledError:
+        # 客户端断连(CancelledError 非 Exception):中止轮次也要留痕
+        # (partial reply/已调工具不丢失),error_code 记断连中止。
+        error_code = _ERR_DISCONNECTED
+
+    # 单一写入路径:正常(error_code None)/错误/断连三态合一,落一行。
+    # M6 #113 命中证据:缓存前缀稳定性 hash(system prompt + 角色工具名)。
+    # 同 role 的会话前缀应逐字节稳定;hash 变化 = 前缀失效(命中率不可信)。
+    from official_agent.graphs.assistant import _ROLE_TOOL_NAMES, load_system_prompt
+
+    # M6 #114:轮末按需压缩(先压缩后落行,同一行携带 compress_event)。
+    # 在 done 事件前执行:失败 fail-open 返回 None,不阻断 done。
+    compress_event = await _compress_if_needed(session, config, message)
+
+    role = session.identity.get("role") or "unknown"
+    tool_names = list(_ROLE_TOOL_NAMES.get(role, ()))
+    p_hash = prefix_hash(load_system_prompt(), tool_names)
+    if any(usage_acc.values()):
+        usage = usage_acc
+    else:
+        usage = {
+            "input_tokens": None,
+            "output_tokens": None,
+            "cache_hit_tokens": None,
+            "cache_miss_tokens": None,
+        }
+    _log_conversation(
+        session,
+        user_message=message,
+        reply_summary="".join(reply_chunks),
+        tools=tools_called,
+        duration_ms=_elapsed_ms(started),
+        error_code=error_code,
+        usage=usage,
+        prefix_hash=p_hash,
+        compress_event=compress_event,
+    )
+    if error_code is None:
+        yield sse({"type": "done", "session_id": session.session_id})
+
+
+def _log_conversation(
+    session: _SessionState,
+    *,
+    user_message: str,
+    reply_summary: str,
+    tools: list[str],
+    duration_ms: int,
+    error_code: str | None = None,
+    usage: dict[str, int | None] | None = None,
+    prefix_hash: str | None = None,
+    compress_event: str | None = None,
+) -> None:
+    """落一行 conversation_log(fail-open,非阻塞)。
+
+    lazy import:web 入口不顶层依赖 psycopg(无 PG 环境可跑服务,
+    观测侧不给主链路加硬依赖,同 app.py lifespan 先例)。
+    fire-and-forget:写入放后台任务,不阻塞 SSE 流尾(ADR-0005 fail-open)。
+    """
+    from official_agent.state.conversation import write_conversation
+
+    async def _write() -> None:
+        try:
+            write_conversation(
+                thread_id=session.session_id,
+                user_id=session.identity.get("user_id"),
+                channel=session.identity.get("source") or "web",
+                user_message=user_message,
+                reply_summary=reply_summary,
+                tools=tools,
+                duration_ms=duration_ms,
+                error_code=error_code,
+                prefix_hash=prefix_hash,
+                compress_event=compress_event,
+                **(usage or {}),
+            )
+        except Exception:  # noqa: BLE001 — 观测写入失败不拖垮对话(ADR-0005)
+            logger.warning("conversation_log 写入失败(已忽略)", exc_info=True)
+
+    asyncio.create_task(_write())
+
+
+def _elapsed_ms(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)
+
+
+def extract_usage(usage_metadata: dict[str, Any] | None) -> dict[str, int | None]:
+    """从 LLM usage_metadata 提取 token 数(lazy;模块级包装供测试 patch)。"""
+    from official_agent.state.conversation import extract_usage as _impl
+
+    return _impl(usage_metadata)
+
+
+def prefix_hash(system_prompt: str, tool_names: list[str]) -> str:
+    """缓存前缀稳定性 hash(lazy;模块级包装供测试 patch)。"""
+    from official_agent.state.conversation import prefix_hash as _impl
+
+    return _impl(system_prompt, tool_names)
+
+# ── M6 #111 管理 API:配置热生效 ────────────────────────────────────────
+
+# 高敏键(Settings 字段名):真实凭证,只读回显掩码,永不入库/不可在线改。
+_SECRET_SETTINGS_FIELDS: frozenset[str] = frozenset(
+    {
+        "backend_service_username",
+        "backend_service_password",
+        "llm_api_key",
+        "anthropic_api_key",
+        "postgres_url",
+        "feishu_app_id",
+        "feishu_app_secret",
+        "feishu_verification_token",
+        "feishu_encrypt_key",
+        "langfuse_public_key",
+        "langfuse_secret_key",
+    }
+)
+
+
+def _mask_secret(value: str) -> str:
+    """掩码末 4 位(短值整掩)。"""
+    return value[-4:] if len(value) >= 4 else "****"
+
+
+async def _require_monitor(request: Request, authorization: Annotated[str | None, Header()] = None):
+    """管理 API 认证:官网 JWT → resolve → permission_codes 含 agent:monitor。"""
+    identity, _ = await _authenticate(request, authorization)
+    codes = identity.get("permission_codes") or []
+    if "agent:monitor" not in codes:
+        raise HTTPException(status_code=403, detail="需要 agent:monitor 权限")
+    return identity
+
+
+@router.get("/admin/config")
+async def get_admin_config(
+    _: Annotated[ResolvedIdentity, Depends(_require_monitor)],
+) -> dict[str, Any]:
+    """回显配置:低敏键实值(DB 覆盖优先) + 高敏键掩码({configured, masked})。"""
+    from official_agent.config import HOT_KEYS, get_settings
+
+    settings = get_settings()
+    try:
+        db_overrides = get_all_config()
+    except Exception:  # noqa: BLE001 — PG 不可用 → 只显示 env(fail-open)
+        db_overrides = {}
+
+    result: dict[str, Any] = {}
+    for field in HOT_KEYS:
+        result[field] = db_overrides.get(field, getattr(settings, field, ""))
+    for field in sorted(_SECRET_SETTINGS_FIELDS):
+        value = getattr(settings, field, "") or ""
+        result[field] = {
+            "configured": bool(value),
+            "masked": _mask_secret(value) if value else "",
+        }
+    return result
+
+
+# 安全(评审 MINOR-1):llm_base_url 若被改成任意端点,下轮重建 agent 时
+# .env 的 LLM key 会作为 Bearer 发往该端点 → key 泄漏。只允许 https + 受信 host。
+_ALLOWED_LLM_HOSTS: tuple[str, ...] = (
+    "api.deepseek.com",
+    "api.openai.com",
+    "api.anthropic.com",
+    "open.bigmodel.cn",
+)
+
+
+def _validate_base_url(value: str) -> None:
+    import urllib.parse
+
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise HTTPException(status_code=400, detail="llm_base_url 必须为 https 且含 host")
+    if parsed.hostname not in _ALLOWED_LLM_HOSTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"llm_base_url 的 host 不在白名单: {parsed.hostname}",
+        )
+
+
+@router.put("/admin/config")
+async def put_admin_config(
+    body: dict[str, str],
+    _: Annotated[ResolvedIdentity, Depends(_require_monitor)],
+) -> dict[str, Any]:
+    """改低敏键(HOT_KEYS 白名单)并热生效;非白名单(高敏)→ 400。"""
+    from official_agent.config import HOT_KEYS
+
+    invalid_keys = [k for k in body if k not in HOT_KEYS]
+    if invalid_keys:
+        raise HTTPException(status_code=400, detail=f"不可热载的键: {', '.join(invalid_keys)}")
+    for key, value in body.items():
+        value = (value or "").strip()
+        if not value:
+            raise HTTPException(status_code=400, detail=f"{key} 值不能为空")
+        if key == "llm_base_url":
+            _validate_base_url(value)
+        set_config(key, value)
+    # 全部键成功写库后才失效缓存(避免部分写 + 缓存未刷的分离,评审 MINOR-2)
+    invalidate_settings_cache()
+    return {"updated": list(body.keys())}
+
+def get_all_config() -> dict[str, str]:
+    """读 agent_config 全部键值(lazy;模块级包装供测试 patch)。"""
+    from official_agent.state.config_store import get_all_config as _impl
+
+    return _impl()
+
+
+def set_config(key: str, value: str) -> None:
+    """upsert 一个配置键(lazy;模块级包装供测试 patch)。"""
+    from official_agent.state.config_store import set_config as _impl
+
+    _impl(key, value)
+
+
+def invalidate_settings_cache() -> None:
+    """使 get_settings 缓存失效(lazy;模块级包装供测试 patch)。"""
+    from official_agent.config import invalidate_settings_cache as _impl
+
+    _impl()
+
+
+# ── M6 #112 管理 API:运营视图(对话列表/详情) ───────────────────────────
+
+def list_conversations(**kwargs: Any) -> list[dict[str, Any]]:
+    """运营列表(lazy;模块级包装供测试 patch)。"""
+    from official_agent.state.conversation import list_conversations as _impl
+
+    return _impl(**kwargs)
+
+
+def get_conversation(conversation_id: int) -> dict[str, Any] | None:
+    """对话详情(lazy;模块级包装供测试 patch)。"""
+    from official_agent.state.conversation import get_conversation as _impl
+
+    return _impl(conversation_id)
+
+
+@router.get("/admin/conversations")
+async def get_admin_conversations(
+    request: Request,
+    _: Annotated[ResolvedIdentity, Depends(_require_monitor)],
+) -> dict[str, Any]:
+    """运营列表:时间/用户/问题首字/状态,按 user_id / thread_id 过滤 + 分页(#112/#115)。"""
+    user_id_raw = request.query_params.get("user_id")
+    thread_id = (request.query_params.get("thread_id") or "").strip() or None
+    limit_raw = request.query_params.get("limit", "50")
+    offset_raw = request.query_params.get("offset", "0")
+    try:
+        user_id = int(user_id_raw) if user_id_raw is not None else None
+        limit = max(1, min(int(limit_raw), 200))
+        offset = max(0, int(offset_raw))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="user_id/limit/offset 必须为整数") from None
+    items = list_conversations(user_id=user_id, thread_id=thread_id, limit=limit, offset=offset)
+    return {"items": items, "limit": limit, "offset": offset}
+
+
+@router.get("/admin/conversations/{conversation_id}")
+async def get_admin_conversation_detail(
+    conversation_id: int,
+    _: Annotated[ResolvedIdentity, Depends(_require_monitor)],
+) -> dict[str, Any]:
+    """对话详情:轮次/工具/耗时/错误码 + 可展开回复摘要(#112)。"""
+    row = get_conversation(conversation_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return row

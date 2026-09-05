@@ -23,3 +23,8 @@ evals/datasets/*
 .idea/
 .vscode/
 .DS_Store
+
+# deploy 本地产物(密钥/日志)
+deploy/.env.prod
+deploy/logs/
+!deploy/.env.prod.example
