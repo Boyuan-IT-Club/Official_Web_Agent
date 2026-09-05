@@ -223,6 +223,7 @@ def test_conversations_invalid_params_400(
     from official_agent.web import routes
 
     _install_resolve(monkeypatch, _admin_identity())
+    monkeypatch.setattr(routes, "list_conversations", lambda **kw: [])
     for qs in ("user_id=abc", "limit=abc", "offset=abc"):
         resp = client.get(
             f"/api/agent/admin/conversations?{qs}",

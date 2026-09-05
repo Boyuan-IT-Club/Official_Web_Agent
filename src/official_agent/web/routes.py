@@ -29,6 +29,7 @@ from official_agent.graphs.identity import ResolvedIdentity, resolve
 from official_agent.observability import langfuse_callbacks
 from official_agent.state.threads import create_thread, new_thread_id
 from official_agent.tools.client import BackendError
+
 router = APIRouter()
 
 logger = logging.getLogger(__name__)

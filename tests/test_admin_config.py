@@ -142,7 +142,6 @@ def test_admin_config_put_rejects_secret_key(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """PUT 改高敏(API key)→ 400 拒绝(永不落库)。"""
-    from official_agent.web import routes
 
     _install_resolve(monkeypatch, _admin_identity())
     resp = client.put(

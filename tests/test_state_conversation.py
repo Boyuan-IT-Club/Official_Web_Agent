@@ -121,7 +121,8 @@ def test_write_conversation_error_row_strips_content() -> None:
             duration_ms=500,
         )
     params = conn.execute.call_args.args[1]
-    # 参数顺序: thread_id, user_id, channel, user_message, reply_summary, tools, duration_ms, error_code
+    # 参数顺序: thread_id, user_id, channel, user_message, reply_summary,
+    # tools, duration_ms, error_code
     assert params[3] == ""  # user_message 空(错误行不存内容)
     assert params[4] == ""  # reply_summary 空
     assert params[7] == "model_error"  # error_code 保留

@@ -20,6 +20,7 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+
 from official_agent.config import get_settings
 
 # PII 确定性规则表(简单版先行,SEC-08 契约对齐后补)。值经测试钉住。

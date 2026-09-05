@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -55,9 +56,7 @@ def setup_logging(log_dir: Path | None = None, level: str = "INFO") -> None:
     # 标记:幂等检查用(见上方 guard),避免误伤应用加的 RotatingFileHandler
     file_handler._m6_official_agent = True  # type: ignore[attr-defined]
     # 权限收紧:日志文件 0600(默认 umask 可能 0644)
-    try:
+    with contextlib.suppress(OSError):
         (log_dir / _LOG_FILENAME).chmod(0o600)
-    except OSError:
-        pass
     root.addHandler(file_handler)
 
