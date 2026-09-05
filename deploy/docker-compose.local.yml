@@ -105,7 +105,7 @@ services:
     environment:
       BACKEND_BASE_URL: http://backend:8080
       POSTGRES_URL: postgresql://postgres:agent_dev@agent-pg:5432/official_agent
-      AGENT_CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      AGENT_CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001
       LANGFUSE_HOST: ""         # 本地栈不起 langfuse(fail-open,ADR-0005);要观测另起 deploy/langfuse
       CREDENTIALS_DIR: /app
     ports:
@@ -116,7 +116,7 @@ services:
       agent-pg:
         condition: service_healthy
 
-  # ── 管理面板(静态产物 + nginx 同源反代;生产同模式)──
+  # ── 管理面板(admin 模式,3000)与官网客户端(user 模式,3001)──
   admin-web:
     image: nginx:alpine
     volumes:
@@ -124,6 +124,17 @@ services:
       - ../../Official_Web_Frontend/build-admin:/usr/share/nginx/html:ro
     ports:
       - "127.0.0.1:3000:80"
+    depends_on:
+      - backend
+      - agent
+
+  user-web:
+    image: nginx:alpine
+    volumes:
+      - ./nginx/user.local.conf:/etc/nginx/conf.d/default.conf:ro
+      - ../../Official_Web_Frontend/build-user:/usr/share/nginx/html:ro
+    ports:
+      - "127.0.0.1:3001:80"
     depends_on:
       - backend
       - agent
