@@ -341,3 +341,50 @@ def test_extract_usage_langchain_cached_tokens_mapping() -> None:
     )
     assert usage["cache_hit_tokens"] == 90
     assert usage["cache_miss_tokens"] == 60
+
+
+# ── usage 提取(#115/#113):缓存率真实性 ────────────────────────────────
+
+def test_extract_usage_metadata_derives_miss_from_input_minus_hit() -> None:
+    """DeepSeek 流式 usage_metadata 只报 cache_read,不报 miss:
+    未命中必须按 input − hit 推导,否则 hit>0/miss=0 会算出假 100% 缓存率。"""
+    um = {
+        "input_tokens": 2253,
+        "output_tokens": 157,
+        "input_token_details": {"cache_read": 2176},
+    }
+    out = conversation.extract_usage(um)
+    assert out == {
+        "input_tokens": 2253,
+        "output_tokens": 157,
+        "cache_hit_tokens": 2176,
+        "cache_miss_tokens": 77,  # 2253 − 2176,非 0
+    }
+
+
+def test_extract_usage_uncached_round_full_miss() -> None:
+    um = {"input_tokens": 88, "output_tokens": 50, "input_token_details": {"cache_read": 0}}
+    out = conversation.extract_usage(um)
+    assert out["cache_hit_tokens"] == 0
+    assert out["cache_miss_tokens"] == 88  # 全未命中,缓存率 0%(真实)
+
+
+def test_extract_usage_native_deepseek_fields_win() -> None:
+    """原始 token_usage 形状:DeepSeek 顶层 hit/miss 原样采用,不推导。"""
+    raw = {
+        "prompt_tokens": 2253,
+        "completion_tokens": 157,
+        "prompt_cache_hit_tokens": 2000,
+        "prompt_cache_miss_tokens": 253,
+    }
+    out = conversation.extract_usage(raw)
+    assert out["cache_hit_tokens"] == 2000
+    assert out["cache_miss_tokens"] == 253
+
+
+def test_extract_usage_no_cache_info_stays_none() -> None:
+    """无任何 cache 字段(老形状)→ 保持 NULL,不猜测。"""
+    um = {"input_tokens": 100, "output_tokens": 20}
+    out = conversation.extract_usage(um)
+    assert out["cache_hit_tokens"] is None
+    assert out["cache_miss_tokens"] is None

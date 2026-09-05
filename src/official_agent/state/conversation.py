@@ -155,6 +155,12 @@ def extract_usage(usage_data: dict[str, Any] | None) -> dict[str, int | None]:
         if miss is None:
             miss = details.get("cache_creation", details.get("cache_write_tokens"))
 
+    # 兜底推导(#115 实测):DeepSeek 流式 usage_metadata 只报 cache_read,
+    # 不报 miss(其 cache_creation 是 Anthropic 语义,恒缺)→ 未命中 =
+    # prompt_tokens − 命中数。否则 hit>0/miss=0 会算出假 100% 缓存率。
+    if miss is None and hit is not None and input_tokens is not None:
+        miss = max(0, input_tokens - hit)
+
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
