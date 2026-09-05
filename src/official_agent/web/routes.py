@@ -343,14 +343,15 @@ async def _stream_turn(
                     if text:
                         reply_chunks.append(text)
                         yield sse({"type": "delta", "role": "assistant", "content": text})
-                # M6 #113 usage:原始响应 usage(response_metadata.token_usage 保留
-                # DeepSeek 顶层 cache 字段;usage_metadata 会被 langchain 转换丢弃)。
-                # 只在 usage 终块(usage_metadata 非 None)累计,且同值去重防重复计数
-                # (传统流式 provider 在最终 usage-only chunk 才带 usage)。
+                # M6 #113 usage:只在 usage 终块累计,同值去重防重复计数。
+                # 两种形状二选一(#115 实测 langchain-openai 1.x 流式 raw
+                # token_usage 已消失,只剩 usage_metadata;DeepSeek 原始形状
+                # 保留兼容)。stream_options 在 _build_model(chat 模型)开启。
                 um = getattr(chunk, "usage_metadata", None)
                 raw_usage = (chunk.response_metadata or {}).get("token_usage")
-                if um is not None and raw_usage:
-                    extracted = extract_usage(raw_usage)
+                usage_payload = raw_usage if raw_usage else um
+                if um is not None and usage_payload:
+                    extracted = extract_usage(usage_payload)
                     if extracted != _last_usage:  # 同值跳过(跨 chunk 累计值重复)
                         _last_usage = extracted
                         for k in usage_acc:

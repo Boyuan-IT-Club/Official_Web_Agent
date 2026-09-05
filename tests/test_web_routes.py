@@ -263,6 +263,57 @@ def test_chat_other_user_same_session_returns_403(
     assert resp.status_code == 403
 
 
+def test_chat_usage_from_usage_metadata_only(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#115 实测回归:langchain-openai 1.x 流式只有 usage_metadata
+    (response_metadata.token_usage 已消失)→ token 仍须正确落行。"""
+    from langchain_core.messages import AIMessageChunk
+
+    from official_agent.web import routes
+
+    class _UsageAgent:
+        async def astream(self, inp, config=None, **kwargs):
+            yield "messages", (
+                AIMessageChunk(
+                    content="你好",
+                    usage_metadata={
+                        "input_tokens": 87,
+                        "output_tokens": 22,
+                        "total_tokens": 109,
+                        "input_token_details": {"cache_read": 12, "cache_creation": 75},
+                    },
+                ),
+                {},
+            )
+            yield "updates", {"agent": {"messages": []}}
+
+        async def aget_state(self, config):
+            return types.SimpleNamespace(values={"messages": [AIMessage("短")]})
+
+        async def update_state(self, config, values):
+            pass
+
+    logged: list[dict] = []
+    monkeypatch.setattr(routes, "_log_conversation", lambda *a, **k: logged.append(k))
+    _install_fakes(monkeypatch)
+    monkeypatch.setattr(
+        routes, "build_assistant_agent", lambda *a, **k: _UsageAgent()
+    )
+
+    with client.stream(
+        "POST", "/api/agent/chat", json={"message": "hi"}, headers={"Authorization": "Bearer tok"}
+    ) as resp:
+        events = _sse_events(resp)
+    assert any(e["type"] == "done" for e in events)
+
+    usage = logged[0]["usage"]
+    assert usage["input_tokens"] == 87
+    assert usage["output_tokens"] == 22
+    assert usage["cache_hit_tokens"] == 12
+    assert usage["cache_miss_tokens"] == 75
+
+
 def _stateful_agent(updates: list, state_messages: list | None):
     """带 checkpoint 状态的假 agent:astream 吐一条消息,可查/可写状态。"""
 

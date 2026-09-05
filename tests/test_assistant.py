@@ -159,6 +159,19 @@ async def test_react_loop_with_fake_model_tool_roundtrip(monkeypatch: pytest.Mon
 
     import official_agent.graphs.assistant as assistant_mod
 
+    # 强制 anthropic 假分支:本地 .env 是 openai-compatible 时不钉住 provider
+    # 会构造真 ChatOpenAI → 真调 DeepSeek(历史意外路径),既慢又不确定
+    class _FakeSettings:
+        llm_provider = "anthropic"
+        model_strong = "fake"
+        anthropic_api_key = ""
+        llm_base_url = ""
+        llm_api_key = ""
+
+    monkeypatch.setattr(
+        assistant_mod, "get_effective_settings", lambda: _FakeSettings(), raising=True
+    )
+
     # _ALL_TOOLS 在 import 时捕获原函数引用,patch 装配表本身
     patched_tools = dict(assistant_mod._ALL_TOOLS, get_open_cycle=fake_get_open_cycle)
     monkeypatch.setattr(assistant_mod, "_ALL_TOOLS", patched_tools, raising=True)

@@ -136,13 +136,19 @@ def identity_message(identity: ResolvedIdentity) -> str:
     )
 
 
-def build_model(settings: Any, model: str | None = None) -> Any:
+def build_model(
+    settings: Any, model: str | None = None, stream_usage: bool = False
+) -> Any:
     """按配置构造对话模型(GRA-08 路由的接入点)。
 
     - anthropic:ANTHROPIC_API_KEY(默认)
     - openai-compatible:OpenAI 兼容端点(DeepSeek 等),LLM_BASE_URL+
       LLM_API_KEY——换模型供应商不改代码
     model 缺省用 model_strong(对话主模型);其他用途(压缩摘要等)显式传名。
+    stream_usage:流式请求附带 usage 终块(#113 用量自采)——DeepSeek/OpenAI
+    兼容端点必须显式 stream_options.include_usage,且该参数只能随 stream=true
+    使用(非流式 ainvoke 会 400),故只给对话主模型开;摘要器等 ainvoke 调用
+    方保持缺省 False。
     """
     model = model or settings.model_strong
     if settings.llm_provider == "openai-compatible":
@@ -156,6 +162,9 @@ def build_model(settings: Any, model: str | None = None) -> Any:
             model=model,
             api_key=SecretStr(settings.llm_api_key),
             base_url=settings.llm_base_url,
+            model_kwargs=(
+                {"stream_options": {"include_usage": True}} if stream_usage else {}
+            ),
         )
     # ChatAnthropic 为 pydantic **kwargs 构造器,mypy 无法静态解析字段
     return ChatAnthropic(  # type: ignore[call-arg]
@@ -176,7 +185,7 @@ def build_assistant_agent(
     None 则纯内存(CLI --session 标识仅作 trace 用)。"""
     settings = get_effective_settings()
     return create_agent(
-        build_model(settings),
+        build_model(settings, stream_usage=True),
         tools=assemble_tools(identity, user_token),
         system_prompt=load_system_prompt(),
         checkpointer=checkpointer,
