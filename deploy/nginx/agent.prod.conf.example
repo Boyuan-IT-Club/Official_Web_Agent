@@ -1,0 +1,28 @@
+# ── 客服 Agent 生产反代片段(#116)──────────────────────────────────
+# 用法:并入现有官网 nginx 的 server{}(假设①:不另起 nginx 容器),
+#       与 Backend /api 反代、前端静态托管同层。nginx -t && nginx -s reload。
+#
+# 前置(文件顶部 http{} 级,限流预留位 —— SEC-05/#56 定后取消注释并调参):
+#   limit_req_zone $binary_remote_addr zone=agent_chat:10m rate=10r/m;
+
+# SSE 三件套(#116 AC):proxy_buffering off + 长超时 + HTTP/1.1。
+# 用户站浮窗同源通道;/api/agent/admin/** 由 Backend 代理,不经这里也能用,
+# 但直连路径同样放行(运维排查用)。
+location /api/agent/ {
+    proxy_pass http://127.0.0.1:8001;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    chunked_transfer_encoding on;
+
+    # 限流位置预留(SEC-05/#56 定后接入,参数不拍板):
+    # limit_req zone=agent_chat burst=5 nodelay;
+    # limit_req_status 429;
+}

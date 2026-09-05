@@ -1,0 +1,58 @@
+# Agent 生产部署(#116/#104 决策:独立容器,与 Backend 同机,共享 agent PG)。
+# 本 compose 只管 agent 自家两件套;MySQL/Redis/RabbitMQ/官网 nginx 由既有
+# Backend 栈与宿主机 nginx 提供 —— 不重复起、不纳管。
+#
+# 前置(一次性):
+#   1. 镜像:docker build -t ${DOCKERHUB_USERNAME}/official-agent:tag . 后推送
+#      (#104 拍板:镜像推 Docker Hub 同名 org);或在本机 build 留 :latest
+#   2. 密钥:cp .env.prod.example .env.prod 并填值(gitignore;SEC-01 真实凭证
+#      只进服务器 .env.prod,永不进镜像/仓库)
+#   3. 日志卷:mkdir -p deploy/logs(容器内 root 写入,同 Backend volumes 风格)
+#   4. nginx:把 deploy/nginx/agent.prod.conf.example 的 location 块并入现有
+#      官网 server 假设①(不另起 nginx 容器),nginx -t && reload
+#
+# 用法:cd deploy && docker compose -f docker-compose.prod.yml up -d
+name: official-agent-prod
+
+services:
+  agent-pg:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${AGENT_PG_PASSWORD:?需在 .env.prod 设置}
+      POSTGRES_DB: official_agent
+    volumes:
+      - agent_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d official_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # 不映射宿主机端口:agent 经 compose 内网访问;备份走 docker exec
+
+  agent:
+    image: ${DOCKERHUB_USERNAME:-boyuanclub}/official-agent:${AGENT_VERSION:-latest}
+    build: ..                       # 无网拉镜像时可本机构建兜底
+    restart: unless-stopped         # 健康检查失败自动重启(#116 AC)
+    env_file:
+      - .env.prod
+    environment:
+      BACKEND_BASE_URL: ${BACKEND_BASE_URL:?需在 .env.prod 设置}
+      POSTGRES_URL: postgresql://postgres:${AGENT_PG_PASSWORD}@agent-pg:5432/official_agent
+      CREDENTIALS_DIR: /app
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-}   # 自托管 langfuse 已有则填,观测 fail-open
+    ports:
+      - "127.0.0.1:8001:8001"       # 只绑本机回环:宿主机 nginx 反代到此
+    volumes:
+      - ./logs:/app/logs            # RotatingFileHandler 落盘,运维直接查文件
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    # 单 worker 起步(#116);扩副本 = compose --scale agent=N(无状态,checkpointer 共享),
+    # 前提:会话表 _sessions 改外置(Ably 会话层,M3)后才能真多副本
+
+volumes:
+  agent_pg_data:
