@@ -112,10 +112,10 @@ async def _context_aware(messages: list[BaseMessage], model: Any) -> list[BaseMe
 
 
 async def main() -> None:
-    from official_agent.graphs.assistant import _build_model
+    from official_agent.graphs.assistant import build_model
 
     settings = get_settings()
-    model = _build_model(settings, model=settings.model_strong).bind(temperature=0)
+    model = build_model(settings, model=settings.model_strong).bind(temperature=0)
 
     convo = _build_conversation()
     print(f"会话规模:{len(convo)} 条消息 ≈ {count_tokens(convo)} tokens(cl100k)")

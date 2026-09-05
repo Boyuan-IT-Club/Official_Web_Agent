@@ -1,6 +1,6 @@
 ---
 name: assistant-system
-description: A 模块 ReAct 单循环的系统提示词(静态前缀,与角色无关;动态身份在首轮用户消息注入)
+description: A 模块 ReAct 单循环的系统提示词(静态前缀,与角色无关;动态身份每轮随用户消息注入)
 model: strong
 ---
 

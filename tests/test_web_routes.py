@@ -321,7 +321,7 @@ def test_chat_compresses_long_state_and_logs_event(
     assert isinstance(first, RemoveMessage) and first.id == REMOVE_ALL_MESSAGES
     assert updates[0][1].content.startswith("[历史摘要]")
     assert logged[0]["compress_event"] == (
-        "trigger_tokens=31500;covered=38;kept=1;summary_tokens=812"
+        "turn=1;trigger_tokens=31500;covered=38;kept=1;summary_tokens=812"
     )
 
 
@@ -354,8 +354,12 @@ def test_chat_compression_failure_fail_open(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """M6 #114:压缩失败不影响本轮对话(fail-open,ADR-0005)。"""
+    from official_agent.graphs.assistant.compression import (
+        record_compression_success,
+    )
     from official_agent.web import routes
 
+    record_compression_success()  # 隔离其他用例留下的熔断计数
     updates: list[list] = []
     logged: list[dict] = []
     monkeypatch.setattr(routes, "_log_conversation", lambda *a, **k: logged.append(k))
@@ -378,6 +382,20 @@ def test_chat_compression_failure_fail_open(
     assert any(e["type"] == "done" for e in events)
     assert updates == []
     assert logged[0]["compress_event"] is None
+
+
+def test_compression_circuit_breaker_pauses_after_repeated_failures() -> None:
+    """M6 #114:连续失败达阈值 → 熔断暂停尝试(ADR-0004),成功后复位。"""
+    from official_agent.graphs.assistant import compression as comp
+
+    comp.record_compression_success()
+    for _ in range(comp._MAX_CONSECUTIVE_FAILURES - 1):
+        comp.record_compression_failure()
+    assert not comp.compression_paused()
+    comp.record_compression_failure()
+    assert comp.compression_paused()  # 达阈值:暂停尝试
+    comp.record_compression_success()
+    assert not comp.compression_paused()  # 成功复位
 
 
 def test_chat_writes_conversation_log_row(

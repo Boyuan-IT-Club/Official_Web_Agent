@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_api_key: str = ""
     anthropic_api_key: str = ""
-    model_light: str = ""  # 轻量模型(压缩摘要);空 = 用 model_strong(兼容单模型部署)
+    model_light: str = "claude-haiku-4-5-20251001"  # GRA-08 降档预留;当前无消费方
     model_strong: str = "claude-sonnet-5"
 
     # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)

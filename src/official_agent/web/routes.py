@@ -61,6 +61,8 @@ class _SessionState:
         # M6 #111 热生效:agent 装配时的配置指纹(HOT_KEYS 值哈希)。
         # PUT /admin/config 后下一轮比对发现不同 → 重建 agent 用新配置。
         self.applied_config_fingerprint: str | None = None
+        # M6 #114:轮计数(1 起),压缩事件留痕「触发轮」用
+        self.turns = 0
 
 
 # 会话注册表:session_id → 运行时状态。进程内存,单 worker 语义(多副本 INF-11)。
@@ -232,22 +234,32 @@ async def _compress_if_needed(
     回写 = update_state 产生 checkpoint **新版本**(先 REMOVE_ALL_MESSAGES
     再加「摘要 + 近几轮」);PostgresSaver 不删旧版本行,全量历史仍可
     get_state_history 回溯——checkpointer 始终是对话原文权威源(#102)。
-    返回事件描述串(触发 token/覆盖/保留/摘要体积)随 conversation_log
+    返回事件描述串(触发轮/token/覆盖/保留/摘要体积)随 conversation_log
     落行;未触发或任何失败返回 None(fail-open,ADR-0005)。
+    熔断(ADR-0004):连续失败达阈值后暂停压缩尝试,降级为不压缩。
     """
+    from official_agent.config import get_effective_settings
+    from official_agent.graphs.assistant import build_model
+    from official_agent.graphs.assistant.compression import (
+        SUMMARY_MAX_TOKENS,
+        compression_paused,
+        record_compression_failure,
+        record_compression_success,
+    )
+
+    if compression_paused():  # 熔断中:降级为不压缩,不再打扰主链路
+        return None
     try:
         state = await session.agent.aget_state(config)
         messages = (getattr(state, "values", None) or {}).get("messages") or []
         if not messages:
             return None
-        from official_agent.config import get_effective_settings
-        from official_agent.graphs.assistant import _build_model
-
         settings = get_effective_settings()
-        # 摘要走轻量模型;未配 model_light(如单模型部署)回退 strong
-        summarizer = _build_model(
-            settings, model=settings.model_light or settings.model_strong
-        ).bind(temperature=0)
+        # 摘要用 strong 模型(ADR-0004「压缩即理解」,降 light 须 eval 证明);
+        # 温度 0 + 输出预算 = reasoning-safe
+        summarizer = build_model(settings).bind(
+            temperature=0, max_tokens=SUMMARY_MAX_TOKENS
+        )
         result = await maybe_compress(
             messages,
             summarize_fn=lambda older, query: summarize_messages(
@@ -263,11 +275,14 @@ async def _compress_if_needed(
             config,
             {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *result.new_messages]},
         )
+        record_compression_success()
         return (
-            f"trigger_tokens={result.trigger_tokens};covered={result.covered};"
-            f"kept={len(result.new_messages) - 1};summary_tokens={result.summary_tokens}"
+            f"turn={session.turns};trigger_tokens={result.trigger_tokens};"
+            f"covered={result.covered};kept={len(result.new_messages) - 1};"
+            f"summary_tokens={result.summary_tokens}"
         )
     except Exception:  # noqa: BLE001 — 压缩失败不拖垮对话(ADR-0005)
+        record_compression_failure()
         logger.warning("会话压缩失败(已忽略)", exc_info=True)
         return None
 
@@ -285,6 +300,8 @@ async def _stream_turn(
     """
     # M6 #111 热生效:配置指纹变了 → 重建 agent(新 model/provider 立即作用于本轮)
     _ensure_fresh_agent_config(session, checkpointer)
+    # M6 #114:轮计数(1 起),压缩事件「触发轮」留痕用
+    session.turns += 1
 
     config = {
         "configurable": {"thread_id": session.session_id},

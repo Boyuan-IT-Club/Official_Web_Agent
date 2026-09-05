@@ -66,6 +66,9 @@ def test_ensure_conversation_table_creates_table() -> None:
     assert any("CREATE TABLE IF NOT EXISTS agent_conversation_log" in c for c in calls)
     assert any("idx_conversation_user" in c for c in calls)
     assert any("idx_conversation_thread" in c for c in calls)
+    # 老库幂等补列(#113 prefix_hash / #114 compress_event):缺列 = INSERT 全失败
+    assert any("ADD COLUMN IF NOT EXISTS prefix_hash" in c for c in calls)
+    assert any("ADD COLUMN IF NOT EXISTS compress_event" in c for c in calls)
 
 
 # ── 写入 ────────────────────────────────────────────────────────────────

@@ -136,14 +136,13 @@ def identity_message(identity: ResolvedIdentity) -> str:
     )
 
 
-def _build_model(settings: Any, model: str | None = None) -> Any:
+def build_model(settings: Any, model: str | None = None) -> Any:
     """按配置构造对话模型(GRA-08 路由的接入点)。
 
     - anthropic:ANTHROPIC_API_KEY(默认)
     - openai-compatible:OpenAI 兼容端点(DeepSeek 等),LLM_BASE_URL+
       LLM_API_KEY——换模型供应商不改代码
-    model 缺省用 model_strong(对话主模型);传 settings.model_light 等
-    可得轻量模型(压缩摘要器,#114)。
+    model 缺省用 model_strong(对话主模型);其他用途(压缩摘要等)显式传名。
     """
     model = model or settings.model_strong
     if settings.llm_provider == "openai-compatible":
@@ -177,7 +176,7 @@ def build_assistant_agent(
     None 则纯内存(CLI --session 标识仅作 trace 用)。"""
     settings = get_effective_settings()
     return create_agent(
-        _build_model(settings),
+        build_model(settings),
         tools=assemble_tools(identity, user_token),
         system_prompt=load_system_prompt(),
         checkpointer=checkpointer,

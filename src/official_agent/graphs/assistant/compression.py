@@ -14,15 +14,25 @@ fail-open(ADR-0005):压缩任何一步失败由调用方吞掉,不影响当轮�
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
-# 默认阈值(可被 Settings 同名配置覆盖):token 上限 / 保留近几轮条数
+from official_agent.prompt_loader import load_prompt
+
+logger = logging.getLogger(__name__)
+
+# 默认阈值(运维入口在 config.py Settings 同名 .env 键;此处供独立调用兜底,
+# 两处保持一致)
 DEFAULT_THRESHOLD_TOKENS = 24_000
 DEFAULT_RECENT_KEEP = 12
+# 摘要输出预算(reasoning-safe:摘要足够装下固定保留清单即可,防发散)
+SUMMARY_MAX_TOKENS = 1024
+# 压缩熔断器(ADR-0004):连续 N 次失败即停,降级并告警(人工从日志发现)
+_MAX_CONSECUTIVE_FAILURES = 3
 
 _ENCODING: Any = None
 
@@ -51,7 +61,7 @@ def _content_text(message: BaseMessage) -> str:
 
 
 def count_tokens(messages: Sequence[BaseMessage]) -> int:
-    """tiktoken 强计数(o200k_base);编码不可用时 1 字 ≈ 1 token 保守高估
+    """tiktoken 强计数(cl100k_base);编码不可用时 1 字 ≈ 1 token 保守高估
     (偏高只导致提前压缩,不丢上下文,方向安全)。"""
     try:
         enc = _encoding()
@@ -121,22 +131,40 @@ async def summarize_messages(
     """生成摘要消息:感知当前查询意图(ContextAware)+ [T#] 引用标记。
 
     引用编号按传入顺序 T1..Tn 对应 older 消息,便于排查时回溯原文
-    (checkpointer 全量可查)。输出为 [历史摘要] 前缀的 HumanMessage,
-    作为压缩后序列首条注入。
+    (checkpointer 全量可查)。prompt 来自 prompts/compression.md(ADR-0004
+    版本化;{query}/{numbered} 占位符由代码填充),输出为 [历史摘要] 前缀的
+    HumanMessage,作为压缩后序列首条注入。
     """
     numbered = "\n".join(
         f"[T{i}] {type(m).__name__}: {_content_text(m)}"
         for i, m in enumerate(older, start=1)
     )
-    prompt = (
-        "你是客服会话的压缩器。把下面的旧消息压缩成一份摘要,供后续对话继续使用。\n"
-        "要求:\n"
-        "- 只保留对后续对话可能有用的信息:用户身份相关事实、已做过的查询与结论、未决问题\n"
-        "- 每条要点末尾标注来源编号,如 [T1]、[T3],不编造、不遗漏未回答的问题\n"
-        f"- 结合当前用户意图判断什么信息相关:{query if query else '未提供'}\n\n"
-        f"旧消息(逐条编号):\n{numbered}\n\n"
-        "输出:纯文本中文摘要。"
-    )
+    prompt = load_prompt("compression.md").format(query=query or "未提供", numbered=numbered)
     response = await model.ainvoke(prompt)
     summary = _content_text(response).strip()
     return HumanMessage(content=f"[历史摘要]\n{summary}")
+
+
+# ── 压缩熔断器(ADR-0004:连续 N 次压缩失败即停,降级并告警) ─────────────
+
+_fail_streak = 0
+
+
+def compression_paused() -> bool:
+    """连续失败达阈值后暂停压缩尝试(进程级;重启或成功后恢复)。"""
+    return _fail_streak >= _MAX_CONSECUTIVE_FAILURES
+
+
+def record_compression_success() -> None:
+    global _fail_streak
+    _fail_streak = 0
+
+
+def record_compression_failure() -> None:
+    global _fail_streak
+    _fail_streak += 1
+    if compression_paused():
+        logger.warning(
+            "会话压缩连续失败 %d 次,熔断暂停(降级为不压缩;排查后重启进程恢复)",
+            _fail_streak,
+        )
