@@ -26,6 +26,17 @@ class Settings(BaseSettings):
     model_light: str = "claude-haiku-4-5-20251001"  # GRA-08 降档预留;当前无消费方
     model_strong: str = "claude-sonnet-5"
 
+    # Embedding(RAG KB #134):独立配置组,与 build_model 平行,不塞 llm_base_url
+    # 也不入 HOT_KEYS(SEC-01:key 不入库;HOT_KEYS 是对话模型路由的接缝)。
+    # Anthropic 不提供 embedding → OpenAI-compatible 托管中文模型
+    # (Qwen3-Embedding-0.6B / BGE-M3 等);具体 provider/model 落 kb_meta,
+    # 换模型 = 全量 reindex + meta 版本 bump(禁跨模型向量混排)。
+    embed_provider: str = ""  # 标识用(如 "openai-compatible");不影响请求构造
+    embed_base_url: str = ""  # 形如 https://host/v1(自动拼 /embeddings)
+    embed_api_key: str = ""
+    embed_model: str = ""
+    embed_dim: int = 0  # 0=不校验;>0 时与端点返回维度强校验
+
     # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)
     postgres_url: str = "postgresql://localhost:5432/official_agent"
 
