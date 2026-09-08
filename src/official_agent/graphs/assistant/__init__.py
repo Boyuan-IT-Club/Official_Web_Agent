@@ -35,7 +35,7 @@ from pydantic import SecretStr
 from official_agent.config import get_effective_settings
 from official_agent.graphs.identity import ResolvedIdentity
 from official_agent.security.injection_guard import mount_input_guard
-from official_agent.tools import readonly
+from official_agent.tools import knowledge, readonly
 
 _PROMPT_FILE = Path(__file__).parent.parent.parent / "prompts" / "assistant.md"
 
@@ -50,14 +50,16 @@ _ROLE_TOOL_NAMES: dict[str, tuple[str, ...]] = {
         "list_reschedule_requests",
         "get_recruit_statistics",
         "get_candidate_card",
+        "search_knowledge",
     ),
     "member": (
         "get_open_cycle",
         "search_resumes",
         "get_recruit_statistics",
         "find_available_sessions",
+        "search_knowledge",
     ),
-    "candidate": ("get_open_cycle", "get_my_interview"),
+    "candidate": ("get_open_cycle", "get_my_interview", "search_knowledge"),
     "unknown": (),
 }
 
@@ -71,6 +73,7 @@ _ALL_TOOLS: dict[str, object] = {
     "list_reschedule_requests": readonly.list_reschedule_requests,
     "get_recruit_statistics": readonly.get_recruit_statistics,
     "get_candidate_card": readonly.get_candidate_card,
+    "search_knowledge": knowledge.search_knowledge,
 }
 
 
