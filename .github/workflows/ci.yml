@@ -8,25 +8,6 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # #169/#171 的真 PG 用例(重启续聊/属主校验/硬删)以 POSTGRES_URL 是否存在
-    # 决定实跑还是 skip——不给服务它们会静默变绿。这里补齐与本地/生产同版本的
-    # PG,让「台账层往返」在 CI 真跑。
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: official_agent
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/official_agent
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
