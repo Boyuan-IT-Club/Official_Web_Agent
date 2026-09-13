@@ -181,10 +181,10 @@ async def test_nonempty_list_result_is_single_json_block(mock_backend):
     respx.post("http://backend.test/api/auth/login").side_effect = httpx.Response(
         201, json={"code": 200, "message": "ok", "data": {"token": "tok", "user_id": 1}}
     )
-    respx.get("http://backend.test/api/interview/admin/cycles/1/unassigned").side_effect = (
-        httpx.Response(
-            200, json={"code": 200, "message": "ok", "data": [{"userId": 3}, {"userId": 4}]}
-        )
+    respx.get(
+        "http://backend.test/api/interview/admin/cycles/1/unassigned"
+    ).side_effect = httpx.Response(
+        200, json={"code": 200, "message": "ok", "data": [{"userId": 3}, {"userId": 4}]}
     )
 
     from official_agent.mcp_server import server

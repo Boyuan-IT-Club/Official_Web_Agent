@@ -86,6 +86,7 @@ async def get_open_cycle() -> dict | list:
     """
     return await _read("/api/cycles/open")
 
+
 async def search_resumes(
     cycle_id: int | None = None,
     department: str | None = None,
@@ -162,9 +163,7 @@ async def find_available_sessions(
     params: dict[str, Any] = {}
     if dept_id is not None:
         params["deptId"] = dept_id
-    data = await _read(
-        f"/api/interview/admin/cycles/{cycle_id}/available-sessions", params=params
-    )
+    data = await _read(f"/api/interview/admin/cycles/{cycle_id}/available-sessions", params=params)
     if date and isinstance(data, list):
         data = [s for s in data if str(s.get("interviewDate", "")).startswith(date)]
     return data
@@ -236,9 +235,7 @@ async def get_recruit_statistics(cycle_id: int) -> dict:
         pass  # 该周期评价表未开启时无 summary,统计不因此失败
 
     # 投递总数(含未提交草稿):search 的 totalElements;周期不存在时后端给空页
-    resumes = await _read(
-        "/api/resumes/search", params={"cycleId": cycle_id, "page": 1, "size": 1}
-    )
+    resumes = await _read("/api/resumes/search", params={"cycleId": cycle_id, "page": 1, "size": 1})
     total_resumes = (resumes or {}).get("totalElements")
 
     return {

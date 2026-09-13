@@ -67,8 +67,14 @@ def test_write_audit_action_is_json() -> None:
     conn = _mock_conn(_audit_row())
     with patch.object(audit, "_conn", return_value=conn):
         audit.write_audit(
-            thread_id="t", acting_user_id=1, channel="cli", agent="a",
-            action={"tool": "x"}, decision="u1:approve", result="r", trace_id="tr",
+            thread_id="t",
+            acting_user_id=1,
+            channel="cli",
+            agent="a",
+            action={"tool": "x"},
+            decision="u1:approve",
+            result="r",
+            trace_id="tr",
         )
     params = conn.execute.call_args.args[1]
     import json

@@ -81,9 +81,7 @@ def _login_ok(user_id: int = 7, role: str = "管理员") -> httpx.Response:
 
     claims = {"userId": user_id, "roleNames": [role], "permissionCodes": ["user:view"]}
     token = f"{b64(b'{}')}.{b64(json.dumps(claims).encode())}.sig"
-    return httpx.Response(
-        200, json={"code": 200, "message": "ok", "data": {"token": token}}
-    )
+    return httpx.Response(200, json={"code": 200, "message": "ok", "data": {"token": token}})
 
 
 def _install_mock_backend() -> None:
@@ -249,14 +247,10 @@ def test_chat_resume_existing_thread_no_duplicate_identity_prefix(
 
 
 @respx.mock
-def test_chat_first_round_failure_reinjects_identity_next_round(
+def test_chat_first_round_failure_message_face_stays_user_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """H-2 回归:首轮失败(未持久化)→ 第二轮自动重发身份前缀。
-
-    修复前 turn 单调递增,失败轮丢失前缀后永不恢复;修复后判据是
-    aget_state 无历史 → 失败轮后续自动重发。
-    """
+    """H-2 + #166:首轮失败后第二轮正常;消息面始终只有用户原文(无身份前缀)。"""
     respx.post(LOGIN).mock(side_effect=lambda _: _login_ok())
     _install_mock_backend()
 
@@ -290,9 +284,10 @@ def test_chat_first_round_failure_reinjects_identity_next_round(
     assert result.exit_code == 0
     assert len(seen_inputs) == 1  # 第二问成功,第一问失败
     msgs = seen_inputs[0]
-    # 第二轮重新带上了身份前缀(首轮失败未持久化 → 仍视为新线程);新文案以
-    # 「当前对话用户」开头(identity_message 去掉了内部字段,不再含「身份」字样)
-    assert any(getattr(m, "type", "") == "human" and "当前对话用户" in str(m.content) for m in msgs)
+    # 消息面只有用户原文:无身份前缀(否则回看泄漏)、含本轮输入
+    assert not any(
+        getattr(m, "type", "") == "human" and "当前对话用户" in str(m.content) for m in msgs
+    )
     assert any("第二问" in str(m.content) for m in msgs)
     readonly.set_backend_client(None)
 
@@ -310,12 +305,28 @@ def test_run_turn_accumulates_history_and_shows_tool_flow(monkeypatch: pytest.Mo
             assert stream_mode == ["messages", "updates"]
             yield "messages", (AIMessageChunk(content="查询中"), {})
             # 三节点各吐增量(model→tools→model),对齐真实图契约
-            yield "updates", {"agent": {"messages": [
-                AIMessage("", tool_calls=[{"name": "get_open_cycle", "args": {}, "id": "c1"}]),
-            ]}}
-            yield "updates", {"tools": {"messages": [
-                ToolMessage("{'cycleId': 2}", tool_call_id="c1", name="get_open_cycle"),
-            ]}}
+            yield (
+                "updates",
+                {
+                    "agent": {
+                        "messages": [
+                            AIMessage(
+                                "", tool_calls=[{"name": "get_open_cycle", "args": {}, "id": "c1"}]
+                            ),
+                        ]
+                    }
+                },
+            )
+            yield (
+                "updates",
+                {
+                    "tools": {
+                        "messages": [
+                            ToolMessage("{'cycleId': 2}", tool_call_id="c1", name="get_open_cycle"),
+                        ]
+                    }
+                },
+            )
             yield "updates", {"agent": {"messages": [AIMessage("当前 1 个开放周期。")]}}
 
     async def go() -> list:
@@ -352,3 +363,30 @@ def test_chat_backend_unreachable_exits_gracefully(monkeypatch: pytest.MonkeyPat
     assert result.exit_code == 1
     assert "身份解析失败" in result.output
     readonly.set_backend_client(None)
+
+
+def test_run_turn_buffer_reply_guards_fabrication() -> None:
+    """GRA-04 #161:buffer_reply=True 时编造内容不直出,整段守卫改写。"""
+    from io import StringIO
+
+    import rich.console
+
+    history = [HumanMessage("查数据")]
+
+    class FakeToolless:
+        async def astream(self, inp, config=None, stream_mode=None):
+            yield "messages", (AIMessageChunk(content="查询结果:有 3 份简历。"), {})
+            yield "updates", {"agent": {"messages": [AIMessage("查询结果:有 3 份简历。")]}}
+
+    buf = StringIO()
+    test_console = rich.console.Console(file=buf, force_terminal=False)
+    monkeypatch: pytest.MonkeyPatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(cli_mod, "console", test_console)
+        out = asyncio.run(cli_mod._run_turn(FakeToolless(), history, "s1", [], buffer_reply=True))
+    finally:
+        monkeypatch.undo()
+    printed = buf.getvalue()
+    assert "查询结果:有 3 份简历" not in printed  # 编造原文不直出
+    assert "没有可用的数据查询权限" in printed  # 改写后的诚实话术
+    assert out[-1].content == "查询结果:有 3 份简历。"  # 历史累积不动(守卫只管输出面)

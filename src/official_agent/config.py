@@ -29,6 +29,21 @@ class Settings(BaseSettings):
     # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)
     postgres_url: str = "postgresql://localhost:5432/official_agent"
 
+    # 会话注册表(#169):进程内有界;淘汰只删运行时对象,PG 档案/checkpoint 不动
+    session_registry_max: int = 500
+    session_registry_ttl_seconds: int = 3600
+
+    # 单轮执行预算(#170):墙钟超时与 LangGraph 递归上限;用户级配额归 #56
+    turn_wall_clock_timeout: int = 120  # 秒;票面建议 60–120
+    turn_recursion_limit: int = 25
+    # 全局活跃模型调用并发闸(#170):跨用户资源保护;数值待 #56 配额口径一起拍板
+    model_call_global_concurrency: int = 4
+    model_gate_acquire_timeout: int = 15  # 秒;闸满等待上限,超过回 busy
+
+    # 会话保留 TTL(#171):软删档案超期后物理清理(连带 checkpoint/对话日志)。
+    # **0 = 关闭**——保留天数是 #57 数据留存 ADR 的拍板项,ADR 落地前不启用。
+    thread_retention_days: int = 0
+
     # FastAPI 服务(INF-04):官网候选人客服通道
     agent_host: str = "127.0.0.1"
     agent_port: int = 8001

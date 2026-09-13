@@ -182,12 +182,10 @@ async def test_get_recruit_statistics_paginates_and_aggregates(
         ok({"total": 3, "interviewResults": [{"decision": 3, "assignedDeptId": None}]}),
     ]
     # 评价表未开启 → 业务错误 → 统计仍要成功;search 提供投递总数
-    respx.get(f"{BASE}/api/interview/evaluation/cycles/2/summary").side_effect = (
-        httpx.Response(400, json={"code": 3703, "message": "该周期尚无已分配的面试名单"})
+    respx.get(f"{BASE}/api/interview/evaluation/cycles/2/summary").side_effect = httpx.Response(
+        400, json={"code": 3703, "message": "该周期尚无已分配的面试名单"}
     )
-    respx.get(f"{BASE}/api/resumes/search").side_effect = ok(
-        {"content": [], "totalElements": 25}
-    )
+    respx.get(f"{BASE}/api/resumes/search").side_effect = ok({"content": [], "totalElements": 25})
 
     stats = await get_recruit_statistics(cycle_id=2)
 
@@ -195,7 +193,10 @@ async def test_get_recruit_statistics_paginates_and_aggregates(
     assert stats["totalResumes"] == 25
     assert stats["totalResults"] == 3
     assert stats["decisionCounts"] == {
-        "pending": 0, "passed": 2, "rejected": 0, "toTransfer": 1,
+        "pending": 0,
+        "passed": 2,
+        "rejected": 0,
+        "toTransfer": 1,
     }
     assert stats["assignedByDeptId"] == {"5": 2}
     assert stats["evaluatedCandidates"] is None  # summary 不可用,不阻塞

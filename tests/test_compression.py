@@ -62,9 +62,7 @@ def test_count_tokens_grows_with_content() -> None:
 
 def test_safe_split_respects_recent_keep() -> None:
     msgs = [
-        m
-        for i in range(3)
-        for m in (HumanMessage(content=f"q{i}"), AIMessage(content=f"a{i}"))
+        m for i in range(3) for m in (HumanMessage(content=f"q{i}"), AIMessage(content=f"a{i}"))
     ] + _tool_pair("x")
     older, recent = safe_split(msgs, recent_keep=2)
     assert recent == msgs[-2:]
@@ -100,9 +98,7 @@ async def _fake_summarize(older: list, query: str) -> HumanMessage:
 async def test_maybe_compress_under_threshold_returns_none() -> None:
     msgs = [HumanMessage(content="短问题"), AIMessage(content="短回答")]
     assert (
-        await maybe_compress(
-            msgs, summarize_fn=_fake_summarize, threshold=10_000, recent_keep=2
-        )
+        await maybe_compress(msgs, summarize_fn=_fake_summarize, threshold=10_000, recent_keep=2)
         is None
     )
 
@@ -127,9 +123,7 @@ async def test_maybe_compress_unsafe_split_returns_none() -> None:
     msgs = _tool_pair("only")
     total = count_tokens(msgs)
     assert (
-        await maybe_compress(
-            msgs, summarize_fn=_fake_summarize, threshold=total - 1, recent_keep=1
-        )
+        await maybe_compress(msgs, summarize_fn=_fake_summarize, threshold=total - 1, recent_keep=1)
         is None
     )
 
@@ -162,7 +156,5 @@ async def test_summarize_messages_prompt_intent_and_citations() -> None:
 
 def test_summarize_messages_sync_entry() -> None:
     model = _FakeModel()
-    result = asyncio.run(
-        summarize_messages([HumanMessage(content="q")], query="意图", model=model)
-    )
+    result = asyncio.run(summarize_messages([HumanMessage(content="q")], query="意图", model=model))
     assert result.content.startswith("[历史摘要]")

@@ -86,9 +86,7 @@ def test_conversations_rejects_non_monitor(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _install_resolve(monkeypatch, _non_admin_identity())
-    resp = client.get(
-        "/api/agent/admin/conversations", headers={"Authorization": "Bearer tok"}
-    )
+    resp = client.get("/api/agent/admin/conversations", headers={"Authorization": "Bearer tok"})
     assert resp.status_code == 403
 
 
@@ -103,9 +101,7 @@ def test_conversations_list_returns_rows(
         "list_conversations",
         lambda **kw: [_list_row(1, 7, "我的面试"), _list_row(2, 8, "", "model_error")],
     )
-    resp = client.get(
-        "/api/agent/admin/conversations", headers={"Authorization": "Bearer tok"}
-    )
+    resp = client.get("/api/agent/admin/conversations", headers={"Authorization": "Bearer tok"})
     assert resp.status_code == 200
     data = resp.json()
     assert len(data["items"]) == 2
@@ -182,9 +178,7 @@ def test_conversations_detail_returns_row(
             "created_at": "2026-09-04T10:00:00Z",
         },
     )
-    resp = client.get(
-        "/api/agent/admin/conversations/1", headers={"Authorization": "Bearer tok"}
-    )
+    resp = client.get("/api/agent/admin/conversations/1", headers={"Authorization": "Bearer tok"})
     assert resp.status_code == 200
     data = resp.json()
     assert data["user_message"] == "我的面试时间"
@@ -199,9 +193,7 @@ def test_conversations_detail_missing_404(
 
     _install_resolve(monkeypatch, _admin_identity())
     monkeypatch.setattr(routes, "get_conversation", lambda id_: None)
-    resp = client.get(
-        "/api/agent/admin/conversations/999", headers={"Authorization": "Bearer tok"}
-    )
+    resp = client.get("/api/agent/admin/conversations/999", headers={"Authorization": "Bearer tok"})
     assert resp.status_code == 404
 
 
@@ -228,9 +220,7 @@ def test_conversations_detail_error_row_no_content(
             "created_at": "2026-09-04T10:00:00Z",
         },
     )
-    resp = client.get(
-        "/api/agent/admin/conversations/5", headers={"Authorization": "Bearer tok"}
-    )
+    resp = client.get("/api/agent/admin/conversations/5", headers={"Authorization": "Bearer tok"})
     assert resp.status_code == 200
     data = resp.json()
     assert data["error_code"] == "model_error"
@@ -268,9 +258,7 @@ def test_conversations_limit_clamped_to_200(
 
     _install_resolve(monkeypatch, _admin_identity())
     seen: dict = {}
-    monkeypatch.setattr(
-        routes, "list_conversations", lambda **kw: seen.update(kw) or []
-    )
+    monkeypatch.setattr(routes, "list_conversations", lambda **kw: seen.update(kw) or [])
     resp = client.get(
         "/api/agent/admin/conversations?limit=999",
         headers={"Authorization": "Bearer tok"},

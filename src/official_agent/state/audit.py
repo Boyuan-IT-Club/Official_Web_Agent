@@ -91,19 +91,26 @@ def write_audit(
 ) -> AuditRecord:
     """写一条审计行。action 是操作指纹字典(工具名+参数,与确认令牌同指纹)。
 
-    decision: `u{user}:approve`(批准执行)/ `u{user}:reject`(拒绝)——interrupt
-    恢复决策,批准人编码在前缀(ADR-0006「谁批准/拒绝」)。
-    decision_summary:agent 决策依据的人类可读摘要(interrupt 携带,TOOL-04 接线)。
-    token:一次性确认令牌值(与 action 同指纹,ADR-0005)。
-    result:执行结果摘要(成功/失败的可行动文案,TOOL-06)。
-    trace_id 串 Langfuse(OBS-02)全过程;缺省取 current_trace_id()
-(优先级 span > 轮 id > 全零,永非空;延迟导入保 #95 前 CI 绿,
-    显式传 trace_id 的调用方不受影响)。
+        decision: `u{user}:approve`(批准执行)/ `u{user}:reject`(拒绝)——interrupt
+        恢复决策,批准人编码在前缀(ADR-0006「谁批准/拒绝」)。
+        decision_summary:agent 决策依据的人类可读摘要(interrupt 携带,TOOL-04 接线)。
+        token:一次性确认令牌值(与 action 同指纹,ADR-0005)。
+        result:执行结果摘要(成功/失败的可行动文案,TOOL-06)。
+        trace_id 串 Langfuse(OBS-02)全过程;缺省取 current_trace_id()
+    (优先级 span > 轮 id > 全零,永非空;延迟导入保 #95 前 CI 绿,
+        显式传 trace_id 的调用方不受影响)。
     """
     if trace_id is None:
         from official_agent.observability import current_trace_id
 
         trace_id = current_trace_id()
+    # #164 出口契约:审计 action 写入口过 deep 掩(action 含工具参数,可能
+    # 携带姓名/手机号等;decision_summary/result 同为出边界文本)
+    from official_agent.security.pii import mask_pii, mask_pii_deep
+
+    action = mask_pii_deep(action)
+    decision_summary = mask_pii(decision_summary)
+    result = mask_pii(result)
     with _conn() as conn:
         row = conn.execute(
             """

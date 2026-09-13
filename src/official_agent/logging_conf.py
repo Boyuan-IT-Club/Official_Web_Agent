@@ -59,4 +59,3 @@ def setup_logging(log_dir: Path | None = None, level: str = "INFO") -> None:
     with contextlib.suppress(OSError):
         (log_dir / _LOG_FILENAME).chmod(0o600)
     root.addHandler(file_handler)
-

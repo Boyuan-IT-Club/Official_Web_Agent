@@ -203,9 +203,7 @@ async def test_concurrent_first_calls_login_once() -> None:
     )
 
     client = make_client()
-    results = await asyncio.gather(
-        client.get("/api/cycles/open"), client.get("/api/cycles/open")
-    )
+    results = await asyncio.gather(client.get("/api/cycles/open"), client.get("/api/cycles/open"))
     assert results == [1, 1]
     assert login_route.call_count == 1
     await client.aclose()

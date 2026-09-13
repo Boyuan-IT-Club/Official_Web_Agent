@@ -54,9 +54,7 @@ def _identity(user_id: int = 7, monitor: bool = False) -> dict:
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    monkeypatch.setattr(
-        "official_agent.state.pg.get_checkpointer", _fake_checkpointer
-    )
+    monkeypatch.setattr("official_agent.state.pg.get_checkpointer", _fake_checkpointer)
     with TestClient(create_app()) as c:
         yield c
 
@@ -87,6 +85,7 @@ class _FakeCheckpointer:
 
 
 # ── 用户侧(G2)─────────────────────────────────────────────────────────
+
 
 def test_sessions_lists_own_threads_sorted_by_activity(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
@@ -157,9 +156,7 @@ def test_session_messages_non_owner_or_missing_returns_404(
     monkeypatch.setattr(threads, "resolve_thread", lambda tid, uid: None)  # 非属主/终结
     client.app.state.checkpointer = _FakeCheckpointer([])
 
-    resp = client.get(
-        "/api/agent/sessions/web:u8:zzz/messages", headers=_auth_headers()
-    )
+    resp = client.get("/api/agent/sessions/web:u8:zzz/messages", headers=_auth_headers())
     assert resp.status_code == 404  # 不区分原因,防枚举
 
 
@@ -182,6 +179,7 @@ def test_sessions_requires_auth(client: TestClient) -> None:
 
 # ── 管理员侧(G3)─────────────────────────────────────────────────────────
 
+
 def test_admin_sessions_requires_monitor(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -200,7 +198,7 @@ def test_admin_sessions_lists_and_filters_by_user(
     monkeypatch.setattr(
         threads,
         "list_active_threads",
-        lambda owner=None: (seen.update({"owner": owner}) or [_thread("web:u7:aaa", 7)]),
+        lambda owner=None: seen.update({"owner": owner}) or [_thread("web:u7:aaa", 7)],
     )
     monkeypatch.setattr(
         conversation,
@@ -228,16 +226,12 @@ def test_admin_session_messages_any_owner_with_status(
     from official_agent.state import threads
 
     _install_resolve(monkeypatch, _identity(user_id=1, monitor=True))
-    monkeypatch.setattr(
-        threads, "get_thread", lambda tid: _thread(tid, 8, status="active")
-    )
+    monkeypatch.setattr(threads, "get_thread", lambda tid: _thread(tid, 8, status="active"))
     client.app.state.checkpointer = _FakeCheckpointer(
         [HumanMessage(content="你好"), AIMessage(content="你好呀")]
     )
 
-    resp = client.get(
-        "/api/agent/admin/sessions/web:u8:aaa/messages", headers=_auth_headers()
-    )
+    resp = client.get("/api/agent/admin/sessions/web:u8:aaa/messages", headers=_auth_headers())
     assert resp.status_code == 200
     data = resp.json()
     assert data["owner_user_id"] == 8 and data["status"] == "active"
@@ -252,7 +246,5 @@ def test_admin_session_messages_unknown_thread_404(
     _install_resolve(monkeypatch, _identity(user_id=1, monitor=True))
     monkeypatch.setattr(threads, "get_thread", lambda tid: None)
 
-    resp = client.get(
-        "/api/agent/admin/sessions/web:u1:none/messages", headers=_auth_headers()
-    )
+    resp = client.get("/api/agent/admin/sessions/web:u1:none/messages", headers=_auth_headers())
     assert resp.status_code == 404

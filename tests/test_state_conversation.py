@@ -39,6 +39,7 @@ def _conversation_row() -> dict:
 
 # ── PII 过滤 ────────────────────────────────────────────────────────────
 
+
 def test_mask_pii_masks_phone() -> None:
     assert conversation.mask_pii("联系我 13812345678 谢谢") == "联系我 138****5678 谢谢"
 
@@ -58,6 +59,7 @@ def test_mask_pii_leaves_plain_text() -> None:
 
 # ── 建表 ────────────────────────────────────────────────────────────────
 
+
 def test_ensure_conversation_table_creates_table() -> None:
     conn = _mock_conn()
     with patch.object(conversation, "_conn", return_value=conn):
@@ -72,6 +74,7 @@ def test_ensure_conversation_table_creates_table() -> None:
 
 
 # ── 写入 ────────────────────────────────────────────────────────────────
+
 
 def test_write_conversation_inserts_fields() -> None:
     row = _conversation_row()
@@ -151,16 +154,25 @@ def test_write_conversation_error_row_strips_content() -> None:
 
 # ── 查询(#112) ──────────────────────────────────────────────────────────
 
+
 def test_list_conversations_returns_projected_rows() -> None:
     rows = [
         {
-            "id": 1, "thread_id": "web:u7:8f3a9c2b", "user_id": 7,
-            "channel": "web", "error_code": None, "created_at": None,
+            "id": 1,
+            "thread_id": "web:u7:8f3a9c2b",
+            "user_id": 7,
+            "channel": "web",
+            "error_code": None,
+            "created_at": None,
             "user_message_head": "我的面试",
         },
         {
-            "id": 2, "thread_id": "web:u8:abcd1234", "user_id": 8,
-            "channel": "web", "error_code": "model_error", "created_at": None,
+            "id": 2,
+            "thread_id": "web:u8:abcd1234",
+            "user_id": 8,
+            "channel": "web",
+            "error_code": "model_error",
+            "created_at": None,
             "user_message_head": "",
         },
     ]
@@ -247,6 +259,7 @@ def test_list_conversations_sql_projects_no_full_message() -> None:
 
 # ── usage(#113) ─────────────────────────────────────────────────────────
 
+
 def test_extract_usage_from_metadata() -> None:
     """从 usage_metadata 提取 token 数(含 DeepSeek cache 字段)。"""
     usage = conversation.extract_usage(
@@ -280,8 +293,10 @@ def test_write_conversation_stores_usage() -> None:
     """write 传 usage → INSERT 含 token/cache 列(#113)。"""
     row = _conversation_row()
     row.update(
-        input_tokens=150, output_tokens=80,
-        cache_hit_tokens=100, cache_miss_tokens=50,
+        input_tokens=150,
+        output_tokens=80,
+        cache_hit_tokens=100,
+        cache_miss_tokens=50,
     )
     conn = _mock_conn(row)
     with patch.object(conversation, "_conn", return_value=conn):
@@ -344,6 +359,7 @@ def test_extract_usage_langchain_cached_tokens_mapping() -> None:
 
 
 # ── usage 提取(#115/#113):缓存率真实性 ────────────────────────────────
+
 
 def test_extract_usage_metadata_derives_miss_from_input_minus_hit() -> None:
     """DeepSeek 流式 usage_metadata 只报 cache_read,不报 miss:

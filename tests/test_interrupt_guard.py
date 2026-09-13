@@ -29,9 +29,7 @@ executed: list[str] = []
 @tool
 def fake_assign(resume_id: int, target_session_id: int) -> str:
     """模拟写操作:把候选人分配到场次,须人工确认。"""
-    decision = require_confirmation(
-        f"将把简历 #{resume_id} 分配到场次 #{target_session_id},请确认"
-    )
+    decision = require_confirmation(f"将把简历 #{resume_id} 分配到场次 #{target_session_id},请确认")
     if decision == "approve":
         executed.append(f"assign {resume_id}->{target_session_id}")
         return f"已分配简历 #{resume_id} 到场次 #{target_session_id}"

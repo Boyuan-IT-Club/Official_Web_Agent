@@ -83,6 +83,7 @@ def main(argv: list[str] | None = None) -> None:
     if "--http" not in args:
         server.run(transport="stdio")
         return
+
     def _flag_value(flag: str, default: str) -> str:
         if flag not in args:
             return default

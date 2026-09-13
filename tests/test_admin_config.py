@@ -58,9 +58,7 @@ def _non_admin_identity() -> dict:
     }
 
 
-def _install_resolve(
-    monkeypatch: pytest.MonkeyPatch, identity: dict
-) -> None:
+def _install_resolve(monkeypatch: pytest.MonkeyPatch, identity: dict) -> None:
     from official_agent.web import routes
 
     async def _resolve(*_a: object, **_k: object) -> dict:
@@ -80,9 +78,7 @@ def test_admin_config_rejects_non_monitor(
 ) -> None:
     """非 agent:monitor 身份 → 403。"""
     _install_resolve(monkeypatch, _non_admin_identity())
-    resp = client.get(
-        "/api/agent/admin/config", headers={"Authorization": "Bearer tok"}
-    )
+    resp = client.get("/api/agent/admin/config", headers={"Authorization": "Bearer tok"})
     assert resp.status_code == 403
 
 
@@ -94,15 +90,11 @@ def test_admin_config_get_echoes_masked(
     from official_agent.web import routes
 
     _install_resolve(monkeypatch, _admin_identity())
-    monkeypatch.setattr(
-        routes, "get_all_config", lambda: {"model_strong": "deepseek-v4-flash"}
-    )
+    monkeypatch.setattr(routes, "get_all_config", lambda: {"model_strong": "deepseek-v4-flash"})
     # 高敏 env: LLM_API_KEY 假设已配置(先清 get_settings 缓存让新 env 生效)
     monkeypatch.setenv("LLM_API_KEY", "sk-test1234567890abcdef")
     get_settings.cache_clear()
-    resp = client.get(
-        "/api/agent/admin/config", headers={"Authorization": "Bearer tok"}
-    )
+    resp = client.get("/api/agent/admin/config", headers={"Authorization": "Bearer tok"})
     assert resp.status_code == 200
     data = resp.json()
     # 低敏实值

@@ -20,6 +20,7 @@ def _mock_conn(rows: list[dict] | None = None) -> MagicMock:
 
 # ── 建表 ────────────────────────────────────────────────────────────────
 
+
 def test_ensure_config_table_creates_table() -> None:
     conn = _mock_conn()
     with patch.object(config_store, "_conn", return_value=conn):
@@ -32,6 +33,7 @@ def test_ensure_config_table_creates_table() -> None:
 
 # ── 读写 ────────────────────────────────────────────────────────────────
 
+
 def test_get_all_config_returns_rows() -> None:
     rows = [
         {"key": "model_strong", "value": "deepseek-v4-flash", "updated_at": None},
@@ -41,6 +43,7 @@ def test_get_all_config_returns_rows() -> None:
     with patch.object(config_store, "_conn", return_value=conn):
         result = config_store.get_all_config()
     assert result == {"model_strong": "deepseek-v4-flash", "llm_provider": "openai-compatible"}
+
 
 def test_set_config_upserts() -> None:
     conn = _mock_conn()

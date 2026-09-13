@@ -25,6 +25,7 @@ _STATUS_TERMINATED = "terminated"
 # 与 agent_threads 表列一致;多处 SELECT 共用,防投影漂移
 _COLUMNS = "thread_id, owner_user_id, channel, status, subject, created_at, deleted_at"
 
+
 @dataclass(frozen=True)
 class ThreadRecord:
     """agent_threads 一行。"""
@@ -104,8 +105,7 @@ def create_thread(
             # 冲突:tid 已存在。幂等仅限「同属主 + 仍 active」——
             # 跨属主借用 / 已终结复活都是 SEC-07 明令禁止的。
             existing = conn.execute(
-                "SELECT " + _COLUMNS + " "
-                "FROM agent_threads WHERE thread_id = %s",
+                "SELECT " + _COLUMNS + " FROM agent_threads WHERE thread_id = %s",
                 (tid,),
             ).fetchone()
             if existing is None:
@@ -124,8 +124,7 @@ def get_thread(thread_id: str) -> ThreadRecord | None:
     """按 thread_id 取记录;不存在返回 None。不做属主校验(留给调用方按需)。"""
     with _conn() as conn:
         row = conn.execute(
-            "SELECT " + _COLUMNS + " "
-            "FROM agent_threads WHERE thread_id = %s",
+            "SELECT " + _COLUMNS + " FROM agent_threads WHERE thread_id = %s",
             (thread_id,),
         ).fetchone()
     return _record(row) if row else None
@@ -145,9 +144,7 @@ def resolve_thread(thread_id: str, actor_user_id: int) -> ThreadRecord | None:
     return rec
 
 
-def find_active_by_subject(
-    owner_user_id: int, channel: str, subject: str
-) -> ThreadRecord | None:
+def find_active_by_subject(owner_user_id: int, channel: str, subject: str) -> ThreadRecord | None:
     """CLI -s 续接:该用户最近 active 且 subject 匹配的 thread;无则 None。
 
     subject 是用户侧别名,同别名同用户可续接同一个会话。
@@ -165,10 +162,7 @@ def find_active_by_subject(
 
 def list_active_threads(owner_user_id: int | None = None) -> list[ThreadRecord]:
     """活动线程列表(软删除之外的)。owner_user_id 给则只列该属主。"""
-    sql = (
-        "SELECT " + _COLUMNS + " "
-        "FROM agent_threads WHERE status = %s"
-    )
+    sql = "SELECT " + _COLUMNS + " FROM agent_threads WHERE status = %s"
     params: list[Any] = [_STATUS_ACTIVE]
     if owner_user_id is not None:
         sql += " AND owner_user_id = %s"
@@ -202,3 +196,31 @@ def _record(row: dict[str, Any]) -> ThreadRecord:
         created_at=row["created_at"],
         deleted_at=row["deleted_at"],
     )
+
+
+def hard_delete_thread(thread_id: str, *, owner_user_id: int | None = None) -> bool:
+    """物理删除会话档案(#171):默认限定属主(用户自删);owner_user_id=None
+    为运维/TTL 清理通道。只删 agent_threads 档案行;checkpoint/对话日志/
+    trace 的清理由调用方联动执行,面面俱到才算删干净。"""
+    sql = "DELETE FROM agent_threads WHERE thread_id = %s"
+    params: list[Any] = [thread_id]
+    if owner_user_id is not None:
+        sql += " AND owner_user_id = %s"
+        params.append(owner_user_id)
+    with _conn() as conn:
+        cur = conn.execute(sql, tuple(params))
+        return cur.rowcount > 0
+
+
+def list_expired_soft_deleted(older_than_days: int) -> list[str]:
+    """列出软删且超过保留期的 thread_id(#171 TTL;0 天=关闭,返回空)。"""
+    if older_than_days <= 0:
+        return []
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT thread_id FROM agent_threads "
+            "WHERE status = %s AND deleted_at < now() - (%s || ' days')::interval "
+            "LIMIT 500",
+            (_STATUS_TERMINATED, str(older_than_days)),
+        ).fetchall()
+    return [str(r["thread_id"]) for r in rows]

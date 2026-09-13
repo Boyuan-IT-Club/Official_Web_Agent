@@ -12,6 +12,8 @@ get_checkpointer / threads 建档 —— agent 进程内直连工具函数,不�
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -31,6 +33,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from official_agent.state import config_store, conversation
     from official_agent.state.pg import get_checkpointer
     from official_agent.state.threads import ensure_agent_threads_table
+
     async with get_checkpointer() as saver:
         app.state.checkpointer = saver
         try:
@@ -39,9 +42,64 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             ensure_agent_threads_table()
             conversation.ensure_conversation_table()
             config_store.ensure_config_table()
+            # #171 评审:纯 web 部署也要有审计面(管理员原文读取审计依赖)
+            from official_agent.state.audit import ensure_audit_table
+
+            ensure_audit_table()
         except Exception:  # noqa: BLE001 — PG 未起/配置错 → 降级(fail-open,ADR-0005)
             app.state.checkpointer = None
-        yield
+
+        # #171:会话 TTL 清理 job——软删档案超保留期(连带 checkpoint/对话日志)
+        # 物理清理,每 6h 一轮,fail-open。thread_retention_days=0 时为 no-op:
+        # 保留天数是 #57 数据留存 ADR 的拍板项,ADR 落地前不启用。
+        ttl_stop = asyncio.Event()
+
+        async def _session_ttl_loop() -> None:
+            from official_agent.config import get_effective_settings
+            from official_agent.state.conversation import delete_thread_conversations
+            from official_agent.state.pg import purge_thread_checkpoints
+            from official_agent.state.threads import (
+                hard_delete_thread,
+                list_expired_soft_deleted,
+            )
+
+            while not ttl_stop.is_set():
+                with contextlib.suppress(Exception):
+                    days = int(get_effective_settings().thread_retention_days)
+                    expired = await asyncio.to_thread(list_expired_soft_deleted, days)
+                    for tid in expired:
+                        with contextlib.suppress(Exception):
+                            await asyncio.to_thread(purge_thread_checkpoints, tid)
+                            await asyncio.to_thread(delete_thread_conversations, tid)
+                            await asyncio.to_thread(hard_delete_thread, tid, owner_user_id=None)
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(ttl_stop.wait(), timeout=6 * 3600)
+
+        ttl_task = asyncio.create_task(_session_ttl_loop())
+        # #164:挂起载荷 24h TTL 清理 job(每 6h 一轮,fail-open)
+        purge_stop = asyncio.Event()
+
+        async def _purge_loop() -> None:
+            from official_agent.state.pg import purge_expired_interrupts
+
+            while not purge_stop.is_set():
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(purge_expired_interrupts, max_age_hours=24)
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(purge_stop.wait(), timeout=6 * 3600)
+
+        purge_task = asyncio.create_task(_purge_loop())
+        try:
+            yield
+        finally:
+            ttl_stop.set()
+            ttl_task.cancel()
+            purge_stop.set()
+            purge_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+                await ttl_task
+            with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+                await purge_task
 
 
 def create_app() -> FastAPI:
@@ -72,4 +130,5 @@ def create_app() -> FastAPI:
         """探活(不鉴权)。checkpointer 就绪(PG 连通)才算健康。"""
         ready = getattr(app.state, "checkpointer", None) is not None
         return {"status": "ok" if ready else "degraded"}
+
     return app

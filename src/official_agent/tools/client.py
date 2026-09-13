@@ -53,6 +53,13 @@ class BackendAuthError(BackendError):
     """登录本身失败(凭证错误/账号异常)。重登解决不了,需人工检查配置。"""
 
 
+class BackendUnavailableError(BackendError):
+    """后端不可达/网络故障(#170):与业务错误、凭证错误分型。
+
+    入口层据此区分 503(服务端故障,可重试)与 401(凭证无效,需重登录),
+    不再依赖文案关键词猜类型。"""
+
+
 class _AuthExpired(Exception):
     """内部信号:登录态失效,调用方应重登。不对外暴露。"""
 
@@ -123,7 +130,7 @@ class BackendClient:
             )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             # 用户令牌通道不自动重试(非幂等语义不明确),只映射成可行动文案
-            raise BackendError(
+            raise BackendUnavailableError(
                 f"后端连接失败({type(exc).__name__}),稍后重试;持续失败请检查后端状态"
             ) from None
         try:
@@ -253,7 +260,7 @@ class BackendClient:
                     continue
                 break
             return _interpret(resp)
-        raise BackendError(
+        raise BackendUnavailableError(
             f"后端连接失败({type(last_exc).__name__}: {last_exc}),"
             + ("已自动重试仍失败" if attempts > 1 else "写操作不自动重试,确认后端状态后可重发")
         ) from last_exc

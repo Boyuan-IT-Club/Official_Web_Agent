@@ -30,9 +30,7 @@ def _confirm_or_fail(summary: str) -> bool:
     except ConfirmationRequired:
         raise
     except RuntimeError as exc:  # 非图上下文:interrupt 无法挂起
-        raise ConfirmationRequired(
-            "此操作需要人工确认,但当前不在图确认流程内。"
-        ) from exc
+        raise ConfirmationRequired("此操作需要人工确认,但当前不在图确认流程内。") from exc
     return decision == APPROVE
 
 
@@ -51,9 +49,7 @@ async def assign_interview(
     场次已满返回业务码 3604 的可行动文案。同意改期后的重排也走本工具。
     对应 POST /api/interview/admin/preferences/{resumeId}/assign。⚠ 写操作。
     """
-    if not _confirm_or_fail(
-        f"将把简历 #{resume_id} 分配到目标场次 #{target_session_id},请确认"
-    ):
+    if not _confirm_or_fail(f"将把简历 #{resume_id} 分配到目标场次 #{target_session_id},请确认"):
         return {"cancelled": True, "message": "操作已取消:用户拒绝,未执行"}
     _require_token(confirmation_token)
     raise NotImplementedError("TOOL-04")
@@ -72,9 +68,7 @@ async def handle_reschedule(
         # 直接拒——标签必须与将执行的动作一致,否则用户可能误批。
         return {"cancelled": True, "message": f"无效的改期处理状态:{status}(仅 1 同意/2 拒绝)"}
     action = "同意" if status == 1 else "拒绝"
-    if not _confirm_or_fail(
-        f"将{action}改期申请 #{request_id}(备注:{admin_note or '无'}),请确认"
-    ):
+    if not _confirm_or_fail(f"将{action}改期申请 #{request_id}(备注:{admin_note or '无'}),请确认"):
         return {"cancelled": True, "message": "操作已取消:用户拒绝,未执行"}
     _require_token(confirmation_token)
     raise NotImplementedError("TOOL-04")

@@ -54,9 +54,7 @@ def _content_text(message: BaseMessage) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return " ".join(
-            part.get("text", "") for part in content if isinstance(part, dict)
-        )
+        return " ".join(part.get("text", "") for part in content if isinstance(part, dict))
     return str(content)
 
 
@@ -67,9 +65,7 @@ def count_tokens(messages: Sequence[BaseMessage]) -> int:
         enc = _encoding()
     except Exception:  # noqa: BLE001 — 无网络/编码缺失时保守降级
         return sum(max(1, len(_content_text(m))) for m in messages)
-    return sum(
-        len(enc.encode(_content_text(m), disallowed_special=())) for m in messages
-    )
+    return sum(len(enc.encode(_content_text(m), disallowed_special=())) for m in messages)
 
 
 def safe_split(
@@ -125,9 +121,7 @@ async def maybe_compress(
     )
 
 
-async def summarize_messages(
-    older: Sequence[BaseMessage], query: str, model: Any
-) -> HumanMessage:
+async def summarize_messages(older: Sequence[BaseMessage], query: str, model: Any) -> HumanMessage:
     """生成摘要消息:感知当前查询意图(ContextAware)+ [T#] 引用标记。
 
     引用编号按传入顺序 T1..Tn 对应 older 消息,便于排查时回溯原文
@@ -136,8 +130,7 @@ async def summarize_messages(
     HumanMessage,作为压缩后序列首条注入。
     """
     numbered = "\n".join(
-        f"[T{i}] {type(m).__name__}: {_content_text(m)}"
-        for i, m in enumerate(older, start=1)
+        f"[T{i}] {type(m).__name__}: {_content_text(m)}" for i, m in enumerate(older, start=1)
     )
     prompt = load_prompt("compression.md").format(query=query or "未提供", numbered=numbered)
     response = await model.ainvoke(prompt)

@@ -96,9 +96,7 @@ def test_map_role_priority_and_unknown() -> None:
 async def test_resolve_cli_full_chain_registers_identity_client() -> None:
     """CLI 模拟身份:专用 client 登录 → claims 解析 → 注册为共享单例。"""
     route = respx.post(LOGIN).mock(
-        side_effect=lambda request: login_ok(
-            {**ADMIN_CLAIMS, "roleNames": ["管理员"], "userId": 7}
-        )
+        side_effect=lambda request: login_ok({**ADMIN_CLAIMS, "roleNames": ["管理员"], "userId": 7})
     )
     install_shared_client()
     try:
