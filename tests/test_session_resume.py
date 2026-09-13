@@ -61,6 +61,20 @@ def _reset_registry():
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr("official_agent.state.pg.get_checkpointer", _fake_checkpointer)
     monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: object())
+    # lifespan 的 ensure_*(建表/审计)会打真 PG;无 PG 时抛错 → catch 把
+    # app.state.checkpointer 置 None → 恢复路径 503,stub 形同虚设(CI 实测
+    # 无 PG 必挂)。本组用例只验会话路由逻辑,建表失败与否无关,一律 no-op。
+    monkeypatch.setattr(
+        "official_agent.state.threads.ensure_agent_threads_table", lambda: None
+    )
+    monkeypatch.setattr(
+        "official_agent.state.conversation.ensure_conversation_table", lambda: None
+    )
+    monkeypatch.setattr("official_agent.state.config_store.ensure_config_table", lambda: None)
+    monkeypatch.setattr("official_agent.state.audit.ensure_audit_table", lambda: None)
+    monkeypatch.setattr(
+        "official_agent.state.pg.purge_expired_interrupts", lambda **_k: 0
+    )
     with TestClient(create_app()) as c:
         yield c
 
