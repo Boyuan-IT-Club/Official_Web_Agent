@@ -128,6 +128,11 @@ services:
 
   # ── 协同评价服务(#125 面试评价工作台;Hocuspocus,3100)──
   collab:
+    # 本地构建入口(collab-server 自带自包含 Dockerfile:node:20-alpine,
+    # 不依赖任何预构建产物)。image 必须保留:compose 有 build+image 时
+    # 构建结果会打成该 tag,只写 build 会让镜像名漂成 official-agent-local-collab。
+    build:
+      context: ../../Official_Web_Backend/collab-server
     image: official-collab:local
     environment:
       COLLAB_PORT: "3100"
