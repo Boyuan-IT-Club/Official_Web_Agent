@@ -4,10 +4,14 @@
 但 `create_app()` 走到两条会真连 PG 的路径,本机有没有 PG 会改变断言结果
 (无 PG → 503 / 有 PG → 200),即同一提交在 CI 与开发机结论不同:
 
-1. lifespan 自举与启动恢复——建表(`ensure_*`)、评测 job 表自举
-   (`ensure_evaluation_job_ready`)、残留 job 全量扫回
-   (`get_runner().recover_stale_on_startup`)。无 PG 时抛错 → lifespan 的
-   `except` 把 `app.state.checkpointer` 置 None → 恢复路径按 #194 P1 返 503。
+1. lifespan 自举与启动恢复,按失败语义分两类:
+   a. 第一个 try(`app.py:40-55`)里的 `ensure_*` 系列建表 + 评测 job 表自举
+      (`ensure_evaluation_job_ready`)。无 PG 时抛错 → 该 `except` 把
+      `app.state.checkpointer` 置 None → 恢复路径按 #194 P1 返 503。
+   b. 其后**独立**的 fail-open try(`app.py:60-67`)里的残留 job 全量扫回
+      (`get_runner().recover_stale_on_startup`),以及每 6h 一轮的挂起载荷
+      TTL 清理(`purge_expired_interrupts`,`app.py:99-106`)。失败只记
+      warning(suppress),**不**置 `checkpointer=None`。
 2. 路由侧 fail-closed 写审计——`/admin/evaluation/{adopt,reject}` 先落
    `audit.write_audit` 再改卡态,审计失败按 ADR-0006 返 503「未执行」;
    无 PG 时管理端 200/502 断言全被顶成 503。
