@@ -131,13 +131,24 @@ async def finalize_hard(state: EvaluationState) -> dict:
 
 
 def _evidence_in(evidence: str, source: str) -> bool:
-    """证据逐字性:归一空白后 evidence 必须是原文子串(B1 评审 P1-2)。"""
+    """证据逐字性:归一空白后 evidence 是原文子串,或与原文的匹配块覆盖
+    ≥85%(B8 实测:模型忠实引述时偶有一字压缩——「大一起接触」→「大一接触」
+    ——近似引述放行;编造证据的公共块极短,仍拒绝)。"""
+    from difflib import SequenceMatcher
 
     def norm(s: str) -> str:
         return "".join(s.split())
 
-    ev = norm(evidence)
-    return bool(ev) and ev in norm(source)
+    ev, src = norm(evidence), norm(source)
+    if not ev:
+        return False
+    if ev in src:
+        return True
+    # 串中掉一字会把「最长公共块」劈成两半,改用匹配块总覆盖:
+    # 证据字符 ≥85% 能按序在原文中找到(含掉字/标点差异)即算忠实引述
+    matcher = SequenceMatcher(None, ev, src, autojunk=False)
+    covered = sum(b.size for b in matcher.get_matching_blocks())
+    return covered >= max(8, int(len(ev) * 0.85))
 
 
 async def llm_score(state: EvaluationState, config: RunnableConfig | None = None) -> dict:
@@ -164,45 +175,71 @@ async def llm_score(state: EvaluationState, config: RunnableConfig | None = None
             + "\n\nfield_key 取值必须是:"
             + ",".join(f["field_key"] for f in state["fields"])
         )
-        resp = await model.ainvoke(
-            [HumanMessage(content=prompt_text)],
-            config=config,
-        )
-        llm_usage = None
-        um = getattr(resp, "usage_metadata", None)
-        if um:
-            from official_agent.state.conversation import extract_usage
-
-            llm_usage = extract_usage(um)
-        raw = resp.content
-        if isinstance(raw, list):  # 思考模型可能回块列表:只拼 text 块
-            raw = "".join(b.get("text", "") for b in raw if isinstance(b, dict))
-        content = raw if isinstance(raw, str) else str(raw)
-        result = ScorecardOutput.model_validate_json(_extract_json(content))
-        # strict 后置校验(评审 P1):模型漏维/造维、证据非原文都属静默降级,
-        # 在这里翻进 error 态走 B2 重试,绝不落成"看起来完整"的卡
+        # 结构化输出 + strict 后置校验(评审 P1):漏维/造维/证据非原文
+        # 都不许落卡。模型偶发在 attitude 多塞键(reason_note 等)或拼接引述
+        # → 子图内一次纠正重试(把校验错误回灌,并点名不得新增字段);
+        # 两次仍不合规才翻 error 态走 B2 重试
         expected = [f["field_key"] for f in state["fields"]]
-        got = [d.field_key for d in result.dimensions]
-        if sorted(got) != sorted(expected):
-            raise ValueError(
-                f"维度集不完整:缺 {sorted(set(expected) - set(got))},"
-                f"多 {sorted(set(got) - set(expected))}"
-            )
         sources = {f["field_key"]: f.get("value", "") for f in state["fields"]}
-        for d in result.dimensions:
-            if not _evidence_in(d.evidence, sources.get(d.field_key, "")):
-                raise ValueError(f"证据非原文(field_key={d.field_key}):{d.evidence[:40]!r}")
-        # #162 硬校验(#157 决议 §4):态度与分数的契约,违例翻 error 重试
-        if result.attitude.verdict == "bad_faith" and any(d.score != 0 for d in result.dimensions):
-            raise ValueError("bad_faith 必须全维 0(模型给了非 0 分)")
-        if result.attitude.verdict == "perfunctory" and any(
-            d.score > 30 for d in result.dimensions
-        ):
-            raise ValueError("perfunctory 必须全维 ≤30(模型给了高分)")
-        if result.attitude.verdict == "bad_faith" and not any(
-            fk in result.attitude.reason for fk in expected
-        ):
-            raise ValueError("bad_faith reason 必须点名具体 field_key(#157 决议 §4)")
+        result: ScorecardOutput | None = None
+        last_err: ValueError | None = None
+        llm_usage = None
+        corrective = ""
+        for _attempt in range(2):
+            resp = await model.ainvoke(
+                [HumanMessage(content=prompt_text + corrective)],
+                config=config,
+            )
+            um = getattr(resp, "usage_metadata", None)
+            if um:
+                from official_agent.state.conversation import extract_usage
+
+                llm_usage = extract_usage(um)
+            raw = resp.content
+            if isinstance(raw, list):  # 思考模型可能回块列表:只拼 text 块
+                raw = "".join(b.get("text", "") for b in raw if isinstance(b, dict))
+            content = raw if isinstance(raw, str) else str(raw)
+            try:
+                result = ScorecardOutput.model_validate_json(_extract_json(content))
+                got = [d.field_key for d in result.dimensions]
+                if sorted(got) != sorted(expected):
+                    raise ValueError(
+                        f"维度集不完整:缺 {sorted(set(expected) - set(got))},"
+                        f"多 {sorted(set(got) - set(expected))}"
+                    )
+                for d in result.dimensions:
+                    if not _evidence_in(d.evidence, sources.get(d.field_key, "")):
+                        raise ValueError(
+                            f"证据非原文(field_key={d.field_key}):{d.evidence[:40]!r}"
+                        )
+                # #162 硬校验(#157 决议 §4):态度与分数的契约,违例同样回灌重试
+                if result.attitude.verdict == "bad_faith" and any(
+                    d.score != 0 for d in result.dimensions
+                ):
+                    raise ValueError("bad_faith 必须全维 0(模型给了非 0 分)")
+                if result.attitude.verdict == "perfunctory" and any(
+                    d.score > 30 for d in result.dimensions
+                ):
+                    raise ValueError("perfunctory 必须全维 ≤30(模型给了高分)")
+                if result.attitude.verdict == "bad_faith" and not any(
+                    fk in result.attitude.reason for fk in expected
+                ):
+                    raise ValueError("bad_faith reason 必须点名具体 field_key(#157 决议 §4)")
+            except ValueError as ve:  # 含 pydantic ValidationError(子类)
+                last_err = ve
+                result = None
+                corrective = (
+                    f"\n\n【纠正】你上一次的输出不合规,校验器报错如下:\n{ve}\n"
+                    "请重新输出完整 JSON,只包含 schema 声明的字段:\n"
+                    "- attitude 只能有 verdict 与 reason 两个键,不要新增任何其他键;\n"
+                    "- evidence 必须逐字截取自该维原文(可截取,不可改写);\n"
+                    "- dimensions 必须覆盖全部 field_key。"
+                )
+            else:
+                last_err = None
+                break
+        if result is None or last_err is not None:
+            raise ValueError(f"两次输出均不合规:{last_err}")
         scores = {d.field_key: d.score for d in result.dimensions}
         card_total_zero = bool(scores) and all(s == 0 for s in scores.values())
         card = {

@@ -283,3 +283,41 @@ async def test_correlation_id_lands_in_root_metadata() -> None:
             _FIELDS, resume_id=12, cycle_id=2026, correlation_id="corr-abc"
         )
     assert seen["metadata"].get("correlation_id") == "corr-abc"
+
+
+# ── 移植自 rag-kb:近似引述放行 + 子图内纠正重试(#鲁棒性) ──
+
+
+def test_evidence_near_quote_passes() -> None:
+    """一字压缩的忠实引述放行(子串失败的近似引述仍算原文)。"""
+    source = "大一起接触 Linux,后来一直在用。"
+    assert ev._evidence_in("大一接触 Linux", source) is True
+    # 编造的长证据公共块短,仍拒
+    assert ev._evidence_in("我获得过三段 ACM 区域赛金牌", source) is False
+
+
+@pytest.mark.asyncio
+async def test_extra_key_triggers_corrective_retry() -> None:
+    """attitude 多塞键 → 第一次被 extra=forbid 拒,纠正重试后修正并落卡。"""
+    bad = (
+        '{"dimensions": ['
+        '{"field_key": "intro", "score": 80, "rationale": "具体", "evidence": "做过两个 Web 项目"},'
+        '{"field_key": "reason", "score": 40, "rationale": "偏短", "evidence": "认同社团氛围"}],'
+        '"attitude": {"verdict": "sincere", "reason": "认真", "reason_note": ""}}'
+    )
+    calls: list[str] = []
+
+    class _M:
+        async def ainvoke(self, messages, config=None):
+            calls.append(messages[0].content)
+            return _FakeMsg(bad if len(calls) == 1 else _GOOD_JSON)
+
+    with (
+        patch.object(ev, "build_model", lambda *a, **k: _M()),
+        patch.object(ev, "get_effective_settings", _settings),
+    ):
+        card = await ev.run_evaluation(_FIELDS, resume_id=13, cycle_id=2026)
+    assert len(calls) == 2
+    assert "不要新增任何其他键" in calls[1]
+    assert card["attitude"]["verdict"] == "sincere"
+    assert "reason_note" not in card["attitude"]

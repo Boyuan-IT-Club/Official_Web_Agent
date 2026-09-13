@@ -26,6 +26,48 @@ class NullSearchProvider:
         return []
 
 
+class DuckDuckGoProvider:
+    """DDG 搜索(web_search 实现①,检查点⑤:#131 奖项现查)。
+
+    - `ddgs` 是**可选依赖**(不在 pyproject):未安装即降级「不可考」,
+      不让奖项线成为新的启动/部署阻塞点
+    - 任何失败(不可达/限流/解析/超时)都记 warning 并返回 []——
+      奖项线自动降级「不可考」,绝不阻塞任务、绝不编含金量
+    - 同步 DDGS 放线程跑(asyncio.to_thread),超时 10s:低频场景
+      (每奖项一查)可接受
+    """
+
+    def __init__(self, max_results: int = 5, timeout: int = 10) -> None:
+        self._max_results = max_results
+        self._timeout = timeout
+
+    async def search(self, query: str) -> list[dict[str, Any]]:
+        import asyncio
+
+        return await asyncio.to_thread(self._search_sync, query)
+
+    def _search_sync(self, query: str) -> list[dict[str, Any]]:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        try:
+            from ddgs import DDGS
+
+            with DDGS(timeout=self._timeout) as ddgs_client:
+                rows = ddgs_client.text(query, max_results=self._max_results)
+            return [
+                {
+                    "title": r.get("title") or "",
+                    "snippet": r.get("body") or "",
+                    "url": r.get("href") or "",
+                }
+                for r in rows
+            ]
+        except Exception as exc:  # noqa: BLE001 — 不可达/限流/解析失败都降级不可考
+            logger.warning("DDG 搜索失败,奖项降级为不可考:%s(%s)", query, exc)
+            return []
+
+
 def extract_awards(fields: list[FieldText]) -> list[str]:
     """从简历字段抽奖项条目(字段键/名含「奖」;值按行拆,去掉空行)。"""
     awards: list[str] = []
