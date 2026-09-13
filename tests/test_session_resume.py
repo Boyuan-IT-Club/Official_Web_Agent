@@ -50,9 +50,11 @@ def _thread(tid: str, owner: int = 7, status: str = "active") -> ThreadRecord:
 def _reset_registry():
     routes._sessions.clear()
     routes._sessions_last_access.clear()
+    routes._deleting_sessions.clear()
     yield
     routes._sessions.clear()
     routes._sessions_last_access.clear()
+    routes._deleting_sessions.clear()
 
 
 @pytest.fixture

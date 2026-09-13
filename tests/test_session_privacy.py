@@ -27,9 +27,11 @@ async def _fake_checkpointer() -> AsyncIterator[None]:
 def _reset_registry():
     routes._sessions.clear()
     routes._sessions_last_access.clear()
+    routes._deleting_sessions.clear()
     yield
     routes._sessions.clear()
     routes._sessions_last_access.clear()
+    routes._deleting_sessions.clear()
 
 
 @pytest.fixture
@@ -160,6 +162,68 @@ def test_delete_session_rejects_non_owner(client: TestClient, monkeypatch) -> No
         headers={"Authorization": "Bearer tok"},
     )
     assert resp.status_code == 404
+
+
+def test_chat_rejected_while_session_deleting(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#194 复审:删除进行中(已登记 _deleting_sessions)→ 续聊必须 409。
+
+    回归防护:旧实现只查 turn_lock 且会话不在内存时查不到——重启/LRU 淘汰后
+    携原 session_id 续聊会重建新对象+新锁,与磁盘清理并发读写同一 checkpoint
+    thread(复活已删数据/读到半删状态)。"""
+    async def _resolve(*_a: object, **_k: object) -> dict:
+        return _identity(7)
+
+    monkeypatch.setattr(routes, "resolve", _resolve)
+    # 会话不在内存(模拟重启后),但删除端已登记 → 必须拒绝,而非走恢复路径
+    routes._deleting_sessions.add("web:u7:inflight01")
+
+    resp = client.post(
+        "/api/agent/chat",
+        json={"message": "还要问一句", "session_id": "web:u7:inflight01"},
+        headers={"Authorization": "Bearer tok"},
+    )
+    assert resp.status_code == 409
+    assert "删除" in resp.json()["detail"]
+
+
+def test_delete_holds_registration_then_releases_on_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#194 复审:删除清理进行中该会话一直登记(续聊被 409 挡住),失败后撤
+    登记(可重试)。回归防护:仅查 turn_lock 的旧实现看不到磁盘清理窗口。"""
+    async def _resolve(*_a: object, **_k: object) -> dict:
+        return _identity(7)
+
+    monkeypatch.setattr(routes, "resolve", _resolve)
+    import official_agent.state.threads as thread_store_mod
+
+    rec = type("Rec", (), {"thread_id": "web:u7:fail01", "owner_user_id": 7, "status": "active"})()
+    monkeypatch.setattr(
+        thread_store_mod,
+        "resolve_thread",
+        lambda tid, uid: rec if tid == "web:u7:fail01" else None,
+    )
+    import official_agent.state.pg as pg_mod
+
+    # 清理期间观察登记状态:此刻必须已登记(新轮次会被拒),然后抛错触发 finally
+    seen: list[bool] = []
+
+    def _observe_then_boom(_tid: str) -> int:
+        seen.append("web:u7:fail01" in routes._deleting_sessions)
+        raise RuntimeError("PG 抖动")
+
+    monkeypatch.setattr(pg_mod, "purge_thread_checkpoints", _observe_then_boom)
+
+    resp = client.delete(
+        "/api/agent/sessions/web:u7:fail01",
+        headers={"Authorization": "Bearer tok"},
+    )
+    assert resp.status_code == 500
+    assert seen == [True], "清理窗口内该会话必须在删除登记中(check 与清理之间无缝隙)"
+    # 失败后撤登记 → 同一会话可再试(不是永久 409)
+    assert "web:u7:fail01" not in routes._deleting_sessions
 
 
 def test_admin_transcript_read_is_audited(
