@@ -246,13 +246,16 @@ def _search_sync(query_vec: list[float], top_k: int, include_test: bool) -> list
         # 同事务内先自举再查:DDL 可见,且省一次连接建立
         version = ensure_kb_schema(conn, embed_model=model, dim=dim)
         kind_filter = "" if include_test else " AND s.kind = 'normal'"
+        # 排序:主序距离升序;次级键 (chunk_ordinal, source_id) 唯一(=chunk_id),
+        # 消同分抖动——否则同分行的顺序由 PG 计划形态(hnsw index vs seqscan)决定,
+        # 注入式确定性向量让同分成为常态。
         rows = conn.execute(
             f"""
             SELECT s.source_id, s.source_title, c.chunk_text, c.heading_path,
                    1 - (c.embedding <=> %s::vector) AS score
             FROM kb_chunks c JOIN kb_source s USING (source_id)
             WHERE s.enabled AND c.model_version = %s{kind_filter}
-            ORDER BY c.embedding <=> %s::vector
+            ORDER BY c.embedding <=> %s::vector, c.chunk_ordinal, c.source_id
             LIMIT %s
             """,
             (_to_pgvector(query_vec), version, _to_pgvector(query_vec), top_k),

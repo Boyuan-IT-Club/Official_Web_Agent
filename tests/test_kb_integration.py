@@ -2,8 +2,24 @@
 
 运行门槛:环境变量 KB_TEST_DATABASE_URL 指向带 pgvector 的库,缺省整档跳过——
 单测档(test_kb_store.py)不依赖真库,CI 保持纯 mock。
-本地:docker compose -f deploy/docker-compose.local.yml up -d agent-pg 后
-  KB_TEST_DATABASE_URL=postgresql://postgres:agent_dev@localhost:5433/official_agent
+
+⚠️ 本档做破坏性 DDL,必须指向 throwaway 库,绝不可用 agent 服务的库
+(`official_agent`):`test_model_change_bumps_version_and_clears_vectors` 会
+`DELETE FROM kb_chunks` + `ALTER COLUMN embedding TYPE vector(2)`,并改写
+`kb_meta`(model/dim)。打在生产库上会清空向量并把维度降到 2(内容表
+kb_source/kb_faq/kb_doc 存活,故可重嵌恢复,但期间检索全废)。
+护栏在 `_patch_pg`(所有用例的唯一入口,含不走 `kb_env` 的管理面用例):
+库名为 `official_agent` 时整档 skip。
+
+本地用法(docker compose -f deploy/docker-compose.local.yml up -d agent-pg 后):
+  # 建 throwaway 库(不要用 official_agent)
+  psql "postgresql://postgres:agent_dev@localhost:5433/postgres" \\
+    -c "CREATE DATABASE kb_test_tmp TEMPLATE template0;"
+  KB_TEST_DATABASE_URL=postgresql://postgres:agent_dev@localhost:5433/kb_test_tmp \\
+    uv run pytest tests/test_kb_integration.py
+  # 跑完回收
+  psql "postgresql://postgres:agent_dev@localhost:5433/postgres" \\
+    -c "DROP DATABASE IF EXISTS kb_test_tmp WITH (FORCE);"
 """
 
 import os
@@ -21,9 +37,35 @@ from official_agent.kb import store  # noqa: E402
 from official_agent.kb.store import SourceInput  # noqa: E402
 
 DIM = 2
+# agent 服务用的库名(deploy/docker-compose.local.yml)。本档做破坏性 DDL,
+# 指到它上就是毁库(见模块 docstring)。
+_PROD_DB_NAME = "official_agent"
+
+
+def _guard_throwaway_db() -> None:
+    """KB_TEST_DATABASE_URL 指向 agent 服务库时,skip 整档(破坏性 DDL)。
+
+    护栏放在 _patch_pg(所有用例的唯一入口)而非只放 kb_env:
+    test_admin_api_roundtrip_real_pg 直接调 _patch_pg、不走 kb_env,
+    且同样经 ensure_kb_schema 触发清向量 + 维度 ALTER。
+    """
+    import psycopg
+
+    url = os.environ["KB_TEST_DATABASE_URL"]
+    dbname = psycopg.conninfo.conninfo_to_dict(url).get("dbname") or ""
+    if dbname == _PROD_DB_NAME:
+        pytest.skip(
+            f"拒绝在 agent 服务库 {_PROD_DB_NAME!r} 上跑本档:"
+            "test_model_change_bumps_version_and_clears_vectors 会 DELETE kb_chunks "
+            "+ ALTER embedding 到 vector(2) 并改写 kb_meta(见模块 docstring)。"
+            "请改用 throwaway 库,例如:"
+            ' psql ".../postgres" -c "CREATE DATABASE kb_test_tmp TEMPLATE template0;"'
+            " 后设 KB_TEST_DATABASE_URL 指向 kb_test_tmp。"
+        )
 
 
 def _patch_pg(monkeypatch) -> None:
+    _guard_throwaway_db()
     url = os.environ["KB_TEST_DATABASE_URL"]
     s = Settings(
         _env_file=None,
@@ -54,7 +96,7 @@ def _axis_embedder():
 
 @pytest.fixture()
 def kb_env(monkeypatch):
-    _patch_pg(monkeypatch)
+    _patch_pg(monkeypatch)  # 内含生产库护栏(库名 official_agent → skip)
     yield
     # 清理本测试建的数据(按标记前缀)
     import psycopg
