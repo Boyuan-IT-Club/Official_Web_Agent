@@ -23,7 +23,9 @@ def _clear_settings_cache():
 
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def client(monkeypatch: pytest.MonkeyPatch, web_no_real_pg: None) -> TestClient:
+    # web_no_real_pg(tests/conftest.py):lifespan 自举/启动恢复(评测 job 表 +
+    # 残留扫回)不落真 PG——本文件用 mock runner,启动期不得真连库。
     monkeypatch.setattr("official_agent.state.pg.get_checkpointer", _fake_checkpointer)
     with TestClient(create_app()) as c:
         yield c

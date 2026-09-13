@@ -79,7 +79,7 @@ def test_record_pick_and_list(monkeypatch) -> None:
 
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def client(monkeypatch: pytest.MonkeyPatch, web_no_real_pg: None) -> TestClient:
     import contextlib
     from collections.abc import AsyncIterator
 
@@ -87,6 +87,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     async def _fake_checkpointer() -> AsyncIterator[None]:
         yield None
 
+    # web_no_real_pg(tests/conftest.py):lifespan 自举/启动恢复不落真 PG。
     monkeypatch.setattr("official_agent.state.pg.get_checkpointer", _fake_checkpointer)
     with TestClient(create_app()) as c:
         yield c

@@ -53,7 +53,8 @@ def _identity(user_id: int = 7, monitor: bool = False) -> dict:
 
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def client(monkeypatch: pytest.MonkeyPatch, web_no_real_pg: None) -> TestClient:
+    # web_no_real_pg(tests/conftest.py):lifespan 自举/启动恢复不落真 PG。
     monkeypatch.setattr("official_agent.state.pg.get_checkpointer", _fake_checkpointer)
     with TestClient(create_app()) as c:
         yield c
