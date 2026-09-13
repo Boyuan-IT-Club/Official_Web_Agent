@@ -1,0 +1,48 @@
+# LLM-as-judge 数据集(#155/#62):标准 dossier fixture + 题组 → 四维 1-5 分报告。
+# 首版只报告不阻塞(阈值等 AG8 #156 校准);无 LLM 配置 → SKIP。
+
+runner: qbank_judge
+
+fixtures:
+  dossier: |
+    ### C1_背景与动机
+    社团管理系统:解决招新报名与简历筛选效率问题。
+    ### C2_技术选型与权衡
+    依赖清单:redis 客户端、flask 框架、sqlalchemy ORM;放弃了 django(过重)。
+    ### C3_架构与数据流
+    路径清单:README.md src/app.py src/models.py tests/test_app.py
+    ### C4_实现细节拷打
+    src/app.py 中报名接口带限流与参数校验,缓存报名计数。
+    ### C7_边界与失败模式
+    src/models.py 涉及并发报名名额的锁与队列处理。
+  group:
+    entry:
+      category: C1_背景与动机
+      question: "为什么做这个系统?解决的是什么问题?"
+      answer_reference: { strong: s, acceptable: a, weak: w }
+      evidence: { path: "README.md", note: "" }
+      time_minutes: 3
+    chains:
+      - category: C4_实现细节拷打
+        theme: "src/app.py 的报名接口限流设计"
+        layers:
+          - { question: "限流阈值怎么定的?", expected_signal: "给出依据" }
+          - { question: "超限后用户体验如何?", expected_signal: "能描述降级" }
+          - { question: "分布式部署下怎么改?", expected_signal: "能外推" }
+      - category: C7_边界与失败模式
+        theme: "src/models.py 的并发写入边界"
+        layers:
+          - { question: "并发报名同一名额怎么处理?", expected_signal: "锁/队列" }
+          - { question: "数据库挂了报名页表现?", expected_signal: "降级路径" }
+          - { question: "恢复后数据一致性?", expected_signal: "对账思路" }
+    reserves:
+      - category: C6_难点与调试
+        question: "开发中最难的 bug 是什么,怎么排查的?"
+        answer_reference: { strong: s, acceptable: a, weak: w }
+        evidence: { path: "", note: "开放题" }
+        time_minutes: 3
+      - category: C9_变更条件
+        question: "流量 ×10 哪里先坏?"
+        answer_reference: { strong: s, acceptable: a, weak: w }
+        evidence: { path: "src/app.py", note: "" }
+        time_minutes: 3

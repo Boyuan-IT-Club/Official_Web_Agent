@@ -1,0 +1,102 @@
+# RAG KB 召回门禁数据集(R7,#134):确定性评测,低于基线或负例误命中 → 挡合并。
+# #148 统一 runner 格式:顶层 runner 声明执行器。
+#
+# - positive:query 的检索 top3 内必须命中 expect.any_of_sources 之一(标题匹配);
+#   best_rank 用于 MRR。
+# - negative:知识库不含答案的问题;top1 相似度必须低于 negative_max_score
+#   (误命中 = 负例得分 ≥ 阈值)。阈值来自当前语料的实测分布,换 embedding
+#   模型/扩充语料后需重校(uv run python evals/run_evals.py --suite kb_probes
+#   --distribution 看 DISTRIBUTION)。
+#
+# 新增知识条目后:为新内容补 positive 探针;线上 badcase 回流为探针(OBS-06)。
+
+runner: kb_probes
+
+defaults:
+  top_k: 3
+  negative_max_score: 0.55  # 实测分离带:golden min 0.590 / negative max 0.517(bge-m3 语料调校,换模型需重校)
+  min_recall_at_3: 0.95
+  min_mrr: 0.75
+
+probes:
+  # ── 部门 ──
+  - id: dept_overview
+    kind: positive
+    query: 社团有哪些部门?
+    expect: { any_of_sources: ["部门介绍"] }
+  - id: dept_tech
+    kind: positive
+    query: 技术部是做什么的?用什么技术栈?
+    expect: { any_of_sources: ["部门介绍"] }
+  - id: dept_publicity
+    kind: positive
+    query: 宣传部负责什么工作?
+    expect: { any_of_sources: ["部门介绍"] }
+  - id: dept_org
+    kind: positive
+    query: 组织部的职责是什么?
+    expect: { any_of_sources: ["部门介绍"] }
+  # ── 社团概况 ──
+  - id: club_intro
+    kind: positive
+    query: 博远信息技术社是个什么样的社团?
+    expect: { any_of_sources: ["社团介绍"] }
+  - id: club_members
+    kind: positive
+    query: 社团招什么专业的同学?
+    expect: { any_of_sources: ["社团介绍"] }
+  - id: club_activities
+    kind: positive
+    query: 社团平时有什么活动?
+    expect: { any_of_sources: ["社团介绍"] }
+  - id: club_purpose
+    kind: positive
+    query: 社团的宗旨是什么?
+    expect: { any_of_sources: ["社团介绍"] }
+  # ── 招新流程 ──
+  - id: join_flow
+    kind: positive
+    query: 怎么加入社团?招新流程是什么?
+    expect: { any_of_sources: ["招新流程 FAQ"] }
+  - id: join_time
+    kind: positive
+    query: 什么时候可以报名招新?
+    expect: { any_of_sources: ["招新流程 FAQ"] }
+  - id: join_assessment
+    kind: positive
+    query: 技术部招新要写代码吗?
+    expect: { any_of_sources: ["招新流程 FAQ"] }
+  # ── 门槛 ──
+  - id: beginner_friendly
+    kind: positive
+    query: 零基础能加入吗?
+    expect: { any_of_sources: ["常见问题 FAQ", "招新流程 FAQ"] }
+  - id: non_cs_ok
+    kind: positive
+    query: 不是计算机专业可以进技术部吗?
+    expect: { any_of_sources: ["常见问题 FAQ", "部门介绍"] }
+  # ── 面试 ──
+  - id: interview_format
+    kind: positive
+    query: 面试是什么形式?多长时间?
+    expect: { any_of_sources: ["面试安排 FAQ"] }
+  - id: interview_content
+    kind: positive
+    query: 技术部面试会问什么?
+    expect: { any_of_sources: ["面试安排 FAQ"] }
+  # ── 负例(知识库不含,必须明确拒答/低相似) ──
+  - id: neg_baoyan
+    kind: negative
+    query: 社团有保研加分政策吗?
+  - id: neg_canteen
+    kind: negative
+    query: 学校哪个食堂最好吃?
+  - id: neg_tuition
+    kind: negative
+    query: 学费退费流程是怎样的?
+  - id: neg_dorm
+    kind: negative
+    query: 研究生宿舍怎么分配?
+  - id: neg_weather
+    kind: negative
+    query: 今天上海会下雨吗?
