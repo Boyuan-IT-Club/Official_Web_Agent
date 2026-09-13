@@ -104,6 +104,13 @@ def write_audit(
         from official_agent.observability import current_trace_id
 
         trace_id = current_trace_id()
+    # #164 出口契约:审计 action 写入口过 deep 掩(action 含工具参数,可能
+    # 携带姓名/手机号等;decision_summary/result 同为出边界文本)
+    from official_agent.security.pii import mask_pii, mask_pii_deep
+
+    action = mask_pii_deep(action)
+    decision_summary = mask_pii(decision_summary)
+    result = mask_pii(result)
     with _conn() as conn:
         row = conn.execute(
             """

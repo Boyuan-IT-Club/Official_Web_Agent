@@ -187,13 +187,13 @@ def test_chat_resume_same_session_reuses_thread(
     assert sid2 == sid  # 续传同 thread,不新开
 
 
-def test_chat_injects_identity_every_round_including_resume(
+def test_chat_message_face_carries_no_identity_context(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """M6 #114:身份消息每轮注入(含续传轮,决策 #108 质量优先)。
+    """#166 回归:身份/权限上下文绝不进对话消息面(否则回看泄漏成 user 气泡)。
 
-    新建轮与续传轮的 agent 输入都必须以身份消息开头——续传轮也不例外,
-    保证压缩掉早期上下文后身份边界仍在最近窗口内。
+    新建轮与续传轮的消息输入都必须只有用户原文;身份上下文只经
+    build_system_prompt 进 system prompt。
     """
     from official_agent.web import routes
 
@@ -228,8 +228,12 @@ def test_chat_injects_identity_every_round_including_resume(
 
     assert len(seen_inputs) == 2
     for messages in seen_inputs:
-        assert "当前对话用户是" in messages[0].content, "每轮输入首条必须是身份消息"
-        assert messages[-1].content in ("hi", "hi again")
+        # 消息面只有用户原文;不得含身份/权限/工具契约
+        assert len(messages) == 1, "每轮输入只应有用户原文"
+        assert messages[0].content in ("hi", "hi again")
+        assert "当前对话用户是" not in messages[0].content
+        assert "可访问权限" not in messages[0].content
+        assert "数据查询工具:" not in messages[0].content
 
 
 def test_chat_other_user_same_session_returns_403(
@@ -643,3 +647,114 @@ def test_get_resume_detail_masks_pii_in_payload() -> None:
     assert values[1] == "3101**********1234"
     assert "123456789" not in values[2]
     readonly.set_backend_client(None)
+
+
+# ── 编造守卫与工具契约(#161,GRA-04) ─────────────────────
+
+
+def _install_fake_agent(monkeypatch: pytest.MonkeyPatch, reply: str) -> list:
+    """装一个吐固定回复的假 agent,并捕获 astream 收到的消息。"""
+    from official_agent.web import routes
+
+    seen: list = []
+
+    from langchain_core.messages import AIMessageChunk
+
+    class _ScriptedAgent:
+        async def astream(self, inputs, config: RunnableConfig, **kwargs):
+            seen.extend(inputs["messages"])
+            yield "messages", (AIMessageChunk(content=reply), {})
+            yield "updates", {"agent": {"messages": []}}
+
+        async def aget_state(self, config: RunnableConfig):
+            return None
+
+    monkeypatch.setattr(routes, "resolve", fake_resolve(auth_ok_data()))
+    monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: _ScriptedAgent())
+    return seen
+
+
+def test_chat_toolless_reply_buffered_and_guarded(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GRA-04 原案:unknown 档 tools=[],模型编造「查询结果」→ 不见原 delta,
+    流尾守卫整段改写后一次性下发。"""
+    _install_fake_agent(monkeypatch, "查询结果:您有 3 份简历待筛选。")
+    ident = auth_ok_data(role="unknown", role_names=["访客"])
+    ident["permission_codes"] = []
+    monkeypatch.setattr("official_agent.web.routes.resolve", fake_resolve(ident))
+    resp = client.post(
+        "/api/agent/chat", json={"message": "有几份简历?"}, headers={"Authorization": "Bearer tok"}
+    )
+    assert resp.status_code == 200
+    events = _sse_events(resp)
+    deltas = [e["content"] for e in events if e["type"] == "delta"]
+    assert deltas == [
+        "我没有可用的数据查询权限,无法查询系统数据。"
+        "如需查询简历、面试安排或统计信息,请登录对应系统或联系管理员处理。"
+    ]
+
+
+def test_chat_first_message_is_user_content_only(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#166:首条消息就是用户原文;工具契约在 system(不进消息面)。"""
+    seen = _install_fake_agent(monkeypatch, "好的。")
+    resp = client.post(
+        "/api/agent/chat", json={"message": "在吗"}, headers={"Authorization": "Bearer tok"}
+    )
+    assert resp.status_code == 200
+    first_content = seen[0].content
+    assert first_content == "在吗"
+    assert "数据查询工具:" not in first_content
+
+
+def test_chat_toolless_honest_reply_passes_through(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """toolless 缓冲 + 诚实话术:守卫 clean,缓冲内容原样单条下发。"""
+    _install_fake_agent(monkeypatch, "我没有查询权限,请联系管理员。")
+    ident = auth_ok_data(role="unknown", role_names=["访客"])
+    ident["permission_codes"] = []
+    monkeypatch.setattr("official_agent.web.routes.resolve", fake_resolve(ident))
+    resp = client.post(
+        "/api/agent/chat", json={"message": "在吗"}, headers={"Authorization": "Bearer tok"}
+    )
+    events = _sse_events(resp)
+    deltas = [e["content"] for e in events if e["type"] == "delta"]
+    assert deltas == ["我没有查询权限,请联系管理员。"]
+
+
+def test_guard_rewrite_persists_to_checkpointer(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """守卫回写成功路径:末条 AI 消息被 RemoveMessage+改写文本替换(#161 复审 P2)。"""
+    from langchain_core.messages import AIMessage, AIMessageChunk, RemoveMessage
+
+    from official_agent.web import routes
+
+    seen_messages: list = []
+
+    class _StatefulAgent:
+        async def astream(self, inputs, config: RunnableConfig, **kwargs):
+            yield "messages", (AIMessageChunk(content="查询结果:有 5 份简历。"), {})
+            yield "updates", {"agent": {"messages": []}}
+
+        async def aget_state(self, config: RunnableConfig):
+            class _State:
+                values = {"messages": [AIMessage(content="查询结果:有 5 份简历。", id="ai-1")]}
+
+            return _State()
+
+        async def aupdate_state(self, config: RunnableConfig, update: dict, **kwargs):
+            seen_messages.extend(update["messages"])
+
+    monkeypatch.setattr(routes, "resolve", fake_resolve(auth_ok_data(role="unknown")))
+    monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: _StatefulAgent())
+    resp = client.post(
+        "/api/agent/chat", json={"message": "有几份简历?"}, headers={"Authorization": "Bearer tok"}
+    )
+    assert resp.status_code == 200
+    assert len(seen_messages) == 2
+    assert isinstance(seen_messages[0], RemoveMessage) and seen_messages[0].id == "ai-1"
+    assert "没有可用的数据查询权限" in seen_messages[1].content

@@ -25,9 +25,13 @@ from official_agent.web import routes
 from official_agent.web.app import create_app
 
 
+class _CheckpointerStub:
+    """checkpointer 替身(#194):恢复路径现在要求非 None,测试不能再给 None。"""
+
+
 @contextlib.asynccontextmanager
-async def _fake_checkpointer() -> AsyncIterator[None]:
-    yield None
+async def _fake_checkpointer() -> AsyncIterator[object]:
+    yield _CheckpointerStub()
 
 
 def _thread(tid: str, owner: int = 7, status: str = "active") -> ThreadRecord:
@@ -152,8 +156,12 @@ def test_resume_fail_closed_when_registry_check_errors(
     assert "web:u7:abcd1234" not in routes._sessions, "校验失败不得把新会话顶替建档"
 
 
+def _state_stub(session_id: str) -> routes._SessionState:
+    """_SessionState 替身:淘汰逻辑现在读 turn_lock(#194),不能拿 object() 充数。"""
+    return routes._SessionState(session_id, _identity(), "tok", object())
+
+
 def test_registry_ttls_idle_and_cap(monkeypatch) -> None:
-    """#169:TTL 空闲淘汰 + 容量 LRU 淘汰,只删运行时对象。"""
     import time as _time
 
     from official_agent.config import get_settings
@@ -165,7 +173,7 @@ def test_registry_ttls_idle_and_cap(monkeypatch) -> None:
     now = _time.monotonic()
     for i in range(5):
         sid = f"web:u7:s{i}"
-        routes._sessions[sid] = object()  # 运行时对象替身
+        routes._sessions[sid] = _state_stub(sid)  # 运行时对象替身
         routes._sessions_last_access[sid] = now - (100 if i < 2 else 0)
     routes._evict_sessions_locked(now)
     # s0/s1 空闲超 TTL 被淘汰
@@ -188,13 +196,13 @@ def test_registry_lru_touch_keeps_recent(monkeypatch) -> None:
 
     now = _time.monotonic()
     for sid in ("web:u7:old", "web:u7:new"):
-        routes._sessions[sid] = object()
+        routes._sessions[sid] = _state_stub(sid)
         routes._sessions_last_access[sid] = now
     # 访问 old(移到 LRU 尾)
     routes._sessions.move_to_end("web:u7:old")
     routes._sessions_last_access["web:u7:old"] = now + 1
     # 插入第三条 → 超 2 容量 → LRU 头(new 未被访问)被淘汰
-    routes._sessions["web:u7:third"] = object()
+    routes._sessions["web:u7:third"] = _state_stub("web:u7:third")
     routes._sessions_last_access["web:u7:third"] = now + 2
     routes._evict_sessions_locked(now + 2)
     assert "web:u7:old" in routes._sessions
@@ -447,3 +455,144 @@ def test_auth_backend_down_is_503_not_401(
         "/api/agent/chat", json={"message": "你好"}, headers={"Authorization": "Bearer tok"}
     )
     assert resp.status_code == 401
+
+
+# ── #194 复审 P0/P1 回归 ──
+
+
+def test_evict_skips_inflight_turn(monkeypatch) -> None:
+    """#194 复审 P0:持锁会话不得被 TTL/LRU 淘汰。
+
+    淘汰执行中的运行时会让同一 session_id 的下个请求重建出「新对象 +
+    新锁」,与原对象并发写同一 checkpoint thread。此测试钉住:在途会话
+    既不被 TTL 清掉,也不被容量挤出。
+    """
+    import time as _time
+
+    from official_agent.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "session_registry_max", 1)
+    monkeypatch.setattr(settings, "session_registry_ttl_seconds", 60)
+
+    now = _time.monotonic()
+    busy = _state_stub("web:u7:busy")
+    busy.turn_lock = _HeldLock()  # type: ignore[assignment]
+    routes._sessions["web:u7:busy"] = busy
+    routes._sessions_last_access["web:u7:busy"] = now - 1000  # 早已过 TTL
+
+    routes._evict_sessions_locked(now)
+
+    assert "web:u7:busy" in routes._sessions, "在途会话被淘汰会让两个 agent 并发写同一 thread"
+    assert routes._sessions["web:u7:busy"] is busy
+
+
+def test_evict_skips_inflight_but_still_evicts_idle(monkeypatch) -> None:
+    """#194 复审 P0:在途条目跳过不得阻断其余条目淘汰(容量仍能收敛)。"""
+    import time as _time
+
+    from official_agent.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "session_registry_max", 2)
+    monkeypatch.setattr(settings, "session_registry_ttl_seconds", 3600)
+
+    now = _time.monotonic()
+    busy = _state_stub("web:u7:busy")
+    busy.turn_lock = _HeldLock()  # type: ignore[assignment]
+    routes._sessions["web:u7:busy"] = busy
+    routes._sessions_last_access["web:u7:busy"] = now
+    for sid in ("web:u7:a", "web:u7:b"):
+        routes._sessions[sid] = _state_stub(sid)
+        routes._sessions_last_access[sid] = now
+
+    routes._evict_sessions_locked(now)
+
+    assert "web:u7:busy" in routes._sessions
+    assert len(routes._sessions) <= 2, "空闲条目应被淘汰到容量内"
+
+
+def test_resume_without_checkpointer_is_503(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#194 复审 P1:档案在但 checkpointer 不可用 → 503,不假装续聊成功。
+
+    旧行为返回 is_new=False 并构建无持久化 agent:用户看到「续聊成功」
+    而上下文为空。直接驱动 _get_or_create_session,把 app.state.checkpointer
+    置 None 复现该状态(TestClient 生命周期内改不到 app.state)。
+    """
+    import asyncio as _asyncio
+
+    _install(monkeypatch, thread=_thread("web:u7:abcd1234"))
+    monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: object())
+
+    class _Req:
+        class app:  # noqa: N801 — 复刻 Starlette request.app.state 形状
+            class state:  # noqa: N801
+                checkpointer = None
+
+    async def _run() -> None:
+        await routes._get_or_create_session(
+            _Req(), _identity(), "tok", "web:u7:abcd1234"  # type: ignore[arg-type]
+        )
+
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        _asyncio.run(_run())
+    assert exc.value.status_code == 503
+    assert "web:u7:abcd1234" not in routes._sessions, "不得构建无 checkpointer 的恢复会话"
+
+
+def test_gate_busy_logs_conversation_and_emits_one_error(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#194 复审 P1:闸满必须落 conversation_log,且只发一个 error 事件。
+
+    旧行为在获取闸超时后直接 return,跳过 _log_conversation——资源饱和
+    事件恰好在观测面消失。
+    """
+
+    _install(monkeypatch, thread=None)
+    logged: list[dict] = []
+    monkeypatch.setattr(routes, "_log_conversation", lambda session, **kw: logged.append(kw))
+
+    async def _noop_stream(*_a: object, **_k: object):
+        raise AssertionError("闸满不得进入 astream")
+        yield  # pragma: no cover — 使其成为 async generator
+
+    monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: _FakeAgent(_noop_stream))
+
+    class _Saturated:
+        async def acquire(self) -> None:
+            raise TimeoutError
+
+        def release(self) -> None:  # pragma: no cover — 未获取则不释放
+            raise AssertionError("未获取的闸不得 release")
+
+    monkeypatch.setattr(routes, "_get_model_gate", lambda: _Saturated())
+
+    resp = client.post(
+        "/api/agent/chat",
+        json={"message": "你好"},
+        headers={"Authorization": "Bearer tok"},
+    )
+    assert resp.status_code == 200
+    errors = [e for e in _sse_events(resp) if e.get("type") == "error"]
+    assert len(errors) == 1, "闸满只能发一个 error 事件"
+    assert errors[0]["code"] == "busy"
+    assert len(logged) == 1, "闸满必须落一行 conversation_log(观测收尾点唯一)"
+    assert logged[0]["error_code"] == "busy"
+
+
+class _HeldLock:
+    """已持有的锁替身:locked() 恒 True,acquire/release 不应被调用。"""
+
+    def locked(self) -> bool:
+        return True
+
+
+class _FakeAgent:
+    def __init__(self, stream) -> None:
+        self._stream = stream
+
+    def astream(self, *_a: object, **_k: object):
+        return self._stream()

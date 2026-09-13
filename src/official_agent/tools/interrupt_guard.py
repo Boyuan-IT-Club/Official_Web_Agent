@@ -33,7 +33,10 @@ def require_confirmation(summary: str) -> str:
     NOTE: 脆弱点在 write.py 的 `except RuntimeError`——那是对「interrupt 无法
     挂起」的降级;将来任何人在这加宽 except 吞掉 GraphInterrupt,恢复匹配即坏。
     """
-    decision = interrupt({"summary": summary, "confirm": True})
+    # #164 出口契约:挂起载荷先过 mask_pii(summary 会进 checkpointer 挂起态)
+    from official_agent.security.pii import mask_pii
+
+    decision = interrupt({"summary": mask_pii(summary), "confirm": True})
     if decision not in (APPROVE, REJECT):
         raise ConfirmationRequired(f"非法确认决策:{decision!r}(仅接受 approve/reject)")
     return decision

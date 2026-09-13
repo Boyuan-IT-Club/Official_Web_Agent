@@ -27,13 +27,18 @@ from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import AIMessageChunk, HumanMessage, RemoveMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
-from official_agent.graphs.assistant import build_assistant_agent, identity_message
+from official_agent.graphs.assistant import (
+    _ROLE_TOOL_NAMES,  # noqa: PLC2701 — 同模块装配表(prefix_hash 证据)
+    build_assistant_agent,
+    tool_roster,
+)
 from official_agent.graphs.assistant.compression import (
     maybe_compress,
     summarize_messages,
 )
 from official_agent.graphs.identity import ResolvedIdentity, resolve
 from official_agent.observability import langfuse_callbacks
+from official_agent.security.pii import ReplyPiiMasker
 from official_agent.state.threads import create_thread, new_thread_id, resolve_thread
 from official_agent.tools.client import BackendError, BackendUnavailableError
 from official_agent.tools.readonly import asker_scope
@@ -87,19 +92,37 @@ _SESSION_RESUME_REJECT = "会话不存在、已结束或无权访问"
 
 
 def _evict_sessions_locked(now: float) -> None:
-    """TTL+LRU 淘汰(调用方持 _sessions_lock;#169)。只删运行时,不碰 PG。"""
+    """TTL+LRU 淘汰(调用方持 _sessions_lock;#169)。只删运行时,不碰 PG。
+
+    #194 复审 P0:在途轮次(turn_lock 被持)一律不淘汰。
+    淘汰执行中的 _SessionState 会让同一 session_id 的下一个请求在内存
+    未命中,走 resolve_thread 恢复路径重建出一个**新对象 + 新锁**,两个
+    agent 随后并发写同一 checkpoint thread(旧对象还在 astream 里)。
+    容量不足且全部在途时宁可不淘汰,留待轮末下一次调用再清。
+    """
     from official_agent.config import get_settings
 
     settings = get_settings()
     ttl = max(int(settings.session_registry_ttl_seconds), 1)
     cap = max(int(settings.session_registry_max), 1)
-    expired = [sid for sid, ts in _sessions_last_access.items() if now - ts > ttl]
+
+    def _evictable(sid: str) -> bool:
+        state = _sessions.get(sid)
+        return state is not None and not state.turn_lock.locked()
+
+    expired = [
+        sid for sid, ts in _sessions_last_access.items() if now - ts > ttl and _evictable(sid)
+    ]
     for sid in expired:
         _sessions.pop(sid, None)
         _sessions_last_access.pop(sid, None)
+    # LRU:从最旧开始挑可淘汰项,在途的跳过(不阻断其余淘汰)
     while len(_sessions) > cap:
-        sid, _ = _sessions.popitem(last=False)
-        _sessions_last_access.pop(sid, None)
+        victim = next((sid for sid in _sessions if _evictable(sid)), None)
+        if victim is None:  # 全部在途:本轮放弃淘汰,不制造双锁
+            break
+        _sessions.pop(victim, None)
+        _sessions_last_access.pop(victim, None)
 
 
 async def _authenticate(request: Request, authorization: Annotated[str | None, Header()] = None):
@@ -172,7 +195,15 @@ async def _get_or_create_session(
                 raise HTTPException(status_code=503, detail="会话恢复校验失败,请稍后重试") from exc
             if rec is None:
                 raise HTTPException(status_code=404, detail=_SESSION_RESUME_REJECT)
+            # #194 复审 P1:恢复既有会话必须有 checkpointer——档案存在但
+            # checkpointer 不可用(进程内 PG 故障)时，返回 is_new=False 会让
+            # 用户以为「续聊成功」而实际上下文为空。宁可 503 也不静默降级。
+            # (新建会话仍允许 fail-open 降级:无历史可丢，见下方分支。)
             checkpointer = getattr(request.app.state, "checkpointer", None)
+            if checkpointer is None:
+                raise HTTPException(
+                    status_code=503, detail="会话恢复暂时不可用,请稍后重试"
+                )
             agent = build_assistant_agent(
                 identity, user_token=user_token, checkpointer=checkpointer
             )
@@ -422,13 +453,21 @@ async def _stream_turn(
         config: dict[str, Any] = {
             "configurable": {"thread_id": session.session_id},
             "callbacks": langfuse_callbacks(),
+            # #171/#194 复审 P1:Langfuse trace 尚不能按 thread 删除(#57)。
+            # 至少把稳定 correlation 键写入 trace metadata，为 #57 拍板后的
+            # 按 thread 删除/短 TTL 提供可执行索引；当前删除闭环的残余 trace
+            # 因此有据可查（issue #171 完整验收仍按 partial 计）。
+            "metadata": {
+                "thread_id": session.session_id,
+                "user_id": session.identity.get("user_id"),
+                "channel": session.identity.get("source") or "web",
+            },
         }
 
-        # M6 #114:身份消息每轮注入(含续传轮,决策 #108 质量优先)——
-        # 压缩掉早期上下文后身份边界仍在最近窗口;前缀含首轮身份段,
-        # 同 session 内缓存仍命中(身份块小,重注成本可忽略)。
-        first_input = HumanMessage(content=identity_message(session.identity))
-        messages: list = [first_input, HumanMessage(content=message)]
+        # #166 修复:身份/权限上下文已移入 system prompt(build_system_prompt),
+        # 不再作为首条用户消息注入——checkpointer 不再存内部指令,历史回看
+        # 不会把它渲染成用户气泡。直接以用户原文开轮。
+        messages: list = [HumanMessage(content=message)]
 
         # 契约 #90:首事件 session(带 created 标记新/续传)
         yield sse({"type": "session", "session_id": session.session_id, "created": is_new})
@@ -436,6 +475,10 @@ async def _stream_turn(
         started = time.monotonic()
         tools_called: list[str] = []
         reply_chunks: list[str] = []
+        # GRA-04 #161:无工具档缓冲整段回复,流尾过编造守卫后一次性下发
+        toolless = not tool_roster(session.identity)
+        # #164 出口契约:流式 delta 逐块过 PII 掩码器(尾部缓冲抗跨块)
+        pii_masker = None if toolless else ReplyPiiMasker()
         error_code: str | None = None
         usage_acc: dict[str, int | None] = {  # 跨 model 步累计(#113 MAJOR:ReAct 多步求和)
             "input_tokens": 0,
@@ -444,10 +487,8 @@ async def _stream_turn(
             "cache_miss_tokens": 0,
         }
         _last_usage: dict[str, int | None] | None = None
-        # 只读查询以来问者本人 JWT 执行(ADR-0006「社团官网层问答助手」):本轮
-        # 内 readonly 查询经 _read 走 get_as_user,后端按本人权限判+归因;服务
-        # 账号不再代读在线数据。ContextVar 是任务/协程链本地,经 agent 工具链
-        # 传播(端到端测试 test_react_loop_read_tool_runs_as_asker_under_scope)。
+        # 只读查询以来问者本人 JWT 执行(ADR-0006「社团官网层问答助手」,SEC-02/A
+        # #140):本轮内 readonly 查询经 _read 走 get_as_user,后端按本人权限判+归因
         async with asker_scope(session.user_token):
             # #170:全局活跃模型调用闸(跨用户资源保护)+ 单轮墙钟超时——
             # 卡死的模型/工具调用在配置时限内被取消,turn_lock 随 with 释放。
@@ -465,6 +506,10 @@ async def _stream_turn(
                     )
                     gate_acquired = True
                 except TimeoutError:
+                    # #194 复审 P1:不再提前 return——闸满也是「一轮失败」，
+                    # 必须走下方统一落账路径，否则资源饱和事件从
+                    # conversation_log 消失(收尾点唯一:正常/错误/超时/
+                    # gate-busy/断连五条路径都落一行)。
                     error_code = _ERR_BUSY
                     logger.warning(
                         "chat turn gate busy session=%s turns=%d concurrency=%d",
@@ -472,53 +517,61 @@ async def _stream_turn(
                         session.turns,
                         _settings.model_call_global_concurrency,
                     )
-                    yield sse(_sse_error(_ERR_BUSY))
-                    return
-                async with asyncio.timeout(max(int(_settings.turn_wall_clock_timeout), 1)):
-                    async for mode, payload in session.agent.astream(  # type: ignore[attr-defined]
-                        {"messages": messages}, config=config, stream_mode=["messages", "updates"]
-                    ):
-                        if mode == "messages":
-                            chunk, _meta = payload
-                            if isinstance(chunk, AIMessageChunk) and chunk.content:
-                                # 只收文本块;多模态 content(list)跳过文本拼接(回复摘要仅文本)
-                                text = chunk.content if isinstance(chunk.content, str) else ""
-                                if text:
-                                    reply_chunks.append(text)
-                                    yield sse(
-                                        {"type": "delta", "role": "assistant", "content": text}
-                                    )
-                            # M6 #113 usage:只在 usage 终块累计,同值去重防重复计数。
-                            # 两种形状二选一(#115 实测 langchain-openai 1.x 流式 raw
-                            # token_usage 已消失,只剩 usage_metadata;DeepSeek 原始形状
-                            # 保留兼容)。stream_options 在 _build_model(chat 模型)开启。
-                            um = getattr(chunk, "usage_metadata", None)
-                            raw_usage = (chunk.response_metadata or {}).get("token_usage")
-                            usage_payload = raw_usage if raw_usage else um
-                            if um is not None and usage_payload:
-                                extracted = extract_usage(usage_payload)
-                                if extracted != _last_usage:  # 同值跳过(跨 chunk 累计值重复)
-                                    _last_usage = extracted
-                                    for k in usage_acc:
-                                        v = extracted.get(k)
-                                        cur = usage_acc.get(k) or 0
-                                        if v is not None:
-                                            usage_acc[k] = cur + v
-                        elif mode == "updates":
-                            for _ns, node_update in payload.items():
-                                if isinstance(node_update, dict):
-                                    for m in node_update.get("messages") or []:
-                                        # 工具调用状态(契约 #90:tool 事件,role=tool)
-                                        if getattr(m, "tool_calls", None):
-                                            for tc in m.tool_calls:
-                                                tools_called.append(tc.get("name") or "")
+                else:
+                    async with asyncio.timeout(max(int(_settings.turn_wall_clock_timeout), 1)):
+                        async for mode, payload in session.agent.astream(  # type: ignore[attr-defined]
+                            {"messages": messages},
+                            config=config,
+                            stream_mode=["messages", "updates"],
+                        ):
+                            if mode == "messages":
+                                chunk, _meta = payload
+                                if isinstance(chunk, AIMessageChunk) and chunk.content:
+                                    # 只收文本块;多模态 content(list)跳过文本拼接(回复摘要仅文本)
+                                    text = chunk.content if isinstance(chunk.content, str) else ""
+                                    if text:
+                                        reply_chunks.append(text)
+                                        if pii_masker:
+                                            out = pii_masker.feed(text)
+                                            if out:
                                                 yield sse(
                                                     {
-                                                        "type": "tool",
-                                                        "role": "tool",
-                                                        "name": tc.get("name"),
+                                                        "type": "delta",
+                                                        "role": "assistant",
+                                                        "content": out,
                                                     }
                                                 )
+                                # M6 #113 usage:只在 usage 终块累计,同值去重防重复计数。
+                                # 两种形状二选一(#115 实测 langchain-openai 1.x 流式 raw
+                                # token_usage 已消失,只剩 usage_metadata;DeepSeek 原始形状
+                                # 保留兼容)。raw 优先(prompt_cache 字段只在原始,#164)。
+                                um = getattr(chunk, "usage_metadata", None)
+                                raw_usage = (chunk.response_metadata or {}).get("token_usage")
+                                usage_payload = raw_usage if raw_usage else um
+                                if um is not None and usage_payload:
+                                    extracted = extract_usage(usage_payload)
+                                    if extracted != _last_usage:  # 同值跳过(跨 chunk 累计值重复)
+                                        _last_usage = extracted
+                                        for k in usage_acc:
+                                            v = extracted.get(k)
+                                            cur = usage_acc.get(k) or 0
+                                            if v is not None:
+                                                usage_acc[k] = cur + v
+                            elif mode == "updates":
+                                for _ns, node_update in payload.items():
+                                    if isinstance(node_update, dict):
+                                        for m in node_update.get("messages") or []:
+                                            # 工具调用状态(契约 #90:tool 事件,role=tool)
+                                            if getattr(m, "tool_calls", None):
+                                                for tc in m.tool_calls:
+                                                    tools_called.append(tc.get("name") or "")
+                                                    yield sse(
+                                                        {
+                                                            "type": "tool",
+                                                            "role": "tool",
+                                                            "name": tc.get("name"),
+                                                        }
+                                                    )
             except asyncio.CancelledError:
                 # 客户端断连(CancelledError 非 Exception):中止轮次也要留痕
                 # (partial reply/已调工具不丢失),error_code 记断连中止。
@@ -548,7 +601,40 @@ async def _stream_turn(
         # 单一写入路径:正常(error_code None)/错误/断连三态合一,落一行。
         # M6 #113 命中证据:缓存前缀稳定性 hash(system prompt + 角色工具名)。
         # 同 role 的会话前缀应逐字节稳定;hash 变化 = 前缀失效(命中率不可信)。
-        from official_agent.graphs.assistant import _ROLE_TOOL_NAMES, load_system_prompt
+        # #166 后实际 system = 静态正文 + 身份段 + 工具契约(随角色变);
+        # hash 必须基于真实 system,否则"缓存命中证据"失真。同角色会话内
+        # 前缀稳定(身份块同 session 不变),仍可作命中率观察。
+        from official_agent.graphs.assistant import build_system_prompt
+
+        # GRA-04 #161:编造守卫在一切持久化之前——直播(缓冲 delta)、
+        # conversation_log、checkpointer(回看/下轮上下文)三面同用改写文本。
+        # 压缩(_compress_if_needed 会 update_state 重写历史)必须排在守卫
+        # 回写之后,否则会把编造原文一并压进摘要。
+        if toolless and error_code is None:
+            from official_agent.security.fabrication_guard import guard_empty_tools_reply
+            from official_agent.security.pii import mask_pii_output
+
+            final_reply, verdict = guard_empty_tools_reply("".join(reply_chunks))
+            # #164:toolless 回复出口同过 PII 掩(与 cli 对称;掩后文本进回写)
+            final_reply, _pii_trace = mask_pii_output(final_reply)
+            if verdict != "clean":
+                logging.getLogger(__name__).warning(
+                    "guard_event guard_name=%s verdict=%s tool=<(empty)>",
+                    "fabrication_empty_tools",
+                    verdict,
+                )
+                reply_chunks = [final_reply]
+                await _rewrite_last_ai_message(session.agent, config, final_reply)
+            if final_reply:
+                yield sse({"type": "delta", "role": "assistant", "content": final_reply})
+
+        # #164 出口契约(出口 5):回复出口 PII 守卫——全部会话适用。流式
+        # delta 经 ReplyPiiMasker 逐块掩(尾部缓冲抗跨块);工具侧 deep 掩为
+        # 主,此处为输出面兜底;命中即 trace(guard_event)。
+        if pii_masker:
+            tail = pii_masker.finish()
+            if tail:
+                yield sse({"type": "delta", "role": "assistant", "content": tail})
 
         # M6 #114:轮末按需压缩(先压缩后落行,同一行携带 compress_event)。
         # 在 done 事件前执行:失败 fail-open 返回 None,不阻断 done。
@@ -556,10 +642,9 @@ async def _stream_turn(
         compress_event = None
         if error_code is None:
             compress_event = await _compress_if_needed(session, config, message)
-
         role = session.identity.get("role") or "unknown"
         tool_names = list(_ROLE_TOOL_NAMES.get(role, ()))
-        p_hash = prefix_hash(load_system_prompt(), tool_names)
+        p_hash = prefix_hash(build_system_prompt(session.identity), tool_names)
         if any(usage_acc.values()):
             usage = usage_acc
         else:
@@ -588,6 +673,32 @@ async def _stream_turn(
             yield sse(_sse_error(error_code))
     finally:
         session.turn_lock.release()
+
+
+async def _rewrite_last_ai_message(agent: Any, config: dict, final_reply: str) -> None:
+    """编造守卫回写:checkpointer 里最后一条 AI 消息替换为改写文本(#161)。
+
+    覆盖三条持久化面的 checkpointer 一支:管理端/用户回看不再返回编造原文,
+    下一轮模型上下文也不再反向强化 GRA-04。无 checkpointer(纯内存)时
+    get_state 无消息,自然跳过;任何失败 fail-open 只告警(ADR-0005)。
+    """
+    import logging
+
+    from langchain_core.messages import AIMessage, RemoveMessage
+
+    try:
+        state = await agent.aget_state(config)
+        msgs = (state.values or {}).get("messages") or []
+        last = msgs[-1] if msgs else None
+        if last is None or not getattr(last, "content", ""):
+            return
+        if not getattr(last, "id", None):
+            return  # RemoveMessage 按 id 匹配,空 id 会只增不删(编造原文留存)
+        await agent.aupdate_state(
+            config, {"messages": [RemoveMessage(id=last.id), AIMessage(content=final_reply)]}
+        )
+    except Exception:  # noqa: BLE001 — 回写失败不阻断 done
+        logging.getLogger(__name__).warning("编造守卫回写 checkpointer 失败(已忽略)", exc_info=True)
 
 
 def _log_conversation(

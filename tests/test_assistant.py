@@ -305,3 +305,55 @@ def test_build_model_openai_compatible_missing_config_fails() -> None:
     )
     with pytest.raises(ValueError, match="LLM_BASE_URL"):
         build_model(settings)
+
+
+# ── 身份/工具契约进 system prompt(#166 修复)──────
+
+
+def test_tool_contract_unknown_forbids_claims() -> None:
+    """空工具档(unknown):明令不得声称查询——编造守卫第一层。"""
+    from official_agent.graphs.assistant import tool_contract
+
+    contract = tool_contract(identity_of("unknown"))
+    assert "没有可用的数据查询工具" in contract
+    assert "绝不能声称查询过" in contract
+    assert "引导" in contract
+
+
+def test_tool_contract_admin_lists_tools_and_failure_talk() -> None:
+    from official_agent.graphs.assistant import tool_contract, tool_roster
+
+    contract = tool_contract(identity_of("admin"))
+    roster = tool_roster(identity_of("admin"))
+    assert roster  # admin 有工具
+    for name in roster:
+        assert name in contract
+    assert "不要声称「查询过」" in contract
+    assert "不要编造结果" in contract
+
+
+def test_identity_and_contract_live_in_system_prompt_not_user_message() -> None:
+    """#166:身份/契约进 system prompt,绝不作为用户消息(泄漏成气泡)。"""
+    from official_agent.graphs.assistant import (
+        build_system_prompt,
+        compose_first_message,
+        load_system_prompt,
+    )
+
+    system = build_system_prompt(identity_of("admin"))
+    # system 含静态正文 + 身份段 + 工具契约
+    assert load_system_prompt() in system
+    assert identity_message(identity_of("admin")) in system
+    assert "数据查询工具:" in system
+    # 首条用户消息不含任何内部字段(不再泄漏)
+    first = compose_first_message("tok")
+    assert "可访问权限" not in first
+    assert "数据查询工具:" not in first
+
+
+def test_tool_roster_matches_assembly() -> None:
+    from official_agent.graphs.assistant import assemble_tools, tool_roster
+
+    for role in ("admin", "member", "candidate", "unknown"):
+        identity = identity_of(role)
+        assert len(tool_roster(identity)) == len(assemble_tools(identity))

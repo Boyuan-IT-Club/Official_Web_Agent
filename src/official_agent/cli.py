@@ -12,6 +12,7 @@ Langfuse callbacks fail-open 挂载(OBS-01)。
 """
 
 import asyncio
+import logging
 import time
 
 import httpx
@@ -23,7 +24,7 @@ from official_agent.config import get_settings
 from official_agent.graphs.assistant import (
     assemble_tools,
     build_assistant_agent,
-    identity_message,
+    tool_roster,
 )
 from official_agent.graphs.identity import resolve
 from official_agent.observability import (
@@ -31,6 +32,7 @@ from official_agent.observability import (
     reset_turn_trace_id,
     set_turn_trace_id,
 )
+from official_agent.security.pii import ReplyPiiMasker, mask_pii_output
 from official_agent.state.audit import ensure_audit_table
 from official_agent.state.pg import get_checkpointer
 from official_agent.state.threads import (
@@ -193,10 +195,8 @@ async def _chat(username: str, password: str, session: str) -> None:
             f"exit/退出 结束"
         )
 
-        # 身份每轮注入(M6 #114,决策 #108 质量优先):压缩掉早期上下文后
-        # 身份边界仍在最近窗口;重复注入幂等无害(同身份同文案,块很小)。
-        # 失败轮未持久化 → 下轮照常重注,天然覆盖 H-2 场景。
-        first_input = HumanMessage(content=identity_message(identity))
+        # #166 修复:身份/契约已移入 system prompt(build_assistant_agent),
+        # 不再注入首条用户消息——对话消息面不含内部指令。
         chat_history: list = []  # 仅降级路径使用:本地历史累积
         while True:
             try:
@@ -211,17 +211,22 @@ async def _chat(username: str, password: str, session: str) -> None:
                 return
 
             if saver is not None:
-                # M6 #114:持久化路径同样每轮注入身份(与 web 通道一致,
-                # 决策 #108 质量优先;不再依赖 aget_state 判新旧的 H-1 逻辑)
-                messages = [first_input, HumanMessage(content=user_input)]
+                # 持久化路径:#166 后无身份前缀,消息直接以用户原文接力
+                messages = [HumanMessage(content=user_input)]
             else:
                 # 降级:本地累积,保证多轮不失忆(原 CLI 语义)
-                messages = [first_input, *chat_history, HumanMessage(content=user_input)]
+                messages = [*chat_history, HumanMessage(content=user_input)]
             try:
-                history_out = await _run_turn(agent, messages, tid, callbacks)
+                history_out = await _run_turn(
+                    agent,
+                    messages,
+                    tid,
+                    callbacks,
+                    buffer_reply=not tool_roster(identity),
+                )
                 if saver is None:
-                    # 降级:用返回的累积历史推进本地会话(首轮前缀除外)
-                    chat_history = [m for m in history_out if m is not first_input]
+                    # 降级:用返回的累积历史推进本地会话
+                    chat_history = list(history_out)
             except KeyboardInterrupt:
                 console.print("\n[dim]已中断本轮(历史保留)[/dim]")
                 continue
@@ -235,7 +240,14 @@ async def _chat(username: str, password: str, session: str) -> None:
                     chat_history.append(HumanMessage(content=user_input))
 
 
-async def _run_turn(agent: object, history: list, session: str, callbacks: list) -> list:
+async def _run_turn(
+    agent: object,
+    history: list,
+    session: str,
+    callbacks: list,
+    *,
+    buffer_reply: bool = False,
+) -> list:
     """跑一轮:流式打印 token 与工具状态,返回本轮增量累积的消息历史。
 
     历史也由 checkpointer 持久化(MEM-01);返回值供调用方在无 checkpointer
@@ -246,6 +258,9 @@ async def _run_turn(agent: object, history: list, session: str, callbacks: list)
     """
     console.print("[bold green]agent>[/bold green] ", end="")
     trace_token = set_turn_trace_id(session)
+    buffered: list[str] = []  # GRA-04 #161:无工具档缓冲,流尾守卫后一次性输出
+    # #164:直印路径逐块过 PII 掩码器(buffer 分支由守卫整段处理)
+    pii_masker = None if buffer_reply else ReplyPiiMasker()
     config = {
         "callbacks": callbacks,
         "configurable": {"thread_id": session},  # MEM-01:thread_id 即线程档主键
@@ -258,8 +273,14 @@ async def _run_turn(agent: object, history: list, session: str, callbacks: list)
             if mode == "messages":
                 chunk, _meta = payload
                 if isinstance(chunk, AIMessageChunk):
-                    if chunk.content:
-                        console.print(chunk.content, end="", markup=False, highlight=False)
+                    text = chunk.content if isinstance(chunk.content, str) else ""
+                    if text:
+                        if buffer_reply:
+                            buffered.append(text)
+                        else:
+                            out = pii_masker.feed(text) if pii_masker else text
+                            if out:
+                                console.print(out, end="", markup=False, highlight=False)
                     # 工具调用状态:参数块到达时显示工具名
                     for tc in chunk.tool_call_chunks or []:
                         if tc.get("name"):
@@ -270,6 +291,22 @@ async def _run_turn(agent: object, history: list, session: str, callbacks: list)
                         new_messages.extend(node_update.get("messages") or [])
     finally:
         reset_turn_trace_id(trace_token)
+    if buffer_reply:
+        # GRA-04 #161:无工具档整段过编造守卫后一次性输出(不再逐块打印)
+        from official_agent.security.fabrication_guard import guard_empty_tools_reply
+
+        final_reply, verdict = guard_empty_tools_reply("".join(buffered))
+        if verdict != "clean":
+            logging.getLogger(__name__).warning(
+                "guard_event guard_name=%s verdict=%s", "fabrication_empty_tools", verdict
+            )
+        final_reply, pii_trace = mask_pii_output(final_reply)
+        if final_reply:
+            console.print(final_reply, markup=False, highlight=False)
+    elif pii_masker:
+        tail = pii_masker.finish()
+        if tail:
+            console.print(tail, end="", markup=False, highlight=False)
     console.print()
     # 增量累积:历史=原历史+本轮全部节点新增;空消息过滤防呆。
     # 勿用末节点整体替换——真实图每节点只吐增量,替换会丢身份与提问

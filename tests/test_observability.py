@@ -78,6 +78,88 @@ def test_build_handler_uses_settings(monkeypatch) -> None:
     }
 
 
+# ── #194 复审 P1:PII 包装 fail-closed ──
+
+
+class _RecordingInner:
+    """内层 handler 替身:记录真实收到的载荷(断言原文永不流到内层)。"""
+
+    def __init__(self) -> None:
+        self.received: list[object] = []
+
+    def on_chat_model_start(self, serialized, messages, **kwargs):
+        self.received.append(messages)
+        return None
+
+    def on_chain_start(self, serialized, inputs, **kwargs):
+        self.received.append(inputs)
+        return None
+
+    def on_tool_end(self, output, **kwargs):
+        self.received.append(output)
+        return None
+
+
+class _BoomMessage:
+    """content 含 PII 且 model_copy 抛错的消息:不能上报原文。"""
+
+    content = "phone 13800138000"
+
+    def model_copy(self, **_kw):
+        raise RuntimeError("copy boom")
+
+
+def test_pii_handler_drops_message_when_copy_fails(caplog) -> None:
+    """#194 P1:构造不出脱敏副本 → 丢弃该条;内层永远拿不到原值。"""
+    import official_agent.observability as obs
+
+    inner = _RecordingInner()
+    h = obs._PiiMaskedLangfuseHandler(inner)
+    with caplog.at_level("WARNING"):
+        h.on_chat_model_start({}, [[_BoomMessage()]])
+    assert inner.received == [], "全部无法脱敏时应跳过上报,而不是回落原值"
+
+
+def test_pii_handler_redacts_beyond_max_depth() -> None:
+    """#194 P1:遍历超深 → 定值占位,不回传原值。"""
+    import official_agent.observability as obs
+
+    h = obs._PiiMaskedLangfuseHandler(_RecordingInner())
+    deep = {"a": {"b": {"c": {"d": {"e": {"f": {"g": "13800138000"}}}}}}}
+    masked = h._mask_payload(deep)
+    assert "13800138000" not in str(masked), "深层载荷不得原样回传"
+    assert obs._PiiMaskedLangfuseHandler._REDACTED in str(masked)
+
+
+def test_pii_handler_redacts_llmresult_generations() -> None:
+    """#194 P1:LLMResult 之类不直接暴露 .content 的对象 → 受控投影。
+
+    旧行为原样委托,嵌套 generations 里的手机号会绕过掩码进 trace。
+    """
+    import official_agent.observability as obs
+
+    class _Gen:
+        def __init__(self) -> None:
+            self.text = "13800138000"
+
+    class _LLMResult:
+        generations = [[_Gen()]]
+
+    h = obs._PiiMaskedLangfuseHandler(_RecordingInner())
+    masked = h._mask_payload(_LLMResult())
+    assert "13800138000" not in str(masked)
+    assert masked == obs._PiiMaskedLangfuseHandler._REDACTED
+
+
+def test_pii_handler_still_masks_plain_payload() -> None:
+    """回归:正常路径仍做确定性掩码(不因 fail-closed 收紧而漏掩)。"""
+    import official_agent.observability as obs
+
+    h = obs._PiiMaskedLangfuseHandler(_RecordingInner())
+    assert h._mask_payload("call 13800138000") == "call 138****8000"
+    assert h._mask_payload({"phone": "13800138000"}) == {"phone": "138****8000"}
+
+
 def langfuse_callbacks_with(settings: Settings) -> list:
     import official_agent.observability as obs
 
