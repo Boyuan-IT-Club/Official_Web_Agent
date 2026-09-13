@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     # **0 = 关闭**——保留天数是 #57 数据留存 ADR 的拍板项,ADR 落地前不启用。
     thread_retention_days: int = 0
 
+    # GitHub 调查(D17/#149):调查工具层令牌,可选——匿名 60 次/时限流,
+    # code search 等端点无 token 直接 401。不进 HOT_KEYS(凭证只留 .env)
+    github_token: str = ""
+
     # FastAPI 服务(INF-04):官网候选人客服通道
     agent_host: str = "127.0.0.1"
     agent_port: int = 8001

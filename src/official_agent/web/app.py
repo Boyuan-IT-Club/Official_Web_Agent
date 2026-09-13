@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -46,8 +47,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             from official_agent.state.audit import ensure_audit_table
 
             ensure_audit_table()
+            # #175:去重 legacy 重复活跃 job + 建部分唯一索引,必须先于恢复
+            from official_agent.state.evaluation import ensure_evaluation_job_ready
+
+            ensure_evaluation_job_ready()
         except Exception:  # noqa: BLE001 — PG 未起/配置错 → 降级(fail-open,ADR-0005)
             app.state.checkpointer = None
+
+        # 闸门3 启动自动恢复:进程重启后,PG 里残留的 pending/running job
+        # 由 lifespan 全量扫回并重派(超 10 分钟 + attempts 未满;达上限的
+        # 转 failed 交人工)。失败 fail-open——PG 未起时跳过,下次重启再恢复。
+        try:
+            from official_agent.evaluation.runner import get_runner
+
+            await get_runner().recover_stale_on_startup()
+        except Exception:  # noqa: BLE001 — 恢复失败不挡服务启动(ADR-0005 fail-open)
+            logging.getLogger(__name__).warning(
+                "启动自动恢复失败,残留 job 留待下次/手动重试", exc_info=True
+            )
 
         # #171:会话 TTL 清理 job——软删档案超保留期(连带 checkpoint/对话日志)
         # 物理清理,每 6h 一轮,fail-open。thread_retention_days=0 时为 no-op:
@@ -124,6 +141,10 @@ def create_app() -> FastAPI:
     from official_agent.web import routes
 
     app.include_router(routes.router, prefix="/api/agent")
+
+    from official_agent.web.evaluation_admin import router as evaluation_admin_router
+
+    app.include_router(evaluation_admin_router, prefix="/api/agent")
 
     @app.get("/health")
     async def health() -> dict[str, str]:

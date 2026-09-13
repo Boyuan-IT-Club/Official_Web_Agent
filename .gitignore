@@ -18,6 +18,13 @@ dist/
 chroma/
 evals/datasets/*
 !evals/datasets/.gitkeep
+# 本地产物
+last_qbank_judge_report.json
+
+# 无 PII 的探针数据集入库;resumes/(含真实简历)保持忽略
+!evals/datasets/kb_probes.yaml
+!evals/datasets/qbank_probes.yaml
+!evals/datasets/qbank_judge.yaml
 
 # IDE
 .idea/
