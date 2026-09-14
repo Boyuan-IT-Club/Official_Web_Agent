@@ -83,13 +83,13 @@ def _log_event(job_id: int, cycle_id: int, resume_id: int, stage: str, **fields:
 
 
 async def _set_resume_status(resume_id: int, status: int) -> None:
-    """简历状态位(#用户反馈):6=AI初筛中(瞬态),结束回落 2。
+    """简历状态位:6=AI初筛中(瞬态),结束回落 2。
 
-    走管理员 PUT /api/resumes/status/{id}/{status}(evaluation:run,服务账号
-    可用);失败 fail-open——状态位缺失只影响展示,不影响初筛本身。"""
+    走管理员 PUT /api/resumes/{resumeId}/status/{status}(evaluation:run,
+    服务账号可用);失败 fail-open——状态位缺失只影响展示,不影响初筛本身。"""
     try:
         client = await get_backend_client()
-        await client.put(f"/api/resumes/status/{resume_id}/{status}")
+        await client.put(f"/api/resumes/{resume_id}/status/{status}")
     except Exception:  # noqa: BLE001 — 状态位缺失可容忍
         logging.getLogger(__name__).warning(
             "简历状态位更新失败(resume=%s,status=%s)", resume_id, status, exc_info=True

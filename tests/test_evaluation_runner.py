@@ -6,12 +6,19 @@
 import asyncio
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
+import respx
 
+from official_agent.config import Settings
 from official_agent.evaluation import runner as ev_runner
 from official_agent.evaluation.runner import EvaluationRunner
 from official_agent.evaluation.scoring import FieldText
 from official_agent.state import evaluation as ev_store
+from official_agent.tools.client import BackendClient
+from official_agent.tools.readonly import set_backend_client
+
+BASE = "http://backend.test"
 
 # ── store 层(mock 连接) ────────────────────────────────
 
@@ -584,3 +591,43 @@ def test_hard_zero_survives_masking(monkeypatch) -> None:
     assert is_hard_zero_value("138****5678")
     assert is_hard_zero_value("************")
     assert not is_hard_zero_value("138****5678,项目经验丰富")  # 有实质内容不误伤
+
+
+# ── 状态位端点契约(真 URL,不 patch 函数本体) ──────────────
+
+
+@respx.mock
+async def test_set_resume_status_hits_backend_route() -> None:
+    """状态位写入必须打后端真实路由 /api/resumes/{resumeId}/status/{status}。
+
+    回归:此前写成 /api/resumes/status/{id}/{status},与后端 @PutMapping
+    不匹配。后端把未知路由的 404 统一包成 500,调用处又 fail-open,于是
+    缺陷完全静默(简历永远停在"已提交",看不到"AI初筛中")。其余用例把
+    _set_resume_status 整个 patch 掉,URL 从未被行使——本用例补上这一层。
+    """
+    respx.post(f"{BASE}/api/auth/login").mock(
+        return_value=httpx.Response(
+            200, json={"code": 200, "message": "ok", "data": {"token": "t", "user_id": 1}}
+        )
+    )
+    put_route = respx.put(f"{BASE}/api/resumes/9005/status/6").mock(
+        return_value=httpx.Response(200, json={"code": 200, "message": "ok", "data": {}})
+    )
+    set_backend_client(
+        BackendClient(
+            http=httpx.AsyncClient(base_url=BASE),
+            settings=Settings(
+                _env_file=None,
+                backend_base_url=BASE,
+                backend_service_username="svc-agent",
+                backend_service_password="secret",
+            ),
+        )
+    )
+    try:
+        await ev_runner._set_resume_status(9005, 6)
+    finally:
+        set_backend_client(None)
+
+    assert put_route.called, "状态位未打后端真实路由(URL 形状回归)"
+    assert put_route.calls.last.request.url.path == "/api/resumes/9005/status/6"
