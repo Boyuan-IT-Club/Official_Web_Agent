@@ -158,7 +158,7 @@ async def test_bundle_fallback_for_no_evidence(monkeypatch) -> None:
 
     envelope = await bd.run_bundle(fields, resume_id=9, cycle_id=2026, github_key="usergithub")
     groups = {g["group"]: g for g in envelope["groups"]}
-    assert groups["skipped"]["qbank_v2"]["mode"] == "skipped"  # 组标识=子图实走路径
+    assert groups["repo"]["qbank_v2"]["mode"] == "skipped"  # 无仓的 guided/skipped 仍归 repo 组
     assert "autograding" not in groups  # 无评测记录 → 线不存在
     fallback = groups["base_and_skills"]
     assert len(fallback["questions"]) >= 3 + 2  # 基础三维 + 技能题组

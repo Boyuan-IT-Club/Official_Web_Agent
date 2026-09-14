@@ -44,22 +44,25 @@ def _resume_text(fields: list) -> str:
     """简历全文(各字段带标题拼接)。
 
     技术栈常单列一栏,只喂项目字段会让无仓路径看不见它——那正是这条路径
-    最可靠的出题依据。字段面已在 job 入口统一脱敏,这里不再处理 PII。
+    最可靠的出题依据。
+
+    字段面与评分线完全同一份(evaluation runner 在 job 入口已过
+    mask_pii_deep),本函数不额外处理也不扩大暴露面:它只把同一批已脱敏字段
+    按标题拼起来。脱敏规则的覆盖面由 security/pii.py 决定,不在此处重复。
     """
     parts = [f"{f.title or f.field_key}:\n{f.value}" for f in fields if (f.value or "").strip()]
     return "\n\n".join(parts)
 
 
 def _group_kind(envelope: dict[str, Any], pinned: tuple[str, str] | None) -> str:
-    """子图实际走的路径 → 组标识;带仓的恒为 repo(v2 现状)。
+    """组标识:带仓恒为 repo;无仓且走了简历深挖则为 cv_dive。
 
-    无仓路径有三种去向(cv_dive / guided / skipped),把它们都记成 repo 会
-    让挑题视图与运维排查都看不出这份简历走的哪条路。
+    只为新路径新增一个标识,其余(guided/skipped)沿用既有 repo——
+    改它们的取值会波及前端标签映射与 qbank.source 语义,不在本票范围。
     """
     if pinned:
         return "repo"
-    mode = str(envelope.get("mode") or "")
-    return {"cv_dive": "cv_dive", "guided": "guided", "skipped": "skipped"}.get(mode, "repo")
+    return "cv_dive" if envelope.get("mode") == "cv_dive" else "repo"
 
 
 async def _b4_questions(payload_hint: str, *, count_min: int, count_max: int) -> list[dict]:
@@ -110,7 +113,7 @@ async def run_bundle(
     # repo group(带 owner/repo 标识),不再只挖第一个。单线失败降级为空错误组,
     # 不炸整条 bundle。
     repo_candidates = extract_repos(project_text)
-    # 无仓/有项目文本但无仓 URL → 仍跑一次,让子图内部路由到 guided/skip
+    # 无仓/有项目文本但无仓 URL → 仍跑一次,让子图内部按简历内容路由
     if not repo_candidates:
         repo_candidates = [(None, None)]  # type: ignore[list-item]
     for owner, name in repo_candidates:

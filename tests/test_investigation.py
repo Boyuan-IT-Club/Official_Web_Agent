@@ -79,6 +79,20 @@ def test_placeholder_only_keeps_real_content() -> None:
     """占位表述里夹着真实内容 → 有料(宁可判有料,别误打回兜底)。"""
     assert inv.route_project("目前没有做过什么项目,但自己写过爬虫", None) == "cv_dive"
 
+@pytest.mark.parametrize(
+    "text",
+    ["暂无", "无", "没有", "略", "同上", "没做过什么项目", "没什么项目", "暂无项目", "尚未参加"],
+)
+def test_route_placeholder_phrasings_are_guided(text: str) -> None:
+    """票点名的「全虚词」写法逐条覆盖 → guided(有字但没料),不是 skip。"""
+    assert inv.route_project(text, None) == "guided"
+
+
+def test_route_real_content_is_never_mistaken_for_placeholder() -> None:
+    """剥词算法不得把真实内容误判成占位(宁可判有料)。"""
+    for text in ("用 Python 写了爬虫", "做了智慧停车小程序", "我参与了社团官网开发"):
+        assert inv.route_project(text, None) == "cv_dive"
+
 
 # ── GitHub 客户端(respx) ────────────────────────────────
 
@@ -532,6 +546,58 @@ def test_chain_source_ignores_our_scaffolding_words() -> None:
     payload["entry"]["evidence"]["path"] = ""
     for r in payload["reserves"]:
         r["evidence"]["path"] = ""
+    _validate_group_v2(payload, "档案:报名页重构,用了 flask", [], no_repo=True)
+
+def _cv_payload_with(themes: list[str]) -> dict:
+    """自足题组:链主题/层问题都不带仓内词元(供无仓校验用例)。"""
+    return {
+        "entry": {
+            "category": "C1_背景与动机",
+            "question": "讲讲报名页重构?",
+            "answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},
+            "evidence": {"path": "", "note": "档案"},
+            "time_minutes": 3,
+        },
+        "chains": [
+            {
+                "category": "C4_实现细节拷打",
+                "theme": theme,
+                "layers": [
+                    {"question": f"第{i}层怎么落地?", "expected_signal": "答到什么算过"}
+                    for i in range(3)
+                ],
+            }
+            for theme in themes
+        ],
+        "reserves": [],
+    }
+
+
+def test_chain_source_rejects_all_stopword_shell() -> None:
+    """全由忽略词拼成的链没有可核对来源 → 拒绝(忽略表不得被抽干)。"""
+    from official_agent.evaluation.investigate_graph import _validate_group_v2
+
+    payload = _cv_payload_with(["the and for with layer dossier"] * 2)
+    with pytest.raises(ValueError, match="无可核对来源"):
+        _validate_group_v2(payload, "档案:报名页重构,用了 flask", [], no_repo=True)
+
+
+def test_chain_source_rejects_plausible_english_fabrication() -> None:
+    """英文编造词(非忽略词)仍走常规判定被拒 —— 忽略表收窄后的回归锚。"""
+    from official_agent.evaluation.investigate_graph import _validate_group_v2
+
+    payload = _cv_payload_with(["resume candidate layer"] * 2)
+    with pytest.raises(ValueError, match="链源不在 dossier"):
+        _validate_group_v2(payload, "档案:报名页重构,用了 flask", [], no_repo=True)
+
+
+def test_chain_source_allows_chinese_theme_with_scaffolding_prefix() -> None:
+    """中文链带拴架前缀仍放行:中文无法与 dossier 做词元比对(诚实边界)。"""
+    from official_agent.evaluation.investigate_graph import _validate_group_v2
+
+    payload = _cv_payload_with(
+        ["源自 dossier C4 项目经验栏的报名页重构", "源自 dossier 的项目数据流"]
+    )
     _validate_group_v2(payload, "档案:报名页重构,用了 flask", [], no_repo=True)
 
 

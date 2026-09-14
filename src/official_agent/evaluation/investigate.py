@@ -1,8 +1,7 @@
-"""调查子图路由与值得度:纯函数决策层。
+"""调查子图路由:纯函数决策层。
 
-- 路由:短文本+有仓→深挖;短文本+无仓→skip;
-  有项目文本但无仓/仓不可读→通用引导题(不 skip 项目维)
-- 值得度:README 体量/提交数/文件面结构 → none|low|high → 定题数
+- 路由四出口:有仓可读→deep_dive;无仓但简历有料(技术栈或项目内容)
+  →cv_dive;无仓且项目栏为空→skip;其余→guided(通用引导题兜底)
 - 全部零 IO(IO 在 github_client/LLM 节点),决策可单测
 """
 
@@ -20,32 +19,44 @@ _REPO_URL = re.compile(
     re.IGNORECASE,
 )
 
-#: 占位式表述:整栏只写这些 = 没有实质信息(真实简历里出现过
-#: 「目前没有做过什么项目」)。整句先剥掉,再剥虚词。
-_PLACEHOLDER_PHRASES = (
+#: 占位式表述与无信息量虚词:整栏只有这些 = 没有实质信息。
+#: 真实简历里出现过「目前没有做过什么项目」这类写法。
+#:
+#: 用**单条正则**匹配而非逐条 str.replace:逐条替换有顺序依赖(先剥「没有」
+#: 会把「没有做过什么项目」截成「做过什么项目」而漏判),且被长词吞掉的短词
+#: 会变成永不命中的死条目。长词优先保证前缀词不会遮蔽更长的表述。
+_PLACEHOLDER_VOCAB = (
     "没有做过什么项目",
     "没做过什么项目",
+    "还没有项目经验",
+    "暂无项目经验",
     "没有做过项目",
     "没做过项目",
+    "暂未参加项目",
     "没有项目经验",
-    "暂无项目",
+    "未参与项目",
     "没有参加过",
+    "没什么项目",
     "尚未参加",
-)
-#: 无信息量的虚词:剥掉后判断剩余是否有料
-_FILLER_WORDS = (
+    "项目经验",
+    "暂无项目",
+    "参加",
+    "项目",
     "暂无",
-    "无",
     "没有",
     "还没",
     "尚未",
-    "略",
-    "同上",
+    "暂未",
+    "未参与",
     "没什么",
-    "还没做过",
-    "目前",
     "暂时",
-    "还没有",
+    "目前",
+    "同上",
+    "略",
+    "无",
+)
+_PLACEHOLDER_RE = re.compile(
+    "|".join(re.escape(w) for w in sorted(_PLACEHOLDER_VOCAB, key=len, reverse=True))
 )
 #: 标点与空白:判定剩余是否为「字」时一并剔除
 _FILLER_CHARS = str.maketrans("", "", " \t\r\n,.;:!?、。，；：！？…—~·-()()[]【】\"'\"/\\")
@@ -102,11 +113,7 @@ def _is_placeholder_only(text: str) -> bool:
     误判为占位会把候选人打回通用引导题,正是本模块要消灭的退化;
     反过来的代价小得多(顶多多出一组质量平庸的题)。
     """
-    remainder = text or ""
-    for phrase in _PLACEHOLDER_PHRASES:
-        remainder = remainder.replace(phrase, "")
-    for word in _FILLER_WORDS:
-        remainder = remainder.replace(word, "")
+    remainder = _PLACEHOLDER_RE.sub("", text or "")
     return not remainder.translate(_FILLER_CHARS).strip()
 
 

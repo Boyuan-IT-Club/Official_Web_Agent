@@ -71,7 +71,6 @@ class InvestigationState(TypedDict, total=False):
     attribution: dict
     paths: list[str]
     paths_truncated: bool
-    tech_items: list[dict]
     question_set: dict[str, Any]
     error: str | None
 
@@ -85,8 +84,9 @@ async def _norepo_route(state: InvestigationState) -> dict:
     text = state["project_text"]
     if has_substantive(text):
         return {"route": route_project(text, None)}
+    # 项目栏没料时才付一次技术栈抽取:它决定 cv_dive 还是兜底
     items = await _extract_tech(state)
-    return {"route": route_project(text, None, tech_count=len(items)), "tech_items": items}
+    return {"route": route_project(text, None, tech_count=len(items))}
 
 
 async def _extract_tech(state: InvestigationState) -> list[dict]:
@@ -195,16 +195,15 @@ async def route_node(state: InvestigationState) -> dict:
 
 
 def route_after_route(state: InvestigationState) -> str:
-    return state["route"]  # deep_dive | guided | skip
+    return state["route"]  # deep_dive | cv_dive | guided | skip
 
 
 
 def _resume_dossier(state: InvestigationState) -> dict:
-    """无仓路径的取材:简历文本 → 档案,并保留路由阶段抽出的技术栈。
+    """无仓路径的取材:简历文本 → 档案。
 
-    技术栈单独进 state 供出题段使用(每个名词各出题);档案则给模型当材料。
-    简历文本为空时(理论上已被路由挡掉)按空档案处理,不在此处降级——
-    路由已经决定了走 cv_dive。
+    档案给模型当出题材料。简历文本为空理论上已被路由挡掉(空栏走 skip),
+    此处不再降级——路由已经决定了走 cv_dive。
     """
     text = state.get("resume_text") or state["project_text"]
     dossier = dossier_from_resume(text, attribution="cv")
@@ -385,11 +384,17 @@ async def generate_node(state: InvestigationState) -> dict:
 #: 注意:「自述」单独出现是合法锚定(简历锚定横切),不在黑名单
 _ADVERSARIAL_WORDS = ("矛盾", "撒谎", "撒了谎", "夸大", "打脸", "为什么没做到")
 
-#: 链源真实性校验的忽略词:出题材料里的内部拴架词(模型会把材料标签原样
-#: 抄进 theme),以及英文停用词。这些不是候选人材料的内容词。
-_CHAIN_SOURCE_IGNORES = frozenset(
-    {"the", "and", "for", "with", "layer", "dossier", "candidate", "resume"}
-)
+#: 链源真实性校验的忽略词:**只收我们自己材料里的拴架词**——模型会把材料
+#: 标签原样抄进 theme(如「源自 dossier C4 项目经验栏」),那是我们的内部
+#: 用词、不在候选人材料里,当内容词会把真实链误判成编造。
+#: 英文停用词一并忽略(它们不承载来源信息)。
+#: 收词必须克制:忽略词越多,「词元全被忽略」的编造链越容易蒙混过关。
+_CHAIN_SOURCE_IGNORES = frozenset({"the", "and", "for", "with", "layer", "dossier"})
+
+
+def _has_cjk(text: str) -> bool:
+    """文本是否含中日韩文字(链源比对对中文不可判定,见校验器注释)。"""
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text)
 
 
 def _validate_group_v2(
@@ -424,14 +429,21 @@ def _validate_group_v2(
             _check_question(q)
             texts.append(q)
         # 链源真实性:链文本的拉丁词元至少一个出现在 dossier。
-        # 忽略表收的是**我们自己材料里的拴架词**:模型会把材料标签原样抄进
-        # theme(如「源自 dossier C4 项目经验栏」),那是我们的内部用词、不在
-        # 候选人材料里,当成内容词会把真实链误判成编造。
-        tokens = [
+        # 忽略表只剔我们自己的拴架词与英文停用词(见其常量注释)。
+        # theme 是链声明的来源,单独做主判定:若它只剩忽略词、又没有中文内容,
+        # 那就是拿材料标签拼的空壳,不是一条有来源的链。
+        # 纯中文主题无法与 dossier 做词元比对(诚实边界,由出题 prompt 铁律约束)。
+        joined = " ".join(texts)
+        raw_tokens = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", joined)
+        tokens = [t.lower() for t in raw_tokens if t.lower() not in _CHAIN_SOURCE_IGNORES]
+        theme_tokens = [
             t.lower()
-            for t in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", " ".join(texts))
+            for t in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", theme)
             if t.lower() not in _CHAIN_SOURCE_IGNORES
         ]
+        theme_raw = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", theme)
+        if theme_raw and not theme_tokens and not _has_cjk(theme):
+            raise ValueError(f"链主题只有停用词,无可核对来源:theme={theme[:40]!r}")
         if tokens and not any(t in dossier_lowers for t in tokens):
             raise ValueError(f"链源不在 dossier:theme={theme[:40]!r}")
     for reserve in payload.get("reserves", []):
