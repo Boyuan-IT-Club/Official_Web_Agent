@@ -40,6 +40,28 @@ def _project_text(fields: list) -> str:
     return ""
 
 
+def _resume_text(fields: list) -> str:
+    """简历全文(各字段带标题拼接)。
+
+    技术栈常单列一栏,只喂项目字段会让无仓路径看不见它——那正是这条路径
+    最可靠的出题依据。字段面已在 job 入口统一脱敏,这里不再处理 PII。
+    """
+    parts = [f"{f.title or f.field_key}:\n{f.value}" for f in fields if (f.value or "").strip()]
+    return "\n\n".join(parts)
+
+
+def _group_kind(envelope: dict[str, Any], pinned: tuple[str, str] | None) -> str:
+    """子图实际走的路径 → 组标识;带仓的恒为 repo(v2 现状)。
+
+    无仓路径有三种去向(cv_dive / guided / skipped),把它们都记成 repo 会
+    让挑题视图与运维排查都看不出这份简历走的哪条路。
+    """
+    if pinned:
+        return "repo"
+    mode = str(envelope.get("mode") or "")
+    return {"cv_dive": "cv_dive", "guided": "guided", "skipped": "skipped"}.get(mode, "repo")
+
+
 async def _b4_questions(payload_hint: str, *, count_min: int, count_max: int) -> list[dict]:
     """共用的提示词 JSON 出题(错因追问/技能题组)。"""
     settings = get_effective_settings()
@@ -82,6 +104,7 @@ async def run_bundle(
     provider = search_provider or NullSearchProvider()
     groups: list[dict[str, Any]] = []
     project_text = _project_text(fields)
+    resume_text = _resume_text(fields)
 
     # 仓线。多仓:项目文本里每个 GitHub 仓各深挖一次,产出独立
     # repo group(带 owner/repo 标识),不再只挖第一个。单线失败降级为空错误组,
@@ -95,13 +118,14 @@ async def run_bundle(
         try:
             repo_envelope = await ig.run_investigation(
                 project_text,
+                resume_text=resume_text,
                 repo=pinned,
                 github_token=github_token,
                 candidate_login=github_key or "",
             )
             groups.append(
                 {
-                    "group": "repo",
+                    "group": _group_kind(repo_envelope, pinned),
                     "owner": owner or "",
                     "repo": f"{owner}/{name}" if pinned else "",
                     # v2 信封整体嵌套(qbank_v2),不展开——QbankV2 自带

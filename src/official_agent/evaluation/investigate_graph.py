@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+from dataclasses import asdict
 from typing import Any, TypedDict
 
 from langchain_core.messages import HumanMessage
@@ -22,16 +24,22 @@ from official_agent.evaluation.attribution import (
     detect_contribution_target,
     resolve_entry,
 )
+from official_agent.evaluation.dossier import dossier_from_resume
 from official_agent.evaluation.explore import run_explore
 from official_agent.evaluation.github_client import GitHubClient, GitHubUnavailable
 from official_agent.evaluation.graph import _extract_json
-from official_agent.evaluation.investigate import extract_repo, route_project
+from official_agent.evaluation.investigate import (
+    extract_repo,
+    has_substantive,
+    route_project,
+)
 from official_agent.evaluation.schema import (
     ExploreMeta,
     QbankV2,
     QuestionGroupV2,
     UsageMeta,
 )
+from official_agent.evaluation.tech_stack import extract_tech_stack
 from official_agent.graphs.assistant import build_model
 from official_agent.prompt_loader import load_prompt, load_prompt_meta
 
@@ -45,6 +53,9 @@ def _prompt_version() -> str:
 
 class InvestigationState(TypedDict, total=False):
     project_text: str
+    #: 简历全文(不含项目栏)——技术栈常单列一栏,只喂项目文本会让抽取器
+    #: 看不见它。缺省退化为 project_text(单栏调用方的兼容面)。
+    resume_text: str
     github_base: str
     github_token: str
     candidate_login: str
@@ -60,8 +71,34 @@ class InvestigationState(TypedDict, total=False):
     attribution: dict
     paths: list[str]
     paths_truncated: bool
+    tech_items: list[dict]
     question_set: dict[str, Any]
     error: str | None
+
+async def _norepo_route(state: InvestigationState) -> dict:
+    """无仓位置时的路由:先看项目栏有没有料,没料才付一次技术栈抽取。
+
+    项目栏已有实质内容时技术栈不影响结论(cv_dive 已是答案),那次模型调用
+    可以省掉;只有项目栏空或全是占位表述时,技术栈才是决定 cv_dive 还是
+    兜底的那一票。
+    """
+    text = state["project_text"]
+    if has_substantive(text):
+        return {"route": route_project(text, None)}
+    items = await _extract_tech(state)
+    return {"route": route_project(text, None, tech_count=len(items)), "tech_items": items}
+
+
+async def _extract_tech(state: InvestigationState) -> list[dict]:
+    """抽技术栈(简历全文优先);抽取器故障不挡路由,按「无技术栈」继续。"""
+    try:
+        items = await extract_tech_stack(state.get("resume_text") or state["project_text"])
+    except Exception:  # noqa: BLE001 — 基础设施故障不该把简历判成没料
+        logging.getLogger(__name__).warning(
+            "guard_event guard_name=tech_stack_extract verdict=failed", exc_info=True
+        )
+        return []
+    return [asdict(item) for item in items]
 
 
 async def route_node(state: InvestigationState) -> dict:
@@ -78,7 +115,7 @@ async def route_node(state: InvestigationState) -> dict:
     repo = (pinned_owner, pinned_name) if pinned_owner and pinned_name else extract_repo(text)
     if repo is None and not login and detect_contribution_target(text) is None:
         # 无仓位置且无登录名/贡献声明:不建 client(零 GitHub 调用,skip 断言依赖此)
-        return {"route": route_project(text, None)}
+        return await _norepo_route(state)
     client = GitHubClient(
         base_url=state.get("github_base") or "https://api.github.com",
         token=state.get("github_token") or "",
@@ -115,7 +152,7 @@ async def route_node(state: InvestigationState) -> dict:
         if found:
             repo = (found.owner, found.name)
     if repo is None:
-        return {"route": route_project(text, None)}
+        return await _norepo_route(state)
     try:
         meta = await client.repo(*repo)
         branch = meta.get("default_branch") or "main"
@@ -161,14 +198,39 @@ def route_after_route(state: InvestigationState) -> str:
     return state["route"]  # deep_dive | guided | skip
 
 
-async def explore_node(state: InvestigationState) -> dict:
-    """探索段:受限 ReAct 循环产出 dossier,替换 fetch_node 固定取材。
 
-    - 预算四闸在 explore_repo 内(轮数/墙钟/client 截断/dossier 40K);触顶标
-      degraded,用已有材料出题(不判失败)。
-    - dossier 为空 = GitHub 不可达/探索全败 → 降级 guided。
-    - worthiness 信号仅用于题数分档(schema v2 已退役)。
+def _resume_dossier(state: InvestigationState) -> dict:
+    """无仓路径的取材:简历文本 → 档案,并保留路由阶段抽出的技术栈。
+
+    技术栈单独进 state 供出题段使用(每个名词各出题);档案则给模型当材料。
+    简历文本为空时(理论上已被路由挡掉)按空档案处理,不在此处降级——
+    路由已经决定了走 cv_dive。
     """
+    text = state.get("resume_text") or state["project_text"]
+    dossier = dossier_from_resume(text, attribution="cv")
+    return {
+        "dossier_text": dossier.render(),
+        "paths": [],
+        "paths_truncated": False,
+        "dossier_degraded": False,
+        "dossier_degrade_reason": "",
+        "dossier_turns": 0,
+        "explore_usage": {},
+        "error": None,
+    }
+
+async def explore_node(state: InvestigationState) -> dict:
+    """探索段:有仓走 ReAct 取材,无仓用简历文本当材料。
+
+    - 有仓(deep_dive):受限 ReAct 循环产出 dossier;预算四闸在 explore_repo
+      内(轮数/墙钟/client 截断/dossier 40K);触顶标 degraded,用已有材料
+      出题(不判失败)。
+    - 无仓(cv_dive):简历文本没有仓可探,直接按板块取材成档案——不再产出
+      「探索段未取得材料」的空档案,出题段也就有料可依。
+    - 有仓但探索全败 → 降级 guided(既有语义不变)。
+    """
+    if state.get("route") == "cv_dive":
+        return _resume_dossier(state)
     attribution_dict = state.get("attribution") or {}
     attribution = str(attribution_dict.get("level", ""))
     dossier = await run_explore(
@@ -224,8 +286,11 @@ async def generate_node(state: InvestigationState) -> dict:
     """
     try:
         deep = state["route"] == "deep_dive"
+        cv = state["route"] == "cv_dive"
         dossier_text = state.get("dossier_text", "")
-        thin = len(dossier_text.strip()) < 400  # 敷衍 dossier(1-2 题合法)
+        # 简历路径不套用体量阈值:短简历是正常简历,不是敷衍档案(误杀短但
+        # 具体的简历正是要避免的);仓路径的体量标记维持原样。
+        thin = (not cv) and len(dossier_text.strip()) < 400
         settings = get_effective_settings()
         model = build_model(settings, temperature=SCORING_TEMPERATURE)
         # ADR-0004:代码零 prompt 字符串——体量标记是数据,规则文本全在
@@ -256,12 +321,15 @@ async def generate_node(state: InvestigationState) -> dict:
         repo_summary = str(group_payload.get("repo_summary", ""))
 
         deep = bool(deep)
-        if deep:
+        if deep or cv:
+            # 简历路径与仓路径共用同一台校验机器;区别只在 no_repo:简历没有仓,
+            # 题面若带仓内路径,那必然是模型的臆造,一律拒。
             group = validate_qbank_v2_group(
                 group_payload,
                 dossier_text,
                 paths=list(state.get("paths", [])),
                 thin=thin,
+                no_repo=cv,
             )
         else:
             # guided:entry 引导题,chains 空;黑名单与「不带仓路径」不变量仍适用
@@ -292,7 +360,7 @@ async def generate_node(state: InvestigationState) -> dict:
         envelope = QbankV2(
             repo_summary=repo_summary,
             group=group,
-            mode="repo_deep_dive" if deep else "guided",
+            mode=("repo_deep_dive" if deep else "cv_dive" if cv else "guided"),
             attribution=_attribution_level((state.get("attribution") or {}).get("level")),
             degraded=bool(state.get("dossier_degraded")),
             degrade_reason=str(state.get("dossier_degrade_reason", "")),
@@ -317,8 +385,16 @@ async def generate_node(state: InvestigationState) -> dict:
 #: 注意:「自述」单独出现是合法锚定(简历锚定横切),不在黑名单
 _ADVERSARIAL_WORDS = ("矛盾", "撒谎", "撒了谎", "夸大", "打脸", "为什么没做到")
 
+#: 链源真实性校验的忽略词:出题材料里的内部拴架词(模型会把材料标签原样
+#: 抄进 theme),以及英文停用词。这些不是候选人材料的内容词。
+_CHAIN_SOURCE_IGNORES = frozenset(
+    {"the", "and", "for", "with", "layer", "dossier", "candidate", "resume"}
+)
 
-def _validate_group_v2(payload: dict[str, Any], dossier_text: str, paths: list[str]) -> None:
+
+def _validate_group_v2(
+    payload: dict[str, Any], dossier_text: str, paths: list[str], *, no_repo: bool = False
+) -> None:
     """v2 后置校验:对抗前提黑名单/路径白名单/链源真实性。
 
     局限(诚实边界):链源真实性只对拉丁词元可判定,纯中文 theme 跳过
@@ -331,7 +407,12 @@ def _validate_group_v2(payload: dict[str, Any], dossier_text: str, paths: list[s
                 raise ValueError(f"对抗前提问法({word}):{q[:40]!r}")
 
     def _check_path(p: str, where: str) -> None:
-        if p and paths_set and p not in paths_set:
+        if not p:
+            return
+        if no_repo:
+            # 简历路径没有仓:任何仓内路径都无从核实,必是模型臆造
+            raise ValueError(f"无仓路径不得带仓内 evidence.path({where}):{p!r}")
+        if paths_set and p not in paths_set:
             raise ValueError(f"evidence.path 不在仓内({where}):{p!r}")
 
     paths_set = {x.strip() for x in paths if x and x.strip()}
@@ -342,11 +423,14 @@ def _validate_group_v2(payload: dict[str, Any], dossier_text: str, paths: list[s
             q = str(layer.get("question", ""))
             _check_question(q)
             texts.append(q)
-        # 链源真实性:链文本的拉丁词元至少一个出现在 dossier
+        # 链源真实性:链文本的拉丁词元至少一个出现在 dossier。
+        # 忽略表收的是**我们自己材料里的拴架词**:模型会把材料标签原样抄进
+        # theme(如「源自 dossier C4 项目经验栏」),那是我们的内部用词、不在
+        # 候选人材料里,当成内容词会把真实链误判成编造。
         tokens = [
             t.lower()
             for t in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", " ".join(texts))
-            if t.lower() not in {"the", "and", "for", "with", "layer"}
+            if t.lower() not in _CHAIN_SOURCE_IGNORES
         ]
         if tokens and not any(t in dossier_lowers for t in tokens):
             raise ValueError(f"链源不在 dossier:theme={theme[:40]!r}")
@@ -360,20 +444,20 @@ def _validate_group_v2(payload: dict[str, Any], dossier_text: str, paths: list[s
     _check_question(str(entry.get("question", "")))
     _check_path(str((entry.get("evidence") or {}).get("path", "")), "entry")
 
-
 def validate_qbank_v2_group(
     group_payload: dict[str, Any],
     dossier_text: str,
     *,
     paths: list[str],
     thin: bool = False,
+    no_repo: bool = False,
 ) -> QuestionGroupV2:
     """题组 v2 全量校验(探针与 generate 共用;六探针的判定机器)。
 
     - 对抗前提黑名单/路径白名单/链源真实性(_validate_group_v2);
     - 结构:入口 1 + 链 2-4×3-5 层 + 总量硬顶 15 + 敷衍 dossier ≤3。
     """
-    _validate_group_v2(group_payload, dossier_text, paths)
+    _validate_group_v2(group_payload, dossier_text, paths, no_repo=no_repo)
     group = QuestionGroupV2.model_validate(
         {k: group_payload[k] for k in ("entry", "chains", "reserves") if k in group_payload}
     )
@@ -413,7 +497,11 @@ _compiled: Any | None = None
 
 
 def build_investigation_subgraph() -> Any:
-    """调查子图:route →(deep_dive→fetch)/guided/skip → generate → finalize。"""
+    """调查子图:route →(deep_dive/cv_dive→explore)/guided/skip → generate → finalize。
+
+    cv_dive 与 deep_dive 同走 explore→generate(都要取材后出带链的题组),
+    区别在 explore 的取材来源(代码仓 vs 简历文本)与 generate 的出题 prompt。
+    """
     global _compiled
     if _compiled is not None:
         return _compiled
@@ -429,6 +517,7 @@ def build_investigation_subgraph() -> Any:
         route_after_route,
         {
             "deep_dive": "explore",
+            "cv_dive": "explore",
             "guided": "generate",
             "skip": "skip",
         },
@@ -444,6 +533,7 @@ def build_investigation_subgraph() -> Any:
 async def run_investigation(
     project_text: str,
     *,
+    resume_text: str = "",
     repo: tuple[str, str] | None = None,
     github_base: str = "https://api.github.com",
     github_token: str = "",
@@ -453,10 +543,13 @@ async def run_investigation(
 
     可钉 repo(owner, repo) 逐仓调查(多仓候选一个仓一个 envelope);
     缺省按项目文本首个 GitHub URL。
+    resume_text 传简历全文(技术栈常单列一栏,只给项目文本会让无仓路径
+    看不见它);缺省退化为 project_text,单栏调用方行为不变。
     """
     graph = build_investigation_subgraph()
     init: InvestigationState = {
         "project_text": project_text,
+        "resume_text": resume_text or project_text,
         "github_base": github_base,
         "github_token": github_token,
         "candidate_login": candidate_login,

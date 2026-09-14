@@ -89,7 +89,7 @@ class QuestionSet(BaseModel):
 
     repo_summary: str = ""
     questions: list[InterviewQuestion] = Field(default_factory=list, max_length=6)
-    mode: Literal["repo_deep_dive", "guided", "skipped"] | None = None
+    mode: Literal["repo_deep_dive", "cv_dive", "guided", "skipped"] | None = None
     prompt_version: str = ""
 
 
@@ -209,7 +209,7 @@ class QbankV2(BaseModel):
     schema_name: Literal["evaluation_qbank/v2"] = "evaluation_qbank/v2"
     repo_summary: str = ""
     group: QuestionGroupV2
-    mode: Literal["repo_deep_dive", "guided", "skipped"] | None = None
+    mode: Literal["repo_deep_dive", "cv_dive", "guided", "skipped"] | None = None
     attribution: ATTRIBUTION_LEVEL = "none"
     degraded: bool = False
     degrade_reason: str = ""

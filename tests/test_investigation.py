@@ -33,12 +33,51 @@ def test_extract_repos_returns_all_and_dedupes() -> None:
     assert inv.extract_repo(text) == ("me", "web")
 
 
-def test_route_three_ways() -> None:
+def test_route_has_repo_paths_unchanged() -> None:
+    """有仓两条路径行为不变(不回归)。"""
     long_text = "我做了社团官网重构,负责报名页与后端接口。" * 3
     assert inv.route_project(long_text, True) == "deep_dive"  # 有仓可读
-    assert inv.route_project(long_text, None) == "guided"  # 无仓有实质
-    assert inv.route_project("太短", None) == "skip"  # 无仓无实质
     assert inv.route_project("太短", False) == "guided"  # 有仓但不可读→引导
+
+
+def test_route_no_repo_with_tech_stack_is_cv_dive() -> None:
+    """无仓 + 抽得出技术栈 → cv_dive(简历本身有料,值得深挖)。"""
+    assert inv.route_project("太短", None, tech_count=3) == "cv_dive"
+
+
+def test_route_no_repo_with_substantive_project_is_cv_dive() -> None:
+    """无仓 + 无技术栈但项目经验有实质内容 → cv_dive。"""
+    text = "我做了社团官网重构,负责报名页与后端接口。"
+    assert inv.route_project(text, None) == "cv_dive"
+
+
+def test_route_no_repo_with_placeholder_only_is_guided() -> None:
+    """无仓 + 无技术栈 + 项目经验全虚词 → guided(降级生效)。"""
+    assert inv.route_project("目前没有做过什么项目。", None) == "guided"
+    assert inv.route_project("暂无", None) == "guided"
+    assert inv.route_project("没有项目经验", None) == "guided"
+
+
+def test_route_empty_project_text_is_skip() -> None:
+    """三栏皆空的简历:此维不出题,交给兜底组(不硬凑通用引导题)。"""
+    assert inv.route_project("", None) == "skip"
+    assert inv.route_project("   ", None) == "skip"
+
+
+def test_route_short_but_specific_is_not_punished() -> None:
+    """不用字数阈值:短但具体不算没料(阈值会误杀这类简历)。"""
+    assert inv.route_project("用 Python 写了爬虫", None) == "cv_dive"
+
+
+def test_route_tech_stack_wins_over_empty_project_text() -> None:
+    """项目栏空但技术栈有料 → cv_dive(不是 skip)。"""
+    assert inv.route_project("", None, tech_count=2) == "cv_dive"
+    assert inv.route_project("暂无", None, tech_count=1) == "cv_dive"
+
+
+def test_placeholder_only_keeps_real_content() -> None:
+    """占位表述里夹着真实内容 → 有料(宁可判有料,别误打回兜底)。"""
+    assert inv.route_project("目前没有做过什么项目,但自己写过爬虫", None) == "cv_dive"
 
 
 # ── GitHub 客户端(respx) ────────────────────────────────
@@ -465,6 +504,46 @@ def test_chain_source_not_in_dossier_rejected() -> None:
         )
 
 
+def test_chain_source_ignores_our_scaffolding_words() -> None:
+    """链源校验忽略我们自己材料里的拴架词(模型会把材料标签抄进 theme)。
+
+    实测:模型产出「源自 dossier C4 项目经验栏…」时,`dossier` 是我们材料
+    标签里的内部用词、不在候选人材料中,按内容词判定会把真实链误拒。
+    """
+    from official_agent.evaluation.investigate_graph import _validate_group_v2
+
+    payload = json.loads(_v2_payload())
+    payload["chains"][0] = {
+        "category": "C4_实现细节拷打",
+        "theme": "源自 dossier C4 项目经验栏的报名页重构",
+        "layers": [
+            {"question": f"第{i}层怎么落地?", "expected_signal": "答到什么算过"}
+            for i in range(3)
+        ],
+    }
+    payload["chains"][1] = {
+        "category": "C7_边界与失败模式",
+        "theme": "flask 报名页的边界场景",
+        "layers": [
+            {"question": f"第{i}层怎么落地?", "expected_signal": "答到什么算过"}
+            for i in range(3)
+        ],
+    }
+    payload["entry"]["evidence"]["path"] = ""
+    for r in payload["reserves"]:
+        r["evidence"]["path"] = ""
+    _validate_group_v2(payload, "档案:报名页重构,用了 flask", [], no_repo=True)
+
+
+def test_chain_source_still_rejects_fabricated_component() -> None:
+    """忽略表不得放宽成「什么都放行」:编造的组件词仍被拒。"""
+    from official_agent.evaluation.investigate_graph import _validate_group_v2
+
+    payload = json.loads(_v2_payload())
+    payload["chains"][0]["theme"] = "kafka 消息队列的削峰设计"
+    with pytest.raises(ValueError, match="链源不在 dossier"):
+        _validate_group_v2(payload, "档案:报名页重构,用了 flask", [], no_repo=True)
+
 def test_reserve_path_whitelist_enforced() -> None:
     """备选题 evidence.path 白名单同样校验(曾只查 entry)。"""
     from official_agent.evaluation.investigate_graph import _validate_group_v2
@@ -527,3 +606,149 @@ async def test_generation_usage_into_envelope(monkeypatch) -> None:
     gu = qs.get("generation_usage")
     assert gu is not None and gu["input_tokens"] == 900
     assert gu["cache_hit_tokens"] == 500
+
+
+# ── cv_dive:无仓简历路径 ────────────────────────────────
+
+#: 无仓简历的结构:技术栈单列一栏 + 项目经验有实质内容,无任何 GitHub 链接。
+_CV_RESUME = (
+    "技术能力\n技术栈:\nPython、PyTorch、ResNet\n"
+    "项目经验:\n工业钢材缺陷检测,用 PyTorch 复现了 ResNet 分类\n"
+    "自我介绍:\n喜欢折腾模型"
+)
+
+
+def _cv_chain(category: str, theme: str, question: str) -> dict:
+    """链的文本须含 dossier 里出现过的拉丁词元(链源真实性校验)。"""
+    return {
+        "category": category,
+        "theme": theme,
+        "layers": [
+            {"question": q, "expected_signal": "答到什么算过"}
+            for q in (
+                f"{question} 是什么?",
+                f"{question} 在项目里怎么用的?",
+                f"{question} 有什么坑?",
+            )
+        ],
+    }
+
+
+def _cv_payload() -> str:
+    """CV 出题形状:入口 + 两条带链的技术栈题,证据锚是简历原文句。"""
+    return json.dumps(
+        {
+            "repo_summary": "无仓简历:技术栈 Python/PyTorch/ResNet",
+            "entry": {
+                "category": "C2_技术选型与权衡",
+                "question": "你的技术栈里为什么选 PyTorch?",
+                "answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},
+                "evidence": {"path": "", "note": "技术栈栏:Python、PyTorch、ResNet"},
+                "time_minutes": 3,
+            },
+            "chains": [
+                _cv_chain("C2_技术选型与权衡", "技术栈栏的 PyTorch", "PyTorch"),
+                _cv_chain("C4_实现细节拷打", "项目里的 ResNet", "ResNet"),
+            ],
+            "reserves": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+def _install_fake_cv_model(monkeypatch, payload: str) -> None:
+    """简历路径:只有出题段调模型(技术栈抽取在路由前已由项目栏有料短路)。"""
+
+    class _Msg:
+        content = payload
+
+    class _M:
+        async def ainvoke(self, messages):
+            return _Msg()
+
+    class _S:
+        model_strong = "test-strong"
+
+    monkeypatch.setattr(ig, "build_model", lambda *a, **k: _M())
+    monkeypatch.setattr(ig, "get_effective_settings", _S)
+
+
+@pytest.mark.asyncio
+async def test_cv_dive_produces_question_chains(monkeypatch) -> None:
+    """无仓简历出带追问链的题组,不再是 entry-only(本票核心)。"""
+    _install_fake_cv_model(monkeypatch, _cv_payload())
+    qs = await ig.run_investigation(_CV_RESUME)
+    assert qs["mode"] == "cv_dive"
+    assert len(qs["group"]["chains"]) == 2
+    assert all(len(c["layers"]) == 3 for c in qs["group"]["chains"])
+
+
+@pytest.mark.asyncio
+async def test_cv_dive_dossier_carries_resume_text(monkeypatch) -> None:
+    """取材档案用简历文本渲染,不再是「探索段未取得材料」。"""
+    _install_fake_cv_model(monkeypatch, _cv_payload())
+    qs = await ig.run_investigation(_CV_RESUME)
+    dossier = qs["explore_meta"]
+    assert dossier["dossier_chars"] > 0
+    assert qs["group"]["entry"]["evidence"]["path"] == ""  # 无仓:不带仓路径
+
+
+@pytest.mark.asyncio
+async def test_cv_dive_repo_path_never_used(monkeypatch) -> None:
+    """简历没有仓:模型若给仓内路径,那是臆造,必须拒。"""
+    payload = json.loads(_cv_payload())
+    payload["entry"]["evidence"]["path"] = "src/main.py"
+    _install_fake_cv_model(monkeypatch, json.dumps(payload, ensure_ascii=False))
+    with pytest.raises(RuntimeError, match="无仓路径不得带仓内"):
+        await ig.run_investigation(_CV_RESUME)
+
+
+@pytest.mark.asyncio
+async def test_cv_dive_no_github_client(monkeypatch) -> None:
+    """简历路径零 GitHub 调用(无仓可探)。"""
+
+    def _boom(*a, **k):
+        raise AssertionError("cv_dive 不得建 GitHub 客户端")
+
+    _install_fake_cv_model(monkeypatch, _cv_payload())
+    monkeypatch.setattr(ig, "GitHubClient", _boom)
+    qs = await ig.run_investigation(_CV_RESUME)
+    assert qs["mode"] == "cv_dive"
+
+
+@pytest.mark.asyncio
+async def test_cv_dive_not_thinned_by_short_resume(monkeypatch) -> None:
+    """短简历是正常简历,不套用仓路径的体量阈值(误杀短但具体的简历)。"""
+    _install_fake_cv_model(monkeypatch, _cv_payload())
+    qs = await ig.run_investigation(_CV_RESUME)  # 档案体量远小于 400 字符
+    assert len(qs["group"]["chains"]) == 2  # 未被判成敷衍而砍到 ≤3 题
+
+
+@pytest.mark.asyncio
+async def test_placeholder_resume_degrades_to_guided(monkeypatch) -> None:
+    """「目前没有做过什么项目」→ guided 兜底,不硬凑深挖题。"""
+    payload = json.dumps(
+        {
+            "repo_summary": "",
+            "entry": {
+                "category": "C1_背景与动机",
+                "question": "讲讲你自己?",
+                "answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},
+                "evidence": {"path": "", "note": "通用引导"},
+                "time_minutes": 3,
+            },
+            "chains": [],
+            "reserves": [],
+        },
+        ensure_ascii=False,
+    )
+    _install_fake_cv_model(monkeypatch, payload)
+
+    async def _no_tech(text):
+        return []
+
+    monkeypatch.setattr(ig, "extract_tech_stack", _no_tech)
+    # 真实调用形状:project_text 只装项目栏;技术栈抽取返回空 → 判为没料
+    qs = await ig.run_investigation("目前没有做过什么项目。")
+    assert qs["mode"] == "guided"
+    assert qs["group"]["chains"] == []

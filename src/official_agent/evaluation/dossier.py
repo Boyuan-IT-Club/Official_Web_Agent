@@ -75,3 +75,66 @@ class Dossier:
 
     def is_empty(self) -> bool:
         return self.total_chars == 0
+
+
+def dossier_from_resume(resume_text: str, *, attribution: str = "") -> Dossier:
+    """简历文本 → 取材档案(无仓路径的取材来源)。
+
+    仓深挖的档案由探索段从代码仓取材;无仓简历没有仓可探,简历文本本身
+    就是全部材料。此前这条路径只产出一句「探索段未取得材料」,出题段
+    等于拿空档案出题——现在把简历按板块灌进对应取材槽。
+
+    槽位映射按「该板块能回答哪类问题」:
+    - 技术栈栏 → C2 技术选型与权衡(候选人主动声明的技术面)
+    - 项目经验栏 → C4 实现细节拷打(能追问做法与细节的唯一来源)
+    - 其余正文(自我介绍等)→ C1 背景与动机
+
+    定位不到板块时把全文落 C1:宁可粗一点,也不要空档案。
+    """
+    from official_agent.evaluation.tech_stack import (
+        locate_project_section,
+        locate_tech_section,
+    )
+
+    text = (resume_text or "").strip()
+    dossier = Dossier(attribution=attribution)
+    if not text:
+        return dossier
+
+    tech = locate_tech_section(text)
+    project = locate_project_section(text)
+    if tech:
+        dossier.add("C2_技术选型与权衡", f"技术栈栏:\n{tech}")
+    if project:
+        dossier.add("C4_实现细节拷打", f"项目经验栏:\n{project}")
+    if not tech and not project:
+        dossier.add("C1_背景与动机", text)
+    else:
+        # 除已分派的板块外,其余正文仍是背景材料的来源
+        remainder = _resume_remainder(text, tech, project)
+        if remainder:
+            dossier.add("C1_背景与动机", remainder)
+    return dossier
+
+
+def _resume_remainder(text: str, tech: str, project: str) -> str:
+    """扣掉已分派给其它槽的正文,返回剩余部分(保序,丢弃纯标题行)。
+
+    纯标题行(「技术栈:」「项目经验:」)本身不含信息,留在背景槽只会给模型
+    灌噪声——正文已经分派到各自的槽里了。
+    """
+    dispatched = {line.strip() for line in f"{tech}\n{project}".splitlines() if line.strip()}
+    kept = [
+        line
+        for line in text.splitlines()
+        if line.strip()
+        and line.strip() not in dispatched
+        and not _is_label_only(line.strip())
+    ]
+    return "\n".join(kept)
+
+
+def _is_label_only(line: str) -> bool:
+    """整行是否只是个板块标题(末尾冒号、剥掉冒号后很短)。"""
+    stripped = line.rstrip(":：").strip()
+    return line.endswith((":", "：")) and len(stripped) <= 6
