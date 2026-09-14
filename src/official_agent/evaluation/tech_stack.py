@@ -46,17 +46,30 @@ ClaimedLevel = Literal["精通", "熟练", "掌握", "了解", "初学", "listed
 #: 先命中「初步」得初学,比判成「了解」更保守。「擅长」只算熟练——它表达的
 #: 是相对偏好而非登峰造极,抬到精通会把面试官推向候选人答不上的深水区。
 _LEVEL_PATTERNS: tuple[tuple[str, ClaimedLevel], ...] = (
+    # 弱化修饰词:与档位词连写时先命中,把档位压到初学
+    # (「初步掌握」= 初学,不是掌握)
+    ("初步", "初学"),
+    ("粗浅", "初学"),
+    ("简单学习", "初学"),
+    ("正在学", "初学"),
+    ("练手", "初学"),
+    ("用过", "初学"),
+    # 档位词:「擅长」只算熟练,不到精通
     ("精通", "精通"),
     ("擅长", "熟练"),
     ("熟练", "熟练"),
     ("掌握", "掌握"),
-    ("初步", "初学"),
-    ("粗浅", "初学"),
-    ("正在学", "初学"),
-    ("用过", "初学"),
     ("初学", "初学"),
     ("了解", "了解"),
 )
+
+#: 否定词:档位词被这些词否定时不算自述(「尚未掌握」= 不会,不是掌握)。
+#: 不含「非」——它与常见的加强副词「非常」同字(「我非常擅长 Python」会被
+#: 误判成否定),而「非精通」这类否定式在简历里几乎不出现,收进来弊大于利。
+_NEGATIONS = ("不", "未", "没", "无")
+#: 否定检测窗口:覆盖「不太熟练」「尚未真正掌握」这种隔着副词的否定,
+#: 又不至于跨句误伤。
+_NEGATION_WINDOW = 4
 
 #: 技术栈栏标题候选(简历措辞不一:「技术栈:」「技术能力」「专业技能」…)
 _TECH_HEADERS = ("技术栈", "技术能力", "专业技能", "技能栈", "技能")
@@ -104,14 +117,25 @@ def _normalize(text: str) -> str:
 
 
 def _match_header(line: str, headers: Sequence[str]) -> str | None:
-    """行首命中标题则返回标题后的同行正文(无则空串);未命中返回 None。
+    """命中板块标题则返回标题后的同行正文(无则空串);未命中返回 None。
 
-    同行正文用于「技术栈:Python、Java」这类单行写法——真实简历里常见,
-    丢掉它等于丢掉整个技术栈栏。
+    两种写法都认:
+    - 行首即标题(「技术栈」独占一行,或「技术栈:Python、Java」单行);
+      同行正文必须留下——真实简历里单行技术栈很常见,丢掉它等于丢掉整栏。
+    - 标题带限定前缀(「个人技能:」「IT技能:」):按冒号切出前面的标题部分,
+      看它以哪个候选收尾。只认行首会把这些整栏漏掉。
     """
     for header in headers:
         if line.startswith(header):
             return line[len(header) :].lstrip(":： \t\u3000")
+    for sep in ("：", ":"):
+        index = line.find(sep)
+        if index <= 0:
+            continue
+        title = line[:index].strip()
+        for header in headers:
+            if title.endswith(header):
+                return line[index + 1 :].lstrip(" \t\u3000")
     return None
 
 
@@ -150,31 +174,74 @@ def locate_project_section(text: str) -> str:
     return _locate_section(text, _PROJECT_HEADERS, _PROJECT_BREAKS)
 
 
-def verify_evidence(name: str, raw_text: str, source_text: str) -> bool:
-    """证据闸门:名词须出现在自述出处句里,且出处句须是简历原文。
+def verify_evidence(name: str, source_text: str) -> bool:
+    """证据闸门:技术名词必须能在简历原文中找到。
 
-    两个条件都要求归一后为原文子串。比只查原文更严一档——只查原文时
-    「真句子配假名词」能蒙混过关,那样 raw_text 就失去了出处含义。
+    这是仓深挖「evidence.path 必须在仓内」在无仓场景的等价物,也是唯一的
+    真实性锚:编造的名词过不了这一关,面试官就不会问到候选人没写过的东西。
     """
     normalized_name = _normalize(name)
-    normalized_raw = _normalize(raw_text)
-    normalized_source = _normalize(source_text)
-    if not normalized_name or not normalized_raw or not normalized_source:
-        return False
-    return normalized_raw in normalized_source and normalized_name in normalized_raw
+    return bool(normalized_name) and normalized_name in _normalize(source_text)
+
+
+def locate_evidence(name: str, source_text: str) -> str:
+    """在原文里定位该名词所在的**那一行**,作为出处句;找不到返回空串。
+
+    逐行归一后子串匹配:命中行原样返回,所以结果必然能在原文中原样找到。
+    """
+    target = _normalize(name)
+    for raw in source_text.splitlines():
+        line = raw.strip()
+        if line and target in _normalize(line):
+            return line
+    return ""
+
+
+def resolve_quote(name: str, model_quote: str, source_text: str) -> str:
+    """确定出处句,保证它既是原文原样、又真的含该名词。
+
+    模型的句子可信(是原文片段且含该名词)就用它——句子更精确;否则从原文
+    定位该名词所在行。修正而非拒收:名词本身是真的就被留下了,张冠李戴的
+    出处句由原文纠正——这样既不会误杀真实名词,也不会让出处句与名词错配。
+    """
+    normalized_quote = _normalize(model_quote)
+    normalized_name = _normalize(name)
+    if (
+        normalized_quote
+        and normalized_quote in _normalize(source_text)
+        and normalized_name in normalized_quote
+    ):
+        return model_quote
+    return locate_evidence(name, source_text) or normalized_name
 
 
 def normalize_level(value: Any) -> ClaimedLevel:
     """自述措辞 → 固定档位;没写措辞或认不出的取 listed。
 
-    否定措辞不算自述(「不了解 Redis」不是把 Redis 列为技能),故用先行
-    否定断言排除;认不出的措辞同样落到 listed,不抬档。
+    否定措辞不算自述(「不了解 Redis」不是把 Redis 列为技能),且否定式
+    不限于紧邻的「不」:「尚未掌握」「没有掌握」「不太熟练」同样是在说
+    **不会**,不是自述档位。漏掉这些会把人抬到高档位,面试官据此问深,
+    正好伤害本模块想避免的那件事。
+
+    认不出的措辞一律落 listed,不抬档——档位只降不升是安全方向。
     """
     text = str(value or "").strip()
     for word, level in _LEVEL_PATTERNS:
-        if re.search(rf"(?<!不){re.escape(word)}", text):
-            return level
+        for match in re.finditer(re.escape(word), text):
+            if not _is_negated(text, match.start()):
+                return level
     return "listed"
+
+
+def _is_negated(text: str, word_start: int) -> bool:
+    """档位词前的小窗口内是否出现否定词。
+
+    窗口取措辞前若干字符:中文否定常以副词隔着程度词出现(「不太熟练」
+    「尚未真正掌握」),只看紧邻一字会漏。窗口小到不会误伤「不同项目里
+    熟练使用」这类已隔断的肯定表述。
+    """
+    window = text[max(0, word_start - _NEGATION_WINDOW) : word_start]
+    return any(neg in window for neg in _NEGATIONS)
 
 
 def _clean_used_in(value: Any, source_text: str) -> tuple[str, ...]:
@@ -212,13 +279,11 @@ def _merge_used_in(left: tuple[str, ...], right: tuple[str, ...]) -> tuple[str, 
     return tuple(out)
 
 
-def build_items(
-    raw_items: Sequence[Any], source_text: str, *, limit: int = MAX_ITEMS
-) -> list[TechStackItem]:
+def build_items(raw_items: Sequence[Any], source_text: str) -> list[TechStackItem]:
     """模型原始条目 → 受闸门约束的技术栈条目(纯函数,零 IO)。
 
     闸门顺序:证据校验(弃编造)→ 同名词合并 → 上限截断。保序:模型按
-    技术栈栏顺序返回,顺序即醒目度,截断取前 limit 条。
+    技术栈栏顺序返回,顺序即醒目度,截断取前 MAX_ITEMS 条。
     """
     out: list[TechStackItem] = []
     index: dict[str, int] = {}
@@ -228,10 +293,10 @@ def build_items(
         if not isinstance(raw, dict):
             continue
         name = str(raw.get("name") or "").strip()
-        raw_text = str(raw.get("raw_text") or "").strip()
-        if not verify_evidence(name, raw_text, source_text):
+        if not verify_evidence(name, source_text):
             rejected.append(name or "<无名>")
             continue
+        raw_text = resolve_quote(name, str(raw.get("raw_text") or ""), source_text)
 
         key = _normalize(name)
         used_in = _clean_used_in(raw.get("used_in"), source_text)
@@ -242,7 +307,7 @@ def build_items(
                 current, used_in=_merge_used_in(current.used_in, used_in)
             )
             continue
-        if len(out) >= limit:
+        if len(out) >= MAX_ITEMS:
             continue
         index[key] = len(out)
         out.append(
@@ -286,21 +351,21 @@ def _build_material(resume_text: str) -> str:
     )
 
 
-async def extract_tech_stack(
-    resume_text: str, *, limit: int = MAX_ITEMS
-) -> list[TechStackItem]:
+async def extract_tech_stack(resume_text: str) -> list[TechStackItem]:
     """简历文本 → 技术栈条目;抽不出返回空列表,由调用方决定是否降级。
 
-    不触网的短路:文本为空、或技术栈栏与项目经验栏都定位不到——这两种情况
-    没有任何可锚定的原文,调用模型必然被证据闸门全否,白花一次调用。
+    唯一不触网的短路是空文本:确实没有可读的材料。
+
+    定位不到技术栈栏**不**短路——证据闸门比对的是简历全文,正文里散落的
+    技术名词照样能过闸门并找到出处;把「栏位没认出来」当成「没有技术栈」
+    会静默丢掉整栏(简历的标题写法五花八门),正是本模块要消灭的漏检。
+    多花一次模型调用换取不漏,这个方向的代价是可接受的。
 
     模型调用本身失败(网络/供应商)照常抛出:那是基础设施故障,不是
     「这份简历抽不出技术栈」,不该被静默当成降级信号。
     """
     text = (resume_text or "").strip()
     if not text:
-        return []
-    if not locate_tech_section(text) and not locate_project_section(text):
         return []
 
     settings = get_effective_settings()
@@ -321,4 +386,4 @@ async def extract_tech_stack(
             "guard_event guard_name=tech_stack_parse verdict=no_items"
         )
         return []
-    return build_items(raw_items, text, limit=limit)
+    return build_items(raw_items, text)
