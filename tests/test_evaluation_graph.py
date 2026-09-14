@@ -69,7 +69,7 @@ async def test_hard_zero_short_circuits_without_model() -> None:
     assert card["attitude"]["verdict"] == "bad_faith"
     assert all(d["score"] == 0 for d in card["dimensions"])
     assert "单字符重复" in json_of_reasons(card)
-    assert card["versions"]["prompt"] == "evaluation_scoring/v3"
+    assert card["versions"]["prompt"] == "evaluation_scoring/v4"
 
 
 def json_of_reasons(card: dict) -> str:
@@ -145,7 +145,7 @@ def test_dimension_incompleteness_raises() -> None:
     with (
         patch.object(ev, "build_model", lambda *a, **k: _fake_model(bad)),
         patch.object(ev, "get_effective_settings", _settings),
-        pytest.raises(RuntimeError, match="维度集不完整"),
+        pytest.raises(RuntimeError, match="维度集不符"),
     ):
         asyncio.run(ev.run_evaluation(_FIELDS, resume_id=5, cycle_id=2026))
 
@@ -318,7 +318,7 @@ async def test_extra_key_triggers_corrective_retry() -> None:
     ):
         card = await ev.run_evaluation(_FIELDS, resume_id=13, cycle_id=2026)
     assert len(calls) == 2
-    assert "不要新增任何其他键" in calls[1]
+    assert "attitude 由 verdict 与 reason 两个键组成" in calls[1]
     assert card["attitude"]["verdict"] == "sincere"
     assert "reason_note" not in card["attitude"]
 
@@ -366,3 +366,27 @@ async def test_corrective_error_text_stays_inside_data_zone() -> None:
     after_last_zone = prompt2.rsplit("</data>", 1)[1]
     assert payload not in after_last_zone
     assert card["attitude"]["verdict"] == "sincere"
+
+
+def test_duplicate_field_key_reports_which_key() -> None:
+    """重复 field_key 的报错必须点名具体键。
+
+    回归:旧实现用 set 差算 missing/extra,而判定用 list 比较——模型重复
+    输出同一 field_key 时 list 不等但两个 set 差都为空,于是报「缺 [],多 []」,
+    既无从排查,回灌给模型的纠正诊断也形同空文(实测约 30% 失败里的一类)。
+    """
+    dup = (
+        '{"dimensions": ['
+        '{"field_key": "intro", "score": 80, "rationale": "r", "evidence": "做过两个 Web 项目"},'
+        '{"field_key": "intro", "score": 70, "rationale": "r", "evidence": "做过两个 Web 项目"},'
+        '{"field_key": "reason", "score": 40, "rationale": "r", "evidence": "认同社团氛围"}],'
+        '"attitude": {"verdict": "sincere", "reason": "r"}}'
+    )
+    with (
+        patch.object(ev, "build_model", lambda *a, **k: _fake_model(dup)),
+        patch.object(ev, "get_effective_settings", _settings),
+        pytest.raises(RuntimeError) as ei,
+    ):
+        asyncio.run(ev.run_evaluation(_FIELDS, resume_id=15, cycle_id=2026))
+    msg = str(ei.value)
+    assert "重复" in msg and "intro" in msg, f"报错未点出重复键:{msg}"

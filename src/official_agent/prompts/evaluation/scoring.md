@@ -1,9 +1,9 @@
 ---
 name: evaluation-scoring
-description: B 简历初筛打分 prompt v3(逐维三要素 rationale+提分点+每维 rubric 槽+态度三要素;strict 结构化输出)
-version: evaluation_scoring/v3
+description: B 简历初筛打分 prompt v4(逐维三要素 rationale+提分点+每维 rubric 槽+态度三要素;strict 结构化输出)
+version: evaluation_scoring/v4
 model_tier: strong
-cache_prefix: evaluation-scoring-v3
+cache_prefix: evaluation-scoring-v4
 model: strong
 ---
 
@@ -50,8 +50,8 @@ model: strong
   3. **与分的关系**:压没压分、为什么。
 - bad_faith 的 reason 必须点名具体 field_key 并**引述原文**(校验会拒);
   单维弱不等于态度问题,看整体一致性。
-- **attitude 对象只允许 {"verdict", "reason"} 两个键**:不要发明
-  reason_evidence 等额外字段,引述一律写在 reason 文本内。
+- **attitude 的两个键**:`verdict` 与 `reason`。要引述原文时**写在 reason 文本里**
+  (例如:`projects 敷衍,原文仅「了解了相关知识」;self_intro 认真,有具体项目与收获`)。
 
 ## 硬性要求
 1. 每个 dimension 的 evidence 必须从该维原文中**逐字摘一句**原文(不超过 60 字);
