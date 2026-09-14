@@ -1,4 +1,4 @@
-"""B1 evaluation_scorecard 数据面单测:mock 连接验证 SQL/版本递增语义。"""
+"""evaluation_scorecard 数据面单测:mock 连接验证 SQL/版本递增语义。"""
 
 from unittest.mock import MagicMock
 
@@ -19,7 +19,7 @@ def _mock_conn(fetchone=None, fetchall=None, rowcount=1):
 
 
 def test_save_scorecard_version_increments(monkeypatch) -> None:
-    """重跑版本递增:版本 = 现存最大+1,旧版保留(#124)。"""
+    """重跑版本递增:版本 = 现存最大+1,旧版保留。"""
     conn = _mock_conn(fetchone={"v": 2})
     monkeypatch.setattr(evaluation, "_conn", lambda: conn)
     version = evaluation.save_scorecard(

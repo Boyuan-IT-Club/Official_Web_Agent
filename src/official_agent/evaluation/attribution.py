@@ -1,6 +1,6 @@
-"""入口瀑布与归属四级(B-AG2,#150;spec §3.1 + ADR-0008)。
+"""入口瀑布与归属四级(ADR-0008)。
 
-瀑布(D2,只深挖简历点名的项目):
+瀑布(只深挖简历点名的项目):
   1. 简历文本含 github.com/owner/repo → 直配(source="url")
   2. 绑定登录名 → 在其名下仓中按关键词匹配(source="bound")
   3. GitHub Search 按项目名搜(source="search")
@@ -8,7 +8,7 @@
 
 归属四级(ADR-0008,只增不改):
   - trusted-own            owner == 绑定登录名 → 全量深挖
-  - trusted-contribution   仓内查到 author=本人的 commits 或 PR(D3:fork 不要求
+  - trusted-contribution   仓内查到 author=本人的 commits 或 PR(fork 不要求
                            领先父仓)→ 深挖,题锚定具体贡献
   - claimed                简历 URL/贡献声明,本人自述未核对 → 深挖,信封标注
   - unverified             搜索命中且无归属证据 → **不深挖,仅 guided**
@@ -52,14 +52,14 @@ class RepoAttribution:
     @property
     def deep_dive_allowed(self) -> bool:
         """unverified 绝不产出仓锚定题(ADR-0008);贡献声明类 claimed 只出
-        过程题不做仓内深挖(D4)——URL 类 claimed 仍深挖、信封标注。"""
+        过程题不做仓内深挖——URL 类 claimed 仍深挖、信封标注。"""
         if self.level == "unverified":
             return False
         return not (self.level == "claimed" and self.source == "contribution")
 
 
 def detect_contribution_target(text: str) -> tuple[str, str] | None:
-    """从贡献声明里提取目标仓(owner/repo);「给 xx 仓做贡献」是一等调查对象(D4)。
+    """从贡献声明里提取目标仓(owner/repo);「给 xx 仓做贡献」是一等调查对象。
 
     只认「仓 + 贡献动词」连用(给 kubernetes/kubernetes 贡献了 / 提了 PR 到
     xx/yy / contribute to xx/yy);「为 Vue/React 双栈」这类技术栈斜杠不算。"""
@@ -98,7 +98,7 @@ def _norm(name: str) -> str:
 
 
 def _repo_matches(row: dict, keywords: list[str]) -> bool:
-    """仓名命中任一关键词——**词界等值**,不做子串(D2 只深挖点名项目)。
+    """仓名命中任一关键词——**词界等值**,不做子串(只深挖点名项目)。
 
     匹配 = 关键词等于仓名 / 等于仓名按 [-_.] 切出的词元 / 去分隔符后等值。
     描述不参与(描述子串太松,会把绑定名下无关仓误判成点名项目)。"""
@@ -114,7 +114,7 @@ def _repo_matches(row: dict, keywords: list[str]) -> bool:
 async def _contribution_evidence(client: GitHubClient, owner: str, name: str, login: str) -> str:
     """author=login 的 commits/PR 证据;查到返回描述串,没查到/不可读返回空。
 
-    commits 与 PR 任一命中即算(D4/ADR-0008);查询失败按无证据处理——
+    commits 与 PR 任一命中即算(ADR-0008);查询失败按无证据处理——
     降级语义,不炸瀑布。"""
     try:
         commits = await client.read_commits(owner, name, author=login, per_page=5)
@@ -162,10 +162,10 @@ async def resolve_entry(
     login: str,
     client: GitHubClient,
 ) -> RepoAttribution | None:
-    """入口瀑布(spec §3.1):URL 直配 → 绑定匹配 → 搜索兜底 → None。
+    """入口瀑布:URL 直配 → 绑定匹配 → 搜索兜底 → None。
 
     None = 无仓位置,调用方按既有 route_project 走 guided/skip;
-    GitHubUnavailable 向上抛(不可读 → 调用方降级 guided,spec §3.4)。"""
+    GitHubUnavailable 向上抛(不可读 → 调用方降级 guided)。"""
 
     # 1. 简历 URL 直配
     urls = extract_repos(project_text)

@@ -1,4 +1,4 @@
-"""GRA-01 身份解析单测:claims 解码/角色映射/CLI 全链路/节点校验行为。"""
+"""身份解析单测:claims 解码/角色映射/CLI 全链路/节点校验行为。"""
 
 import base64
 import json
@@ -158,7 +158,7 @@ async def test_resolve_cli_without_username_uses_shared_client() -> None:
 
 @respx.mock
 async def test_resolve_cli_missing_user_id_degrades() -> None:
-    """P2 回归:claims 缺 userId 不得兜底 0(0 会绕过 unknown 降级)。"""
+    """claims 缺 userId 不得兜底 0(0 会绕过 unknown 降级)。"""
     respx.post(LOGIN).mock(
         side_effect=lambda _: login_ok({"roleNames": ["管理员"], "permissionCodes": []})
     )
@@ -223,14 +223,14 @@ async def test_resolve_web_missing_token_raises() -> None:
 
 
 async def test_resolve_feishu_still_reserved() -> None:
-    """飞书通道仍未实现(M3):保持 NotImplementedError。"""
-    with pytest.raises(NotImplementedError, match="M3"):
+    """飞书通道仍未实现:保持 NotImplementedError。"""
+    with pytest.raises(NotImplementedError, match="飞书通道尚未实现"):
         await resolve(IdentityCredential(kind="feishu"))
 
 
 @respx.mock
 async def test_resolve_kind_none_defaults_to_cli_not_feishu() -> None:
-    """P3 回归:kind 缺省/None 落 cli,不误入飞书分支。"""
+    """kind 缺省/None 落 cli,不误入飞书分支。"""
     respx.post(LOGIN).mock(
         side_effect=lambda _: httpx.Response(401, json={"code": 401, "message": "凭证错"})
     )

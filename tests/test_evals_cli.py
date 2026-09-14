@@ -1,6 +1,6 @@
-"""eval CLI(--write-baseline/--baseline 往返)测试(#148 评审 P1)。
+"""eval CLI(--write-baseline/--baseline 往返)测试。
 
-锁死评审闸抓到的 P0:write-baseline 产物(suites 包装)必须能直接作为
+锁死基线门禁的静默空转:write-baseline 产物(suites 包装)必须能直接作为
 --baseline 生效——指标回退时门禁必须 FAIL,不允许静默变绿。
 """
 
@@ -71,7 +71,7 @@ async def test_write_then_regress_baseline_gate_fails(tmp_path: Path) -> None:
     payload = json.loads(baseline_path.read_text(encoding="utf-8"))
     assert "suites" in payload and "recall_at_3" in payload["suites"]["foo"]["metrics"]
 
-    # ② 指标腰斩后,用同一份基线文件对比 → 必须 FAIL(评审 P0 的静默空转场景)
+    # ② 指标腰斩后,用同一份基线文件对比 → 必须 FAIL(防静默空转)
     degraded = {"fake": _spec_with({"recall_at_3": 0.40, "mrr": 0.30})}
     rc = await mod._run(_ns(baseline=baseline_path), evals_dir=tree, registry=degraded)
     assert rc == 1

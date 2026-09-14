@@ -1,12 +1,12 @@
-"""探索段受限 ReAct 循环(B-AG3,#151;spec §3.2/D6/D7/D8)。
+"""探索段受限 ReAct 循环。
 
-LLM(model_strong)决定调 D6 八工具之一 → 观察 → 观察**确定性映射**进
-dossier 槽位(spec:agent 决定填多满,槽位归属不必 LLM 再判一次)。
+LLM(model_strong)决定调八工具之一 → 观察 → 观察**确定性映射**进
+dossier 槽位(agent 决定填多满,槽位归属不必 LLM 再判一次)。
 预算四闸:①每仓 80 轮(LLM+工具累计)②墙钟 300s ③单工具结果截断
-(client 层已做,#149)④dossier ≤40K(dossier.add 把关)。任一触顶即停,
-用已有材料出题并标 degraded(D7:不判失败)。
+(client 层已做)④dossier ≤40K(dossier.add 把关)。任一触顶即停,
+用已有材料出题并标 degraded(不判失败)。
 
-prompt cache 纪律(D8):system(技能文本)跨候选字节稳定——不嵌时间戳/
+prompt cache 纪律:system(技能文本)跨候选字节稳定——不嵌时间戳/
 仓主名/随机数;候选人材料只进 user 消息且追加不改写;步数计数放 user
 消息尾部(每轮一条新 user 计数消息,历史只增)。
 """
@@ -24,7 +24,7 @@ from official_agent.evaluation.github_client import GitHubClient, GitHubUnavaila
 from official_agent.security.injection_guard import guard_tool_result
 from official_agent.state.conversation import extract_usage
 
-#: 预算闸(D7)
+#: 预算闸
 MAX_TURNS = 80
 MAX_WALL_SECONDS = 300
 
@@ -43,7 +43,7 @@ _SLOT_BY_TOOL: dict[str, tuple[str, ...]] = {
     "list_user_repos": (_S["C1_背景与动机"],),
 }
 # C9 变更应力不单列映射:配置/CI/扩展点类 read_file 观察落 C4/C7 后由出题段
-# 引用(spec「不必每类必有材料」);单列会令每次读码都灌 C9,稀释槽位语义。
+# 引用(「不必每类必有材料」);单列会令每次读码都灌 C9,稀释槽位语义。
 
 
 def _observation_text(tool_name: str, payload: Any) -> str:
@@ -65,9 +65,9 @@ def _observation_text(tool_name: str, payload: Any) -> str:
 
 
 def build_explore_tools(client: GitHubClient, owner: str, name: str) -> list:
-    """D6 八工具 → LangChain StructuredTool,**仓域预绑定**。
+    """八工具 → LangChain StructuredTool,**仓域预绑定**。
 
-    owner/repo 由循环锁定(探索段不换仓,D2);模型侧签名只剩真正的参数
+    owner/repo 由循环锁定(探索段不换仓);模型侧签名只剩真正的参数
     (query/path/sha/author…),schema 来自显式签名+docstring。"""
 
     from langchain_core.tools import StructuredTool
@@ -139,7 +139,7 @@ async def explore_repo(
     """跑一个仓的受限探索,返回 dossier(唯一产出)。
 
     GitHub 不可达不作失败:返回空 dossier(degraded=True),出题段降级
-    guided(spec §3.4)。模型异常同理——探索段异常不炸 bundle。"""
+    guided。模型异常同理——探索段异常不炸 bundle。"""
     dossier = dossier or Dossier(attribution=attribution)
     tools = build_explore_tools(client, owner, name)
     tools_by_name = {t.name: t for t in tools}
@@ -178,7 +178,7 @@ async def explore_repo(
             if dossier.degraded:  # dossier 40K 已触顶(add 里标记)
                 break
             turn += 1
-            # D8:步数计数放 user 消息尾部,追加不改写
+            # 步数计数放 user 消息尾部,追加不改写
             messages.append(
                 HumanMessage(
                     f"[探索步 {turn}/{MAX_TURNS},已用 {int(elapsed)}s,"
@@ -188,9 +188,9 @@ async def explore_repo(
             remaining = MAX_WALL_SECONDS - (time.monotonic() - start)
             response = await asyncio.wait_for(model.ainvoke(messages), timeout=max(remaining, 1.0))
             messages.append(response)
-            # D9/#154:extract_usage 统一解析。raw token_usage 优先——
+            # extract_usage 统一解析。raw token_usage 优先——
             # DeepSeek prompt_cache_hit/miss 只在原始 usage,langchain 转换
-            # 会丢(#113 先例,评审 P0 实测 usage_metadata 恒真值短路兜底)
+            # 会丢(实测 usage_metadata 有恒真值短路兜底)
             response_metadata = getattr(response, "response_metadata", None) or {}
             usage = extract_usage(
                 response_metadata.get("token_usage") or getattr(response, "usage_metadata", None)
@@ -204,7 +204,7 @@ async def explore_repo(
                 break  # 材料自认充分,正常终止
             written_slots: list[str] = []
             for tc in tool_calls:
-                # D7 硬闸:轮数 = LLM+工具调用累计,逐次判定(评审 P1:一批并行
+                # 硬闸:轮数 = LLM+工具调用累计,逐次判定(一批并行
                 # 工具调用不得突破 80 上限);墙钟同样覆盖工具执行
                 if turn >= MAX_TURNS:
                     dossier.degraded = True
@@ -239,7 +239,7 @@ async def explore_repo(
                 if tool_name == "list_files" and isinstance(payload, tuple):
                     dossier.paths, dossier.paths_truncated = payload
                 slots = _SLOT_BY_TOOL.get(tool_name, ())
-                # 逐槽写入(any 会短路,多槽元组实际只进首槽——评审 P1)
+                # 逐槽写入(any 会短路,多槽元组实际只进首槽)
                 written = [dossier.add(slot, observation) for slot in slots] if observation else []
                 if written:
                     hit = [
@@ -250,7 +250,7 @@ async def explore_repo(
                     written_slots.extend(hit)
                 # OpenAI 序纪律:ToolMessage 必须紧跟 assistant tool_calls 连续出现,
                 # 中间不得插入其他角色消息(真机 400 实测)。
-                # #163:模型面的工具返回过注入守卫(数据区标签+扫描);dossier
+                # 模型面的工具返回过注入守卫(数据区标签+扫描);dossier
                 # 仍存原始证据(出题材料不被标注污染)。
                 guarded, _trace = guard_tool_result(tool_name, observation[:2000] or "(空结果)")
                 messages.append(
@@ -260,7 +260,7 @@ async def explore_repo(
                         name=tool_name,
                     )
                 )
-            # D8:轮尾单条 user 消息承载观察回执+步数计数(追加不改写)
+            # 轮尾单条 user 消息承载观察回执+步数计数(追加不改写)
             receipt = (
                 f"观察已写入 {'/'.join(written_slots)}"
                 if written_slots
@@ -278,7 +278,7 @@ async def explore_repo(
     except GitHubUnavailable as exc:
         dossier.degraded = True
         dossier.degrade_reason = dossier.degrade_reason or f"GitHub 不可达: {exc}"
-    except Exception as exc:  # noqa: BLE001 — 探索段异常不判任务失败(spec §3.4)
+    except Exception as exc:  # noqa: BLE001 — 探索段异常不判任务失败
         dossier.degraded = True
         dossier.degrade_reason = dossier.degrade_reason or f"探索异常: {type(exc).__name__}"
 
@@ -291,7 +291,7 @@ async def explore_repo(
 
 
 def _explore_system_text() -> str:
-    """探索技能文本(ADR-0004 唯一权威是文件;investigate v3=探索段,D14)。"""
+    """探索技能文本(ADR-0004 唯一权威是文件)。"""
     from official_agent.prompt_loader import load_prompt
 
     return load_prompt("evaluation/explore.md")

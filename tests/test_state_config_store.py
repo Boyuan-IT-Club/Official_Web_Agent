@@ -1,4 +1,4 @@
-"""M6 #111 agent_config 配置表单测:mock 连接,验证 SQL 与读写契约。
+"""agent_config 配置表单测:mock 连接,验证 SQL 与读写契约。
 
 真实写库由开发机真库验证覆盖(同 test_state_conversation.py 纪律)。
 """

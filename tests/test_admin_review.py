@@ -1,4 +1,4 @@
-"""B6 评审队列路由测试:队列过滤/权限矩阵/采纳投一票/驳回。"""
+"""评审队列路由测试:队列过滤/权限矩阵/采纳投一票/驳回。"""
 
 import contextlib
 from collections.abc import AsyncIterator
@@ -66,7 +66,7 @@ def test_queue_rejects_without_resume_audit(
 def test_queue_zero_filter_queries_hard_zero(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """0 分/初筛不过队列 = hard_zero 过滤;不新增 status 枚举(#128)。"""
+    """0 分/初筛不过队列 = hard_zero 过滤;不新增 status 枚举。"""
     _install_resolve(monkeypatch, ["resume:audit"])
     seen: dict = {}
 
@@ -98,7 +98,7 @@ def test_queue_zero_filter_queries_hard_zero(
     monkeypatch.setattr(ea.evaluation, "_conn", lambda: _Conn())
     resp = client.get("/api/agent/admin/evaluation/queue?cycle_id=2026&queue=zero", headers=_AUTH)
     assert resp.status_code == 200
-    assert seen["params"] == (2026, 2026)  # #154:外层 cycle + 子查询 user_id 归属
+    assert seen["params"] == (2026, 2026)  # 外层 cycle + 子查询 user_id 归属
     assert "hard_zero = TRUE" in seen["sql"]
     assert resp.json()["items"][0]["hard_zero"] is True
     assert resp.json()["queue"] == "zero"
@@ -110,7 +110,7 @@ def test_queue_zero_filter_queries_hard_zero(
 def test_scorecard_interviewer_readonly_allowed(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """面试官(interview:evaluate)场景内只读维卡,不破边界(#128)。"""
+    """面试官(interview:evaluate)场景内只读维卡,不破边界。"""
     _install_resolve(monkeypatch, ["interview:evaluate"])
     monkeypatch.setattr(
         ea.evaluation,
@@ -168,7 +168,7 @@ def test_adopt_puts_reviewer_vote_and_marks_adopted(
 def test_adopt_missing_card_404_before_any_side_effect(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#180:无卡 → 404 且发生在投票之前,零副作用。"""
+    """无卡 → 404 且发生在投票之前,零副作用。"""
     _install_resolve(monkeypatch, ["resume:audit"])
 
     vote_called: list = []
@@ -195,7 +195,7 @@ def test_adopt_missing_card_404_before_any_side_effect(
 def test_adopt_intent_audit_failure_is_clean_503(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#180:意图审计失败 → 503"未执行",且投票确实没发生。"""
+    """意图审计失败 → 503"未执行",且投票确实没发生。"""
     _install_resolve(monkeypatch, ["resume:audit"])
 
     vote_called: list = []
@@ -268,7 +268,7 @@ def test_adopt_backend_failure_keeps_draft(
 def test_adopt_card_status_failure_reports_vote_landed(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#180:投票落地后卡态更新失败 → 500 且如实说"票已投",不谎报未执行。"""
+    """投票落地后卡态更新失败 → 500 且如实说"票已投",不谎报未执行。"""
     _install_resolve(monkeypatch, ["resume:audit"])
 
     class _OkClient:
@@ -298,7 +298,7 @@ def test_adopt_card_status_failure_reports_vote_landed(
 def test_adopt_result_audit_failure_still_adopted_but_visible(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#180:结果审计失败(票已投、不可撤)→ 200 adopted + audit_recorded=false。"""
+    """结果审计失败(票已投、不可撤)→ 200 adopted + audit_recorded=false。"""
     _install_resolve(monkeypatch, ["resume:audit"])
 
     class _OkClient:

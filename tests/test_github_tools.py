@@ -1,7 +1,7 @@
-"""B-AG1 八工具面测试(#149/D6):respx fake 仓覆盖 + 截断 + 降级语义。
+"""八工具面测试:respx fake 仓覆盖 + 截断 + 降级语义。
 
 既有 repo/readme/commits/tree_paths 的 respx 用例在 test_investigation.py;
-这里只测 D6 新增面。
+这里只测新增的 read_file / normalize 面。
 """
 
 import base64
@@ -74,7 +74,7 @@ async def test_list_files_returns_paths_and_truncation_flag() -> None:
     assert truncated is True
 
 
-# ── read_file(截断 D7/目录/404 降级) ─────────────────────
+# ── read_file(截断/目录/404 降级) ─────────────────────
 
 
 def _content_resp(text: str) -> Response:
@@ -290,7 +290,7 @@ async def test_rate_limit_403_raises_unavailable() -> None:
         await _client().repo_meta("o", "r")
 
 
-# ── 登录名归一化(D17 档案 github 字段) ───────────────────
+# ── 登录名归一化(档案 github 字段) ───────────────────
 
 
 @pytest.mark.parametrize(
@@ -308,7 +308,7 @@ def test_normalize_github_login(raw: str, want: str) -> None:
     assert normalize_github_login(raw) == want
 
 
-# ── 评审 P2 补测:超大文件/无 parent/单文件超预算/大小写归一 ──
+# ── 补测:超大文件/无 parent/单文件超预算/大小写归一 ──
 
 
 @respx.mock

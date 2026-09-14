@@ -1,4 +1,4 @@
-"""OBS-01 观测接线单测:fail-open 三条路径 + 已配置路径。"""
+"""观测接线单测:fail-open 三条路径 + 已配置路径。"""
 
 import pytest
 
@@ -78,7 +78,7 @@ def test_build_handler_uses_settings(monkeypatch) -> None:
     }
 
 
-# ── #194 复审 P1:PII 包装 fail-closed ──
+# ── PII 包装 fail-closed ──
 
 
 class _RecordingInner:
@@ -110,7 +110,7 @@ class _BoomMessage:
 
 
 def test_pii_handler_drops_message_when_copy_fails(caplog) -> None:
-    """#194 P1:构造不出脱敏副本 → 丢弃该条;内层永远拿不到原值。"""
+    """构造不出脱敏副本 → 丢弃该条;内层永远拿不到原值。"""
     import official_agent.observability as obs
 
     inner = _RecordingInner()
@@ -121,7 +121,7 @@ def test_pii_handler_drops_message_when_copy_fails(caplog) -> None:
 
 
 def test_pii_handler_redacts_beyond_max_depth() -> None:
-    """#194 P1:遍历超深 → 定值占位,不回传原值。"""
+    """遍历超深 → 定值占位,不回传原值。"""
     import official_agent.observability as obs
 
     h = obs._PiiMaskedLangfuseHandler(_RecordingInner())
@@ -132,7 +132,7 @@ def test_pii_handler_redacts_beyond_max_depth() -> None:
 
 
 def test_pii_handler_redacts_llmresult_generations() -> None:
-    """#194 P1:LLMResult 之类不直接暴露 .content 的对象 → 受控投影。
+    """LLMResult 之类不直接暴露 .content 的对象 → 受控投影。
 
     旧行为原样委托,嵌套 generations 里的手机号会绕过掩码进 trace。
     """

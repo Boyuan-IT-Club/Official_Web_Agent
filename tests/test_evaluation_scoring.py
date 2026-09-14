@@ -1,4 +1,4 @@
-"""B1 绝对卡确定性短路纯逻辑单测(#123:进模型前的态度不端硬判)。"""
+"""绝对卡确定性短路纯逻辑单测(进模型前的态度不端硬判)。"""
 
 from official_agent.evaluation.scoring import (
     FieldText,
@@ -60,7 +60,7 @@ def test_weighted_total_uses_configured_weights() -> None:
 
 
 def test_exact_placeholder_match_is_hard_zero() -> None:
-    """B2 接线后有真实 placeholder:全等判,比前缀启发式更准。"""
+    """接线后有真实 placeholder:全等判,比前缀启发式更准。"""
     ph = "介绍一下你参与过的项目、承担的角色和最终成果"
     assert is_hard_zero_value(ph, placeholder=ph)
     # 真认真写了(比 placeholder 长且不同)→ 不卡

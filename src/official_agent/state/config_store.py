@@ -1,6 +1,6 @@
-"""agent_config 键值表(M6 #111):管理员可热载的低敏配置存 DB。
+"""agent_config 键值表:管理员可热载的低敏配置存 DB。
 
-决策(#100/#101/#109):
+落库口径:
 - 两级配置:低敏可入库热载(model_strong/model_light/llm_provider/llm_base_url),
   高敏留 .env(真实 API key/backend 密码/postgres_url/host/port)——真实凭证永不入库。
 - 表建在 agent 自有 PG(与 conversation_log/audit 同库);Backend 不做。
@@ -24,7 +24,7 @@ def _conn() -> psycopg.Connection[dict[str, Any]]:
 
 
 def ensure_config_table() -> None:
-    """幂等建 agent_config 表(#111;同 conversation/audit L-1 自举)。"""
+    """幂等建 agent_config 表(DDL 进仓库,新环境可自举)。"""
     with _conn() as conn:
         conn.execute(
             """

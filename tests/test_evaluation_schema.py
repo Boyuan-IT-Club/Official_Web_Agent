@@ -1,4 +1,4 @@
-"""B1 strict Pydantic 输出契约测试(#123:仓库首个结构化输出范式)。"""
+"""strict Pydantic 输出契约测试(仓库首个结构化输出范式)。"""
 
 import pytest
 from pydantic import ValidationError

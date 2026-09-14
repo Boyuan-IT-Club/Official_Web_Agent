@@ -1,14 +1,14 @@
-"""压缩策略小型 benchmark(M6 #114 AC:候选策略跑小 benchmark 选定)。
+"""压缩策略小型 benchmark(在两种候选策略间选型)。
 
 对照两种候选策略在同一长会话上的「压缩后可答性」:
 - S0 naive-truncate:直接丢弃 older,只保留近几轮(无摘要)
-- S1 context-aware:ContextAware 摘要 + [T#] 引用(决策 #108 选定,#114 实现)
+- S1 context-aware:ContextAware 摘要 + [T#] 引用(线上采用的策略)
 
 流程:构造含可回收事实的长会话 → 各策略压缩 → 强模型分别回答 3 个探针问题
 (前 2 个答案在被压缩掉的 older 段,后 1 个在保留的近轮)→ 强模型按
 0/1/2 打分(0 关键事实缺失 / 1 部分正确 / 2 完整正确),输出平均分与答案对照。
 
-仅参考不落档(决策 #108);需要真实 LLM key,CI 不跑。
+仅参考不落档;需要真实 LLM key,CI 不跑。
 用法:uv run python evals/benchmarks/compress_benchmark.py
 """
 

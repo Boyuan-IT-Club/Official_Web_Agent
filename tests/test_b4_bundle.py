@@ -1,4 +1,4 @@
-"""B4 测试:错因归类/最近最好/奖项降级/兜底题组/bundle 组装(fakes)。"""
+"""错因归类/最近最好/奖项降级/兜底题组/bundle 组装测试(fakes)。"""
 
 import pytest
 
@@ -47,7 +47,7 @@ def test_extract_and_classify_failures() -> None:
         "env_setup_error",
     }
     buckets = ag.classify(failures)
-    # 桶值保留 (任务名, test 名)——#132 evidence 契约(B4 评审 P1)
+    # 桶值保留 (任务名, test 名)——evidence 契约
     assert buckets["timeout"] == [("task1", "test_query_timeout")]
     assert buckets["boundary"] == [("task1", "test_edge_empty_input")]
     assert buckets["environment"] == [("task5", "env_setup_error")]
@@ -66,7 +66,7 @@ def test_full_score_skips_lane() -> None:
     assert not ag.is_full_score({"total_score": None, "max_total_score": None})
 
 
-# ── 奖项线(检查点⑤:NullProvider 不可考路径) ────────────
+# ── 奖项线:NullProvider 不可考路径 ─────────────────────
 
 
 async def test_award_brief_unverifiable_without_search() -> None:
@@ -98,7 +98,7 @@ def test_extract_awards_scans_award_fields() -> None:
 
 def test_base_three_and_plan() -> None:
     base = awards.base_three_questions()
-    assert len(base) == 3  # 基础三维(#133)
+    assert len(base) == 3  # 基础三维
     assert all(q["evidence"]["path"] == "" for q in base)
     plan = awards.suggest_plan(base + base, budget_minutes=15)
     assert sum(plan) <= 15  # 建议组合不超 15 分钟
@@ -136,7 +136,7 @@ class _FakeModel:
 
 @pytest.mark.asyncio
 async def test_bundle_fallback_for_no_evidence(monkeypatch) -> None:
-    """无证据候选:仓线 skip + 无评测无奖项 → 基础三维+技能题组(#133)。"""
+    """无证据候选:仓线 skip + 无评测无奖项 → 基础三维+技能题组。"""
     fields = [
         FieldText(field_key="self_intro", title="自我介绍", value="我是李四。"),
         FieldText(field_key="dept", title="志愿部门", value="技术部"),
@@ -158,7 +158,7 @@ async def test_bundle_fallback_for_no_evidence(monkeypatch) -> None:
 
     envelope = await bd.run_bundle(fields, resume_id=9, cycle_id=2026, github_key="usergithub")
     groups = {g["group"]: g for g in envelope["groups"]}
-    assert groups["repo"]["qbank_v2"]["mode"] == "skipped"  # #153:v2 信封嵌套
+    assert groups["repo"]["qbank_v2"]["mode"] == "skipped"  # v2 信封嵌套
     assert "autograding" not in groups  # 无评测记录 → 线不存在
     fallback = groups["base_and_skills"]
     assert len(fallback["questions"]) >= 3 + 2  # 基础三维 + 技能题组
@@ -169,7 +169,7 @@ async def test_bundle_fallback_for_no_evidence(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_bundle_multi_repo_investigates_each(monkeypatch) -> None:
-    """M-1:项目字段含两个 GitHub 仓 → 每个各深挖一次,不丢第二个。"""
+    """项目字段含两个 GitHub 仓 → 每个各深挖一次,不丢第二个。"""
     fields = [
         FieldText(
             field_key="project",
@@ -203,7 +203,7 @@ async def test_bundle_multi_repo_investigates_each(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_bundle_repo_v2_envelope_end_to_end(monkeypatch) -> None:
-    """#153 评审 P0 回归:repo 组 v2 信封经 run_bundle 主路径——
+    """repo 组 v2 信封经 run_bundle 主路径——
     all_questions 收集为 dict(suggest_plan 不崩)、total 计数、kind 不被覆盖。"""
     fields = [
         FieldText(
@@ -250,7 +250,7 @@ async def test_bundle_repo_v2_envelope_end_to_end(monkeypatch) -> None:
 
     envelope = await bd.run_bundle(fields, resume_id=9, cycle_id=2026)
     assert envelope["schema_name"] == "evaluation_qbank/v2"
-    # 评审 P0:suggest_plan 不再因 repo 题目是 str 而崩;计数=1 入口+3 层
+    # suggest_plan 不再因 repo 题目是 str 而崩;计数=1 入口+3 层
     assert envelope["total_questions"] == 4
     assert sum(envelope["suggested_plan"]) <= 15
     repo_group = next(g for g in envelope["groups"] if g["group"] == "repo")
@@ -269,7 +269,7 @@ async def test_bundle_repo_v2_envelope_end_to_end(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_bundle_aggregates_explore_usage(monkeypatch) -> None:
-    """#154/D9:bundle 聚合 repo 组 explore_meta 用量进信封。"""
+    """bundle 聚合 repo 组 explore_meta 用量进信封。"""
 
     async def _deep(text, **kw):
         return {

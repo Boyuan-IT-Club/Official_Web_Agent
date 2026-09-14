@@ -1,10 +1,10 @@
-"""会话管理端点测试(M6 #115 G2/G3):用户历史会话/回看,管理员按用户查看。
+"""会话管理端点测试:用户历史会话/回看,管理员按用户查看。
 
 同 test_web_routes 先例:TestClient + monkeypatch,不真连库/checkpointer。
 关键契约:
 - /sessions 只列本人会话(agent_threads 属主过滤)
 - /sessions/{tid}/messages:resolve_thread 属主硬校验,非属主/已终结 → 404
-  (不区分原因,防会话枚举翻看 PII,SEC-07)
+  (不区分原因,防会话枚举翻看 PII)
 - /admin/sessions* 要求 agent:monitor;admin 回看不做属主限制(运营排查),
   已终结会话原文可见(status 标注)
 - 原文投影:只保留 user/assistant 文本,工具中间态/空内容跳过
@@ -85,7 +85,7 @@ class _FakeCheckpointer:
         return SimpleNamespace(values={"messages": self._messages})
 
 
-# ── 用户侧(G2)─────────────────────────────────────────────────────────
+# ── 用户侧 ─────────────────────────────────────────────────────────────
 
 
 def test_sessions_lists_own_threads_sorted_by_activity(
@@ -178,7 +178,7 @@ def test_sessions_requires_auth(client: TestClient) -> None:
     assert client.get("/api/agent/sessions").status_code == 401
 
 
-# ── 管理员侧(G3)─────────────────────────────────────────────────────────
+# ── 管理员侧 ───────────────────────────────────────────────────────────
 
 
 def test_admin_sessions_requires_monitor(

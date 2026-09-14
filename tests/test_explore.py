@@ -1,4 +1,4 @@
-"""探索段受限 ReAct 循环单测(#151):预算四闸/槽位映射/缓存纪律/降级。
+"""探索段受限 ReAct 循环单测:预算四闸/槽位映射/缓存纪律/降级。
 
 图级集成由 test_investigation.py 的 run_explore 替身覆盖;这里直接驱动
 explore_repo,验证循环自身语义。
@@ -40,7 +40,7 @@ class _FakeModel:
 
 
 class _FakeClient:
-    """D6 鸭子类型替身:按脚本吐观察。"""
+    """鸭子类型替身:按脚本吐观察。"""
 
     def __init__(self, results: dict[str, Any] | None = None):
         self.results = results or {}
@@ -116,7 +116,7 @@ async def test_tool_roundtrip_writes_slots_and_paths() -> None:
     assert "read_file:src/app.py" in client.calls
     assert dossier.slots["C3_架构与数据流"]  # 观察进槽
     assert dossier.slots["C4_实现细节拷打"]
-    assert dossier.turns_used == 4  # 2 次 LLM + 2 次工具(D7 累计)
+    assert dossier.turns_used == 4  # 2 次 LLM + 2 次工具(累计)
     assert not dossier.degraded
     assert dossier.attribution == "trusted-own"
 
@@ -243,7 +243,7 @@ async def test_bind_failure_degrades() -> None:
 
 @pytest.mark.asyncio
 async def test_cache_discipline_append_only_and_static_system() -> None:
-    """D8:system 跨候选字节稳定;历史只增;步数计数在 user 消息尾部。"""
+    """system 跨候选字节稳定;历史只增;步数计数在 user 消息尾部。"""
     model = _FakeModel(
         [
             _ai_with_tools([("repo_meta", {})]),
@@ -291,7 +291,7 @@ async def test_unknown_tool_reports_observation() -> None:
 
 @pytest.mark.asyncio
 async def test_usage_tokens_accumulated_d9() -> None:
-    """D9/#154:逐调用 usage_metadata 累计(含 cache hit/miss)进 dossier。"""
+    """逐调用 usage_metadata 累计(含 cache hit/miss)进 dossier。"""
 
     class _UsageModel:
         def __init__(self):
@@ -347,7 +347,7 @@ async def test_usage_tokens_accumulated_d9() -> None:
 
 @pytest.mark.asyncio
 async def test_deepseek_raw_token_usage_cache_captured() -> None:
-    """#154 评审 P0 回归:DeepSeek 非流式响应 cache 字段在 raw token_usage
+    """DeepSeek 非流式响应 cache 字段在 raw token_usage
     (usage_metadata 无 input_token_details)——raw 优先才能采到命中/未命中。"""
 
     class _RawModel:
@@ -399,7 +399,7 @@ async def test_deepseek_raw_token_usage_cache_captured() -> None:
     assert dossier.cache_miss_tokens == 250
 
 
-# ── #155:qbank_probes 探针 + judge schema ──
+# ── qbank_probes 探针 + judge schema ──
 
 
 @pytest.mark.asyncio
@@ -444,7 +444,7 @@ def test_judge_report_schema_roundtrip() -> None:
 
 @pytest.mark.asyncio
 async def test_qbank_probes_reject_match_mismatch_fails() -> None:
-    """reject 命中但 match 子串不匹配 → FAIL(评审 P2:分支锁定)。"""
+    """reject 命中但 match 子串不匹配 → FAIL(分支锁定)。"""
 
     from official_agent.evals import qbank_probes as qp
 
@@ -487,7 +487,7 @@ def tmp_path_fixtures(data: dict, tmp_name: str = "qbank_probes.yaml") -> Path:
 async def test_parallel_tool_batch_cannot_exceed_turn_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """评审 P1 回归:一次响应带多个工具调用,累计不得突破 80 上限。"""
+    """一次响应带多个工具调用,累计不得突破 80 上限。"""
     monkeypatch.setattr(explore_mod, "MAX_TURNS", 4)
     batch = [("repo_meta", {})] * 6  # 单批 6 个并行调用
     model = _FakeModel([_ai_with_tools(batch)])  # 只有一轮,全部调用都在这一批

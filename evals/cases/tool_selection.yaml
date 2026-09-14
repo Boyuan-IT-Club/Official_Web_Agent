@@ -1,4 +1,4 @@
-# 工具选择 eval 用例(OBS-03,#148 统一 runner 格式:顶层 runner 声明执行器)。
+# 工具选择 eval 用例(统一 runner 格式:顶层 runner 声明执行器)。
 # expected_tools:期望被调用的工具集合(顺序不敏感;exact: true 时要求完全相等)
 # expected_params:该工具至少一次调用的参数须包含全部期望键值(子集匹配)
 # forbidden_tools:任一被调用即 FAIL(权限红线)

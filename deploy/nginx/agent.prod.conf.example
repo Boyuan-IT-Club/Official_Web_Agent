@@ -1,12 +1,11 @@
-# ── 客服 Agent 生产反代片段(#116)──────────────────────────────────
+# ── 客服 Agent 生产反代片段 ───────────────────────────────────────
 # 用法:并入现有官网 nginx 的 server{}(假设①:不另起 nginx 容器),
 #       与 Backend /api 反代、前端静态托管同层。nginx -t && nginx -s reload。
 #
-# 前置(http{} 级,review P0-2:上线前置启用,保守参数先行;#56/SEC-05 出
-# 参数后再调):
+# 前置(http{} 级,上线前置启用,保守参数先行;限流参数后续再定):
 #   limit_req_zone $binary_remote_addr zone=agent_chat:10m rate=10r/m;
 
-# SSE 三件套(#116 AC):proxy_buffering off + 长超时 + HTTP/1.1。
+# SSE 三件套:proxy_buffering off + 长超时 + HTTP/1.1。
 # 用户站浮窗同源通道;/api/agent/admin/** 由 Backend 代理,不经这里也能用,
 # 但直连路径同样放行(运维排查用)。
 location /api/agent/ {
@@ -23,7 +22,7 @@ location /api/agent/ {
     proxy_send_timeout 3600s;
     chunked_transfer_encoding on;
 
-    # 限流(review P0-2:已按保守参数启用;#56/SEC-05 定后调参)
+    # 限流(已按保守参数启用;参数后续再调)
     limit_req zone=agent_chat burst=5 nodelay;
     limit_req_status 429;
 }

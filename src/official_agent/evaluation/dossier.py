@@ -1,9 +1,9 @@
-"""Dossier:探索段的唯一产出(B-AG3,#151;spec §3.2/D7)。
+"""Dossier:探索段的唯一产出。
 
-十类取材槽(C1-C10,spec §4 同源)+ 元信息。探索循环把工具观察写进槽位;
+十类取材槽(C1-C10)+ 元信息。探索循环把工具观察写进槽位;
 出题段只吃 dossier 渲染文本,不再接触 GitHub(两段解耦,可单测可 eval)。
 
-预算(D7):dossier 总量 ≤40K 字符——add() 是唯一写入口,超限丢弃并标
+预算:dossier 总量 ≤40K 字符——add() 是唯一写入口,超限丢弃并标
 dossier_capped;四闸的另外两闸(轮数/墙钟)由 explore 循环持有。
 """
 
@@ -14,9 +14,9 @@ from typing import get_args
 
 from official_agent.evaluation.schema import CATEGORY
 
-_MAX_DOSSIER_CHARS = 40_000  # D7:dossier 总量上限
+_MAX_DOSSIER_CHARS = 40_000  # dossier 总量上限
 
-#: 十类取材槽 = 十类题类(SPEC §4),单源自 schema.CATEGORY——真机实测:
+#: 十类取材槽 = 十类题类,单源自 schema.CATEGORY——真机实测:
 #: 槽名与题类名漂移会让模型把槽名当 category 填,信封校验直接拒
 SLOT_NAMES: tuple[str, ...] = tuple(get_args(CATEGORY))
 
@@ -28,11 +28,11 @@ class Dossier:
     slots: dict[str, str] = field(default_factory=lambda: {k: "" for k in SLOT_NAMES})
     attribution: str = ""  # 归属级别+证据(ADR-0008),出题/展示用
     turns_used: int = 0  # 实际轮数(LLM+工具累计)
-    degraded: bool = False  # 预算触顶=用已有材料出题,不判失败(D7)
+    degraded: bool = False  # 预算触顶=用已有材料出题,不判失败
     degrade_reason: str = ""
     input_tokens: int | None = None
     output_tokens: int | None = None
-    cache_hit_tokens: int | None = None  # D9/#154:prompt cache 命中
+    cache_hit_tokens: int | None = None  # prompt cache 命中
     cache_miss_tokens: int | None = None
     paths: list[str] = field(default_factory=list)  # list_files 结构化清单(路径白名单校验)
     paths_truncated: bool = False
@@ -42,7 +42,7 @@ class Dossier:
         return sum(len(v) for v in self.slots.values())
 
     def add(self, slot: str, observation: str) -> bool:
-        """追加观察到槽位(追加不改写,D8)。超总量上限整条丢弃并标 capped。
+        """追加观察到槽位(追加不改写)。超总量上限整条丢弃并标 capped。
 
         返回是否写入(供循环把「写不进」反馈给模型/预算判定)。"""
         if slot not in self.slots:

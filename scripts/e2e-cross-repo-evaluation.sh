@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 跨仓初筛 E2E(评审发布闸门 10,issue #168)——半自动,手工触发,不进 CI。
+# 跨仓初筛 E2E —— 半自动,手工触发,不进 CI。
 #
 # 串三仓:Frontend 发起 → Backend 代理 → Agent 建 job → 状态 6 → 评分/题库
 # → 状态回落 2 → 前端轮询。
@@ -38,7 +38,7 @@ api() {  # api <method> <path> [json_body]
 
 echo "== 跨仓初筛 E2E:resume=$RESUME_ID cycle=$CYCLE_ID backend=$BACKEND_URL =="
 
-# ── 场景 1:重复点击提交 → 只产生一个活跃 job(闸门2)──
+# ── 场景 1:重复点击提交 → 只产生一个活跃 job ──
 echo "[1] 重复提交幂等"
 A=$(api POST "/api/admin/agent/evaluation/run" \
   "{\"cycle_id\":$CYCLE_ID,\"items\":[{\"resume_id\":$RESUME_ID}]}")
@@ -52,7 +52,7 @@ else
   bad "重复提交产生不同 job(A=$ID_A B=$ID_B)"
 fi
 
-# ── 场景 2:处理中状态 6 可见,且终态后回落(闸门4)──
+# ── 场景 2:处理中状态 6 可见,且终态后回落 ──
 echo "[2] 处理中状态 6 → 终态回落"
 STATUS=$(api GET "/api/resumes/admin/by-resume/$RESUME_ID" | jq -r '.data.status // empty')
 # 状态 6 是瞬态,job 可能已完成;两次采样,宽松判定
@@ -65,7 +65,7 @@ else
   bad "状态异常:$STATUS → $STATUS2"
 fi
 
-# ── 场景 3:轮询 job 到终态(闸门4 前端逻辑的服务端对应)──
+# ── 场景 3:轮询 job 到终态(前端轮询逻辑的服务端对应)──
 echo "[3] 轮询 job 至终态"
 for _ in $(seq 1 60); do
   ST=$(api GET "/api/admin/agent/evaluation/jobs?cycleId=$CYCLE_ID" \
@@ -82,7 +82,7 @@ else
   bad "轮询超时,未有终态(当前 $ST)"
 fi
 
-# ── 场景 4:题库状态可观测(闸门6)──
+# ── 场景 4:题库状态可观测 ──
 echo "[4] qbank_status 可见"
 QB=$(api GET "/api/admin/agent/evaluation/jobs?cycleId=$CYCLE_ID" \
   | jq -r --arg rid "$RESUME_ID" \

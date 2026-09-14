@@ -5,7 +5,7 @@
 令牌指纹校验(绕不过,ADR-0005)。B 由调度器直连 evaluation 图、C 由宿主
 界面直连 copilot 图,均不经本前门。
 
-凭证红线(GRA-01):凭证在入口层经 graphs/identity.py 解析,只有解析结果
+凭证红线:凭证在入口层经 graphs/identity.py 解析,只有解析结果
 (user_id/role/permission_codes)进 state;凭证绝不进 state/checkpointer。
 resolve_identity 节点做确定性校验与规范化(unknown 兜底),不做网络调用。
 """
@@ -25,14 +25,14 @@ class AgentState(TypedDict, total=False):
     messages: list  # LangChain message 序列
     user_id: int | None
     role: Role
-    permission_codes: list[str]  # SEC-02 装配输入
+    permission_codes: list[str]  # 工具装配输入
 
 
 def resolve_identity(state: AgentState) -> AgentState:
-    """确定性节点(GRA-01):校验入口层已解析的身份,规范化为装配可用形态。
+    """确定性节点:校验入口层已解析的身份,规范化为装配可用形态。
 
     身份解析本体在入口层(graphs/identity.resolve):官网 JWT 走
-    GET /api/auth/me(SEC-01 落地后),CLI 模拟身份走 login+claims。
+    GET /api/auth/me,CLI 模拟身份走 login+claims。
     本节点只做三件事:user_id 缺失→unknown 降级;role 非法→unknown;
     permission_codes 缺省→空列表(装配层对 unknown/空集只给最小只读)。
     """
@@ -49,7 +49,7 @@ def resolve_identity(state: AgentState) -> AgentState:
 
 
 def assistant_loop(state: AgentState) -> AgentState:
-    """ReAct 单循环(GRA-04):按 role 装配工具集(SEC-02),模型自主选工具。
+    """ReAct 单循环:按 role 装配工具集,模型自主选工具。
 
     写工具调用触发 interrupt 挂起,确认令牌机制见 ADR-0005 与 tools/write.py。
     """

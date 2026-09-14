@@ -1,10 +1,10 @@
-"""INF-04 SSE 聊天路由测试:鉴权/会话隔离。
+"""SSE 聊天路由测试:鉴权/会话隔离。
 
 用 FastAPI TestClient,验证:
 - 无 Authorization → 401
 - 坏 token(身份解析失败)→ 401
 - 合法 token → 200,SSE 流返回 session_id + done
-- 同 session_id 被不同 user 访问 → 403(SEC-07 属主)
+- 同 session_id 被不同 user 访问 → 403(属主)
 
 路由层不真连后端/模型/PG:
 - routes.resolve 被 monkeypatch(fake_resolve 返回 ResolvedIdentity)
@@ -96,7 +96,7 @@ def _sse_events(resp) -> list[dict]:
 
 
 def test_error_code_classification() -> None:
-    """执行期异常 → 契约错误码(issue #90)。"""
+    """执行期异常 → 契约错误码。"""
     import httpx
 
     from official_agent.tools.client import BackendError
@@ -141,7 +141,7 @@ def test_chat_bad_token_returns_401(client: TestClient, monkeypatch: pytest.Monk
         "/api/agent/chat", json={"message": "你好"}, headers={"Authorization": "Bearer bad"}
     )
     assert resp.status_code == 401
-    # review:不透出内网/异常细节,只回通用文案
+    # 不透出内网/异常细节,只回通用文案
     assert "身份解析失败" in resp.text
     assert "backend" not in resp.text.lower()
 
@@ -191,7 +191,7 @@ def test_chat_resume_same_session_reuses_thread(
 def test_chat_message_face_carries_no_identity_context(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#166 回归:身份/权限上下文绝不进对话消息面(否则回看泄漏成 user 气泡)。
+    """身份/权限上下文绝不进对话消息面(否则回看泄漏成 user 气泡)。
 
     新建轮与续传轮的消息输入都必须只有用户原文;身份上下文只经
     build_system_prompt 进 system prompt。
@@ -240,7 +240,7 @@ def test_chat_message_face_carries_no_identity_context(
 def test_chat_other_user_same_session_returns_403(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """同一 session_id 被不同 user 访问 → 403(SEC-07 属主校验)。"""
+    """同一 session_id 被不同 user 访问 → 403(属主校验)。"""
     _install_fakes(monkeypatch, auth_ok_data(user_id=7), auth_ok_data(user_id=8))
     with client.stream(
         "POST", "/api/agent/chat", json={"message": "hi"}, headers={"Authorization": "Bearer tok"}
@@ -260,7 +260,7 @@ def test_chat_other_user_same_session_returns_403(
 def test_chat_usage_from_usage_metadata_only(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#115 实测回归:langchain-openai 1.x 流式只有 usage_metadata
+    """langchain-openai 1.x 流式只有 usage_metadata
     (response_metadata.token_usage 已消失)→ token 仍须正确落行。"""
     from langchain_core.messages import AIMessageChunk
 
@@ -329,7 +329,7 @@ def _stateful_agent(updates: list, state_messages: list | None):
 def test_chat_compresses_long_state_and_logs_event(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """M6 #114:轮末超阈值压缩——摘要回写 checkpoint 新版本,事件随行落日志。"""
+    """轮末超阈值压缩——摘要回写 checkpoint 新版本,事件随行落日志。"""
     from langchain_core.messages import HumanMessage, RemoveMessage
     from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
@@ -374,7 +374,7 @@ def test_chat_compresses_long_state_and_logs_event(
 def test_chat_no_compression_under_threshold(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """M6 #114:状态未超阈值 → 不压缩不回写,compress_event 为 None。"""
+    """状态未超阈值 → 不压缩不回写,compress_event 为 None。"""
     from official_agent.web import routes
 
     updates: list[list] = []
@@ -399,7 +399,7 @@ def test_chat_no_compression_under_threshold(
 def test_chat_compression_failure_fail_open(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """M6 #114:压缩失败不影响本轮对话(fail-open,ADR-0005)。"""
+    """压缩失败不影响本轮对话(fail-open,ADR-0005)。"""
     from official_agent.graphs.assistant.compression import (
         record_compression_success,
     )
@@ -431,7 +431,7 @@ def test_chat_compression_failure_fail_open(
 
 
 def test_compression_circuit_breaker_pauses_after_repeated_failures() -> None:
-    """M6 #114:连续失败达阈值 → 熔断暂停尝试(ADR-0004),成功后复位。"""
+    """连续失败达阈值 → 熔断暂停尝试(ADR-0004),成功后复位。"""
     from official_agent.graphs.assistant import compression as comp
 
     comp.record_compression_success()
@@ -447,7 +447,7 @@ def test_compression_circuit_breaker_pauses_after_repeated_failures() -> None:
 def test_chat_writes_conversation_log_row(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """一轮 /chat 在 conversation_log 落一行(#110):_log_conversation 被调用。
+    """一轮 /chat 在 conversation_log 落一行:_log_conversation 被调用。
 
     _log_conversation 内部 fire-and-forget(异步写,不阻塞流),此处 patch 它
     同步捕获调用以验证「每轮落一行 + 字段齐全」;PII 过滤在数据层
@@ -482,7 +482,7 @@ def test_chat_writes_conversation_log_row(
 def test_chat_error_path_logs_error_row(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """agent 抛异常 → error 事件 + conversation_log 落 error_code 行(#110)。"""
+    """agent 抛异常 → error 事件 + conversation_log 落 error_code 行。"""
     from official_agent.web import routes
 
     class _FailingAgent:
@@ -521,7 +521,7 @@ def test_chat_error_path_logs_error_row(
 def test_chat_rebuilds_agent_after_config_change(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """M6 #111 热生效:PUT /admin/config 后,续传会话下一轮重建 agent。"""
+    """热生效:PUT /admin/config 后,续传会话下一轮重建 agent。"""
     from official_agent.web import routes
 
     builds: list[dict] = []
@@ -572,7 +572,7 @@ def test_chat_rebuilds_agent_after_config_change(
 def test_chat_message_too_long_returns_400(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """review P0-2:单条消息超长 → 400(收敛单请求滥用面;限流参数归 #56)。"""
+    """单条消息超长 → 400(收敛单请求滥用面;限流参数单独归属)。"""
     from official_agent.web import routes
 
     _install_fakes(monkeypatch)
@@ -587,7 +587,7 @@ def test_chat_message_too_long_returns_400(
 
 
 def test_stream_turn_busy_when_lock_held(client: TestClient) -> None:
-    """review P0-1:同会话并发轮次——锁被占用 → 立即回 busy,不再进 astream。"""
+    """同会话并发轮次——锁被占用 → 立即回 busy,不再进 astream。"""
     import asyncio
     import json as jsonlib
 
@@ -621,7 +621,7 @@ def test_stream_turn_busy_when_lock_held(client: TestClient) -> None:
 
 
 def test_get_resume_detail_masks_pii_in_payload() -> None:
-    """review P0-3:简历详情返回层就地脱敏——trace 上报的是脱敏后数据。"""
+    """简历详情返回层就地脱敏——trace 上报的是脱敏后数据。"""
     import asyncio
 
     from official_agent.tools import readonly
@@ -650,7 +650,7 @@ def test_get_resume_detail_masks_pii_in_payload() -> None:
     readonly.set_backend_client(None)
 
 
-# ── 编造守卫与工具契约(#161,GRA-04) ─────────────────────
+# ── 编造守卫与工具契约 ──────────────────────────────────
 
 
 def _install_fake_agent(monkeypatch: pytest.MonkeyPatch, reply: str) -> list:
@@ -678,7 +678,7 @@ def _install_fake_agent(monkeypatch: pytest.MonkeyPatch, reply: str) -> list:
 def test_chat_toolless_reply_buffered_and_guarded(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """GRA-04 原案:unknown 档 tools=[],模型编造「查询结果」→ 不见原 delta,
+    """原案:unknown 档 tools=[],模型编造「查询结果」→ 不见原 delta,
     流尾守卫整段改写后一次性下发。"""
     _install_fake_agent(monkeypatch, "查询结果:您有 3 份简历待筛选。")
     ident = auth_ok_data(role="unknown", role_names=["访客"])
@@ -699,7 +699,7 @@ def test_chat_toolless_reply_buffered_and_guarded(
 def test_chat_first_message_is_user_content_only(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#166:首条消息就是用户原文;工具契约在 system(不进消息面)。"""
+    """首条消息就是用户原文;工具契约在 system(不进消息面)。"""
     seen = _install_fake_agent(monkeypatch, "好的。")
     resp = client.post(
         "/api/agent/chat", json={"message": "在吗"}, headers={"Authorization": "Bearer tok"}
@@ -729,7 +729,7 @@ def test_chat_toolless_honest_reply_passes_through(
 def test_guard_rewrite_persists_to_checkpointer(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """守卫回写成功路径:末条 AI 消息被 RemoveMessage+改写文本替换(#161 复审 P2)。"""
+    """守卫回写成功路径:末条 AI 消息被 RemoveMessage+改写文本替换。"""
     from langchain_core.messages import AIMessage, AIMessageChunk, RemoveMessage
 
     from official_agent.web import routes

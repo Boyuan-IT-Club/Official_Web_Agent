@@ -1,12 +1,11 @@
-"""KB 召回门禁 executor(R7/#134 → #148 收口)。
+"""KB 召回门禁 executor。
 
-自 feat/rag-kb 分支的 evals/run_kb_eval.py 迁入(彼分支无本引擎,合并时旧脚本
-删除)。语义不变:golden probes 打 Recall@k / MRR 基线,负例 top1 不得过阈值;
+语义:golden probes 打 Recall@k / MRR 基线,负例 top1 不得过阈值;
 只测外部行为(真实 embedding + 真实检索链),不 mock。
 
 环境:kb.store 可导入 + EMBED_* + 语料已入库;缺任一 → SKIP(门禁不可静默
-变绿)。kb.store/EMBED_* 源在 feat/rag-kb,本分支(feat/evaluation-b1)缺失,
-executor 用可导入性探测,两分支合并前后行为都正确。
+变绿)。kb.store/EMBED_* 未必已就位,executor 用可导入性探测,缺失时提前
+拦成 SKIP,以免门禁在没有检索栈的环境里静默变绿。
 """
 
 from __future__ import annotations
@@ -34,7 +33,7 @@ def env_blocker() -> str | None:
     try:
         import official_agent.kb.store  # noqa: F401
     except ImportError:
-        return "kb.store 不在当前分支(feat/rag-kb 合并后可用)"
+        return "kb.store 不可导入(KB 检索模块未就位)"
     from official_agent.config import get_settings
 
     embed_model = getattr(get_settings(), "embed_model", None)

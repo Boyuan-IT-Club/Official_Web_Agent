@@ -1,17 +1,17 @@
-"""身份解析(GRA-01):凭证 → 后端用户/角色/权限,确定性,不调模型。
+"""身份解析:凭证 → 后端用户/角色/权限,确定性,不调模型。
 
 架构契约(凭证红线):凭证在**入口层**(CLI/官网 handler)解析成身份结果,
 只把 user_id/role/permission_codes 放进图 state——凭证本身绝不进
-state/checkpointer(落库即泄漏面,SEC-07 thread 契约亦禁止)。
+state/checkpointer(落库即泄漏面,会话 thread 契约亦禁止)。
 
-三通道(issue #20):
-- cli(M1):账号密码 → BackendClient.login() → 解 JWT claims
+三通道:
+- cli:账号密码 → BackendClient.login() → 解 JWT claims
   (login 响应仅返回 token,身份在 claims;roleNames 为中文角色名)
-- web(预留):官网会话 JWT → GET /api/auth/me(SEC-01 后端增量,落地后实现;
+- web(预留):官网会话 JWT → GET /api/auth/me(后端增量落地后实现;
   agent 不持 JWT_SECRET)
-- feishu(预留):open_id → 用户映射(M3,INF-05 前置)
+- feishu(预留):open_id → 用户映射
 
-角色映射(A 通道语义,装配细则在 SEC-02):
+角色映射(A 通道语义,工具装配细则见 graphs/assistant.assemble_tools):
 - admin=读全量+写操作(经 interrupt) / member=内部只读面 / candidate=只读自己
 """
 
@@ -41,7 +41,7 @@ class ResolvedIdentity(TypedDict):
     name: str | None  # 身份档案:姓名(/auth/me 查库补充,JWT 里没有)
     role: Role
     role_names: list[str]  # 后端原始角色名(中文),供审计与展示
-    permission_codes: list[str]  # 供 SEC-02 工具装配
+    permission_codes: list[str]  # 供工具装配
     source: str  # cli / web / feishu
 
 
@@ -62,14 +62,14 @@ async def resolve(credential: IdentityCredential) -> ResolvedIdentity:
         return await _resolve_cli(credential)
     if kind == "web":
         return await _resolve_web(credential)
-    raise NotImplementedError("飞书通道待 M3(open_id→用户映射),见 issue #5")
+    raise NotImplementedError("飞书通道尚未实现(open_id→用户映射)")
 
 
 async def _resolve_web(
     credential: IdentityCredential,
     settings: Any | None = None,
 ) -> ResolvedIdentity:
-    """官网通道身份解析:官网 JWT → GET /api/auth/me 换身份(#89 A2)。
+    """官网通道身份解析:官网 JWT → GET /api/auth/me 换身份。
 
     与 CLI 通道统一:身份从后端 /auth/me 返回(仅 userId/roleNames/permissionCodes,
     最小暴露,不含 PII);数据查询的 user_token 由入口层原样转工具(本函数只解析身份)。
@@ -95,7 +95,7 @@ async def _resolve_cli(credential: IdentityCredential) -> ResolvedIdentity:
         # CLI 模拟身份:专用 client 以该账号登录;登录成功后注册为共享单例,
         # 后续工具调用都以此身份进行(登录失败不污染单例)。
         # ⚠ 进程级 last-login-wins:CLI 单用户/MCP 独立进程下安全;多会话
-        # 宿主(SSE/飞书)落地时须改为按会话持有 client(SEC-07/GRA-04)
+        # 宿主(SSE/飞书)落地时须改为按会话持有 client
         client = _client_as(username, credential.get("password") or "")
         try:
             token = await client.login()

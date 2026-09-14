@@ -1,4 +1,4 @@
-"""MEM-01/SEC-07 agent_threads 建档 CRUD 单测:mock 连接,验证 SQL 与返回记录。
+"""agent_threads 建档 CRUD 单测:mock 连接,验证 SQL 与返回记录。
 
 数据面与真库解耦:mock psycopg 连接,断言 SQL 参数正确、记录映射正确。
 真库往返由 scripts/verify_mem01.py 覆盖(开发机跑)。
@@ -89,7 +89,7 @@ def test_get_thread_returns_none_when_missing() -> None:
 
 
 def test_resolve_thread_owner_match() -> None:
-    """属主匹配才返回(SEC-07 恢复路径硬校验)。"""
+    """属主匹配才返回(恢复路径硬校验)。"""
     conn = _mock_conn([_row(tid="cli:u7:abc")])
     with patch.object(threads, "_conn", return_value=conn):
         assert threads.resolve_thread("cli:u7:abc", 7) is not None
@@ -133,7 +133,7 @@ def test_soft_delete_returns_false_when_not_found() -> None:
 
 
 def test_create_thread_terminated_tid_rejected() -> None:
-    """Review Fix 1:已终结 tid 二次建档必须拒绝(终结即终结,ADR-0008 §4)。"""
+    """已终结 tid 二次建档必须拒绝(终结即终结,ADR-0008)。"""
     conn = MagicMock()
     conn.__enter__.return_value = conn
     conn.__exit__.return_value = False
@@ -151,7 +151,7 @@ def test_create_thread_terminated_tid_rejected() -> None:
 
 
 def test_create_thread_cross_owner_tid_rejected() -> None:
-    """Review Fix 5:他人 tid 二次建档必须拒绝(跨属主借用)。"""
+    """他人 tid 二次建档必须拒绝(跨属主借用)。"""
     conn = MagicMock()
     conn.__enter__.return_value = conn
     conn.__exit__.return_value = False
@@ -169,7 +169,7 @@ def test_create_thread_cross_owner_tid_rejected() -> None:
 
 
 def test_resolve_thread_rejects_terminated() -> None:
-    """Review Fix 2:resolve_thread 拒绝已终结 thread(含属主校验)。"""
+    """resolve_thread 拒绝已终结 thread(含属主校验)。"""
     terminated = _row(tid="cli:u7:abc")
     terminated["status"] = "terminated"
     conn = _mock_conn([terminated])
@@ -178,7 +178,7 @@ def test_resolve_thread_rejects_terminated() -> None:
 
 
 def test_soft_delete_always_scoped_by_owner() -> None:
-    """Review Fix 4:soft_delete 恒带 owner 过滤(SQL 无 None 分支)。"""
+    """soft_delete 恒带 owner 过滤(SQL 无 None 分支)。"""
     conn = _mock_conn([{"dummy": 1}])
     with patch.object(threads, "_conn", return_value=conn):
         assert threads.soft_delete_thread("t1", owner_user_id=7) is True
@@ -198,7 +198,7 @@ def test_soft_delete_requires_owner_match() -> None:
 
 
 def test_create_thread_same_tid_conflict_returns_existing() -> None:
-    """H-3 回归:显式 tid 二次建档不抛 UniqueViolation,返回既有记录。"""
+    """显式 tid 二次建档不抛 UniqueViolation,返回既有记录。"""
     conn = MagicMock()
     conn.__enter__.return_value = conn
     conn.__exit__.return_value = False

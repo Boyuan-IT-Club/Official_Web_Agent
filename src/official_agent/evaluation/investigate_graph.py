@@ -1,7 +1,7 @@
-"""调查子图·仓深挖(B3,#130):路由 → 取仓 → 值得度 → 四证据锚题。
+"""调查子图·仓深挖:路由 → 取仓 → 值得度 → 四证据锚题。
 
-- 与 B1 评分子图平行(一总图两子图的调查子图,#126)
-- 生成轨与 B1 相同:提示词 JSON + strict Pydantic;后置校验(评审 P1 同款):
+- 与评分子图平行(一总图两子图的调查子图)
+- 生成轨与评分轨相同:提示词 JSON + strict Pydantic;后置校验:
   deep_dive 题必带 evidence.path 且路径必须真实存在于仓;guided 题不得带仓路径
 - GitHub 不可达不是失败:降级 guided(注明 unavailable),不阻塞任务
 """
@@ -65,9 +65,9 @@ class InvestigationState(TypedDict, total=False):
 
 
 async def route_node(state: InvestigationState) -> dict:
-    """提取仓位置并探测可读性 → 路由(#130);入口瀑布+归属四级(#150)。
+    """提取仓位置并探测可读性 → 路由;入口瀑布+归属四级。
 
-    支持 M-1 多仓:调用方可预置 repo_owner/repo_name 钉住某仓(逐仓深挖);
+    支持多仓:调用方可预置 repo_owner/repo_name 钉住某仓(逐仓深挖);
     未钉时走瀑布:简历 URL 直配 → 绑定登录名匹配 → GitHub 搜索兜底。
     unverified(搜索撞名)不深挖只 guided(ADR-0008)。
     """
@@ -85,7 +85,7 @@ async def route_node(state: InvestigationState) -> dict:
     )
     found: RepoAttribution | None = None
     if repo is None:
-        # 贡献声明优先于绑定匹配/搜索(D4):「仓+贡献动词」是明确点名,
+        # 贡献声明优先于绑定匹配/搜索:「仓+贡献动词」是明确点名,
         # 绑定并查到 commits/PR → trusted-contribution 深挖;未绑定/无证据
         # → claimed,不深挖只出过程题
         target = detect_contribution_target(text)
@@ -162,12 +162,12 @@ def route_after_route(state: InvestigationState) -> str:
 
 
 async def explore_node(state: InvestigationState) -> dict:
-    """探索段(B-AG3 #151):受限 ReAct 循环产出 dossier,替换 fetch_node 固定取材。
+    """探索段:受限 ReAct 循环产出 dossier,替换 fetch_node 固定取材。
 
     - 预算四闸在 explore_repo 内(轮数/墙钟/client 截断/dossier 40K);触顶标
-      degraded,用已有材料出题(D7,不判失败)。
-    - dossier 为空 = GitHub 不可达/探索全败 → 降级 guided(spec §3.4)。
-    - worthiness 信号仅用于题数分档(D10:退役是 #152 schema v2 的事)。
+      degraded,用已有材料出题(不判失败)。
+    - dossier 为空 = GitHub 不可达/探索全败 → 降级 guided。
+    - worthiness 信号仅用于题数分档(schema v2 已退役)。
     """
     attribution_dict = state.get("attribution") or {}
     attribution = str(attribution_dict.get("level", ""))
@@ -192,7 +192,7 @@ async def explore_node(state: InvestigationState) -> dict:
             "dossier_turns": dossier.turns_used,
         }
     if dossier.degraded:
-        # 预算触顶:用已有材料出题(D7),降级标记进材料头,题面可感知
+        # 预算触顶:用已有材料出题,降级标记进材料头,题面可感知
         degrade_note = f"[探索降级:{dossier.degrade_reason}]"
         dossier_text = degrade_note + "\n\n" + dossier.render()
     else:
@@ -215,21 +215,21 @@ async def explore_node(state: InvestigationState) -> dict:
 
 
 async def generate_node(state: InvestigationState) -> dict:
-    """出题段(B-AG4 #152):dossier → 题组 v2(单次结构化调用,spec §3.3)。
+    """出题段:dossier → 题组 v2(单次结构化调用)。
 
     - 模型只出题组 JSON;探索元信息由代码注入(explore state),不进模型面。
     - 后置校验:题量硬顶 15 / 敷衍 dossier ≤3 / 路径白名单(dossier 出现过的
-      路径)/ 对抗前提黑名单 / 链 theme 源自 dossier。违规进 error 态,B2 重试。
+      路径)/ 对抗前提黑名单 / 链 theme 源自 dossier。违规进 error 态,调用方重试。
     - guided:1 道通用引导题(entry 形状,chains 空)。
     """
     try:
         deep = state["route"] == "deep_dive"
         dossier_text = state.get("dossier_text", "")
-        thin = len(dossier_text.strip()) < 400  # 敷衍 dossier(D10:1-2 题合法)
+        thin = len(dossier_text.strip()) < 400  # 敷衍 dossier(1-2 题合法)
         settings = get_effective_settings()
         model = build_model(settings, temperature=SCORING_TEMPERATURE)
         # ADR-0004:代码零 prompt 字符串——体量标记是数据,规则文本全在
-        # prompts/evaluation/grilling.md(敷衍/充足两套规则文件内已有)
+        # prompts/evaluation/ 下的出题 prompt(敷衍/充足两套规则文件内已有)
         material_note = f"材料体量={'贫乏' if thin else '充足'}。"
         prompt_text = (
             load_prompt(PROMPT_FILE)
@@ -241,7 +241,7 @@ async def generate_node(state: InvestigationState) -> dict:
             + material_note
         )
         resp = await model.ainvoke([HumanMessage(content=prompt_text)])
-        # 出题段单次 usage(#154/D9):raw token_usage 优先(DeepSeek cache 字段)
+        # 出题段单次 usage:raw token_usage 优先(DeepSeek cache 字段)
         from official_agent.state.conversation import extract_usage
 
         gen_usage = extract_usage(
@@ -309,20 +309,20 @@ async def generate_node(state: InvestigationState) -> dict:
             prompt_version=_prompt_version(),
         )
         return {"question_set": envelope.model_dump(), "error": None}
-    except Exception as exc:  # noqa: BLE001 — 失败进 error 态,B2 可重试
+    except Exception as exc:  # noqa: BLE001 — 失败进 error 态,可由调用方重试
         return {"question_set": None, "error": f"{type(exc).__name__}: {exc}"}
 
 
-#: 对抗前提黑名单(spec §3.3:「你自述了X…但仓库却是Y…请解释矛盾」式)
+#: 对抗前提黑名单(「你自述了X…但仓库却是Y…请解释矛盾」式)
 #: 注意:「自述」单独出现是合法锚定(简历锚定横切),不在黑名单
 _ADVERSARIAL_WORDS = ("矛盾", "撒谎", "撒了谎", "夸大", "打脸", "为什么没做到")
 
 
 def _validate_group_v2(payload: dict[str, Any], dossier_text: str, paths: list[str]) -> None:
-    """v2 后置校验(#152):对抗前提黑名单/路径白名单/链源真实性。
+    """v2 后置校验:对抗前提黑名单/路径白名单/链源真实性。
 
     局限(诚实边界):链源真实性只对拉丁词元可判定,纯中文 theme 跳过
-    (由 grilling prompt 铁律约束);dossier 文本为扫描全集。"""
+    (由出题 prompt 铁律约束);dossier 文本为扫描全集。"""
     dossier_lowers = dossier_text.lower()
 
     def _check_question(q: str) -> None:
@@ -368,11 +368,10 @@ def validate_qbank_v2_group(
     paths: list[str],
     thin: bool = False,
 ) -> QuestionGroupV2:
-    """题组 v2 全量校验(#155 探针与 generate 共用;六探针的判定机器)。
+    """题组 v2 全量校验(探针与 generate 共用;六探针的判定机器)。
 
     - 对抗前提黑名单/路径白名单/链源真实性(_validate_group_v2);
-    - 结构(D12):入口 1 + 链 2-4×3-5 层 + 总量硬顶 15 + 敷衍 dossier ≤3。
-    返回校验过的 QuestionGroupV2;违例 ValueError(→ generate error 态重试)。
+    - 结构:入口 1 + 链 2-4×3-5 层 + 总量硬顶 15 + 敷衍 dossier ≤3。
     """
     _validate_group_v2(group_payload, dossier_text, paths)
     group = QuestionGroupV2.model_validate(
@@ -383,7 +382,7 @@ def validate_qbank_v2_group(
     if group.total_questions > 15:
         raise ValueError(f"题量超硬顶:{group.total_questions} > 15")
     if group.entry is None:
-        raise ValueError("deep_dive 缺入口题(D12:入口 1)")
+        raise ValueError("deep_dive 缺入口题(入口必须 1 道)")
     if not group.entry.evidence.path and not group.entry.evidence.note:
         raise ValueError("deep_dive 题空路径须有 evidence.note")
     if len(group.chains) < 2:
@@ -401,7 +400,7 @@ def _attribution_level(level: Any) -> Any:
 
 
 async def skip_node(state: InvestigationState) -> dict:
-    """skip:此维不出题(空集合法,#130);信封 v2 形状。"""
+    """skip:此维不出题(空集合法);信封 v2 形状。"""
     envelope = QbankV2(mode="skipped", group=QuestionGroupV2(), prompt_version=_prompt_version())
     return {"question_set": envelope.model_dump(), "error": None}
 
@@ -452,7 +451,7 @@ async def run_investigation(
 ) -> dict:
     """便捷入口:返回题集 dict(questions 可为空=skip/降级);LLM 失败抛 RuntimeError。
 
-    M-1:可钉 repo(owner, repo) 逐仓调查(多仓候选一个仓一个 envelope);
+    可钉 repo(owner, repo) 逐仓调查(多仓候选一个仓一个 envelope);
     缺省按项目文本首个 GitHub URL。
     """
     graph = build_investigation_subgraph()

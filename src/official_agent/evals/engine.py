@@ -1,4 +1,4 @@
-"""eval 引擎:suite 发现 → executor 分发 → 汇总报告 → 退出码(#148)。
+"""eval 引擎:suite 发现 → executor 分发 → 汇总报告 → 退出码。
 
 设计:
 - suite 文件用顶层 ``runner:`` 字段声明执行器 kind;未声明时按结构嗅探,
@@ -137,7 +137,7 @@ def exit_code(results: list[SuiteResult]) -> int:
 
 
 def _apply_baseline(result: SuiteResult, baseline_entry: dict[str, Any]) -> None:
-    """任何指标低于基线 → REGRESSION,套件转 FAIL(基线即门,OBS-07)。"""
+    """任何指标低于基线 → REGRESSION,套件转 FAIL(基线即门)。"""
     recorded = baseline_entry.get("metrics", {}) if isinstance(baseline_entry, dict) else {}
     for key, base_value in recorded.items():
         cur = result.metrics.get(key)

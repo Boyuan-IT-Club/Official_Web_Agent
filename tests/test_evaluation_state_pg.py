@@ -1,4 +1,4 @@
-"""evaluation_job 真库集成测试(闸门2/3):幂等、attempts 上限、恢复。
+"""evaluation_job 真库集成测试:幂等、attempts 上限、恢复。
 
 需要真 PostgreSQL(POSTGRES_URL 指向可写库);无 PG 时整文件 skip——
 CI 由 .github/workflows/ci.yml 的 postgres service 提供,本地开发者
@@ -51,7 +51,7 @@ def _cleanup(cycle_id: int) -> None:
 
 
 def test_create_jobs_is_idempotent_for_active(cycle_id: int) -> None:
-    """闸门2:同 (resume, cycle) 重复提交只保留一个活跃 job,返回同一 job_id。"""
+    """幂等:同 (resume, cycle) 重复提交只保留一个活跃 job,返回同一 job_id。"""
     _cleanup(cycle_id)
     try:
         first = ev_store.create_jobs([(9001, 501)], cycle_id)
@@ -69,7 +69,7 @@ def test_create_jobs_is_idempotent_for_active(cycle_id: int) -> None:
 
 
 def test_terminal_job_allows_new_version(cycle_id: int) -> None:
-    """闸门2:终态(succeeded)不拦复评——重建新 job。"""
+    """终态(succeeded)不拦复评——重建新 job。"""
     _cleanup(cycle_id)
     try:
         first = ev_store.create_jobs([(9002, 502)], cycle_id)
@@ -81,7 +81,7 @@ def test_terminal_job_allows_new_version(cycle_id: int) -> None:
 
 
 def test_requeue_skips_attempts_exhausted(cycle_id: int) -> None:
-    """闸门3:attempts 达上限的失败 job 不再自动重排。"""
+    """attempts 达上限的失败 job 不再自动重排。"""
     _cleanup(cycle_id)
     try:
         job_id = ev_store.create_jobs([(9003, 503)], cycle_id)[0]
@@ -94,7 +94,7 @@ def test_requeue_skips_attempts_exhausted(cycle_id: int) -> None:
 
 
 def test_requeue_stale_recovers_within_cap(cycle_id: int) -> None:
-    """闸门3:未超上限的僵 job 被 requeue_stale 捡回(用 0 分钟守卫即刻生效)。"""
+    """未超上限的僵 job 被 requeue_stale 捡回(用 0 分钟守卫即刻生效)。"""
     _cleanup(cycle_id)
     try:
         job_id = ev_store.create_jobs([(9004, 504)], cycle_id)[0]
@@ -107,7 +107,7 @@ def test_requeue_stale_recovers_within_cap(cycle_id: int) -> None:
 
 
 def test_requeue_stale_all_cycles_returns_original_cycle(cycle_id: int) -> None:
-    """#175:全量恢复返回行必须携带原 cycle_id,多周期互不串线。
+    """全量恢复返回行必须携带原 cycle_id,多周期互不串线。
 
     runner 曾把整行当 job_id、cycle 硬编码 0 派发,本测试钉住状态层契约:
     每行 {job_id, cycle_id} 与建 job 时的周期一致。"""
@@ -133,7 +133,7 @@ def test_requeue_stale_all_cycles_returns_original_cycle(cycle_id: int) -> None:
 
 
 def test_repeated_stale_recovery_is_stable(cycle_id: int) -> None:
-    """#175:重复恢复不产生第二条活跃 job、不重复累加 attempts。
+    """重复恢复不产生第二条活跃 job、不重复累加 attempts。
 
     同一 (resume, cycle) 连续两轮全量恢复:活跃 job 唯一;attempts 在
     进入 running 时已 +1,requeue 只改状态,两轮恢复后不增长。"""
@@ -163,7 +163,7 @@ def test_repeated_stale_recovery_is_stable(cycle_id: int) -> None:
 
 
 def test_requeue_skips_failed_when_sibling_active(cycle_id: int) -> None:
-    """#175 守卫分支一:同 (resume, cycle) 已有活跃 job,failed 行不得复活。
+    """守卫分支一:同 (resume, cycle) 已有活跃 job,failed 行不得复活。
 
     legacy 重复 job 场景:复活旧失败行会撞 uq_eval_job_active_resume,
     整批恢复失败。守卫必须让失败行保持 failed、活跃行不受影响。"""
@@ -187,7 +187,7 @@ def test_requeue_skips_failed_when_sibling_active(cycle_id: int) -> None:
 
 
 def test_requeue_failed_flips_only_newest_in_group(cycle_id: int) -> None:
-    """#175 守卫分支二:同组多条 failed 只翻 job_id 最新的一条。
+    """守卫分支二:同组多条 failed 只翻 job_id 最新的一条。
 
     两条失败行在同一 UPDATE 里同时变活跃会撞唯一索引、整批失败;
     正确语义是只复活最新一条(复评以最新为准),旧的留 failed。"""
@@ -214,7 +214,7 @@ def test_requeue_failed_flips_only_newest_in_group(cycle_id: int) -> None:
 
 
 def test_integrity_dedupes_existing_active(cycle_id: int) -> None:
-    """闸门2 加固:旧库已有重复活跃 job 时,integrity 去重后能建唯一索引。"""
+    """幂等加固:旧库已有重复活跃 job 时,integrity 去重后能建唯一索引。"""
     _cleanup(cycle_id)
     try:
         # 绕过 create_jobs 的幂等,直接插两条活跃 job 模拟旧库脏数据
@@ -239,7 +239,7 @@ def test_integrity_dedupes_existing_active(cycle_id: int) -> None:
 
 
 def test_qbank_status_persisted(cycle_id: int) -> None:
-    """闸门6:qbank_status 落库,管理面可见"有评分无题库"。"""
+    """qbank_status 落库,管理面可见"有评分无题库"。"""
     _cleanup(cycle_id)
     try:
         job_id = ev_store.create_jobs([(9006, 506)], cycle_id)[0]

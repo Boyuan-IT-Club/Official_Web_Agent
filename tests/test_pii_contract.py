@@ -1,4 +1,4 @@
-"""PII 出口契约测试(#164,SEC-08/#68):规则表负例/键级掩/输出守卫/审计掩/TTL。"""
+"""PII 出口契约测试:规则表负例/键级掩/输出守卫/审计掩/TTL。"""
 
 import json
 from datetime import UTC
@@ -12,7 +12,7 @@ from official_agent.security.pii import (
     mask_pii_output,
 )
 
-# ── 规则表扩展(#164):邮箱/键级姓名 ──
+# ── 规则表扩展:邮箱/键级姓名 ──
 
 
 def test_email_masked() -> None:
@@ -35,8 +35,8 @@ def test_name_key_masked_in_deep() -> None:
     assert out["major"] == "计算机科学"  # 非姓名键不掩
 
 
-# ── 负例基线(#164):年份/日期不误掩 ──
-# #176:12-17 位纯数字(学号/准考证号)改为必须掩(出向模型契约),
+# ── 负例基线:年份/日期不误掩 ──
+# 12-17 位纯数字(学号/准考证号)改为必须掩(出向模型契约),
 # 纯数字长单号因此一并被掩——出向脱敏宁滥勿漏,这是有意取舍。
 
 
@@ -56,7 +56,7 @@ def test_positive_cases_still_masked() -> None:
     assert "123456789" not in masked
 
 
-# ── 输出守卫(#159 契约「回复出口」;检出→掩码替换照发) ──
+# ── 输出守卫(契约「回复出口」;检出→掩码替换照发) ──
 
 
 def test_output_guard_masks_but_sends() -> None:
@@ -76,7 +76,7 @@ def test_output_guard_clean_no_trace() -> None:
     assert final == text and trace is None
 
 
-# ── 审计写入口 deep 掩(#164 出口契约) ──
+# ── 审计写入口 deep 掩(出口契约) ──
 
 
 def test_audit_action_masked_before_persist(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -131,7 +131,7 @@ def test_audit_action_masked_before_persist(monkeypatch: pytest.MonkeyPatch) -> 
     assert persisted["resume"] == "张三 138****5678"
 
 
-# ── 确认摘要先掩(#164 §4) ──
+# ── 确认摘要先掩 ──
 
 
 def test_require_confirmation_masks_summary(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -151,7 +151,7 @@ def test_require_confirmation_masks_summary(monkeypatch: pytest.MonkeyPatch) -> 
     assert "****" in captured["summary"]
 
 
-# ── TTL 清理任务(#164 §4) ──
+# ── TTL 清理任务 ──
 
 
 def test_purge_expired_interrupts_with_fake_conn() -> None:
@@ -216,11 +216,11 @@ def test_uuid_timestamp_age_parses_and_flags() -> None:
     assert garbage_age is None or garbage_age < 24  # 不会误删语义
 
 
-# ── TTL v6 解码与挂起判别(评审 P0/P1 回归) ──
+# ── TTL v6 解码与挂起判别 ──
 
 
 def test_uuid6_age_decodes_rfc9562_layout() -> None:
-    """评审 P0 回归:stdlib .time 在 3.12 上按 v1 序解码会得垃圾——实现必须
+    """stdlib .time 在 3.12 上按 v1 序解码会得垃圾——实现必须
     显式 v6 重排。以「现在」生成的 uuid6 年龄应 <1h。"""
     import uuid as uuid_mod
     from datetime import datetime
@@ -229,7 +229,7 @@ def test_uuid6_age_decodes_rfc9562_layout() -> None:
 
     now = datetime.now(UTC).timestamp()
     if not hasattr(uuid_mod, "uuid6"):  # pragma: no cover - 3.12 生产镜像
-        pytest.skip("stdlib uuid6 需 3.14+;3.12 正确性由评审在独立运行时实证")
+        pytest.skip("stdlib uuid6 需 3.14+;3.12 正确性由独立运行时实证")
     u6 = str(uuid_mod.uuid6())
     age = _uuid_timestamp_age_hours(u6, now)
     assert age is not None and -1 < age < 1
@@ -249,7 +249,7 @@ def test_uuid4_and_garbage_return_none() -> None:
 def test_purge_only_suspended_threads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """挂起未恢复(interrupt 写入=最新事件)→ 三表清理;已恢复 → 不动(P1)。"""
+    """挂起未恢复(interrupt 写入=最新事件)→ 三表清理;已恢复 → 不动。"""
     from official_agent.state import pg
 
     monkeypatch.setattr(pg, "_uuid_timestamp_age_hours", lambda cid, now: 30.0)

@@ -25,7 +25,7 @@ env:
   # DOCKERHUB_USERNAME(compose 用它拼镜像名)。
   DOCKER_NAMESPACE: huayeding
   IMAGE_NAME: official-agent
-  # agent 单实例固定在 Node A(进程内会话表 _sessions 是单机语义,#116;
+  # agent 单实例固定在 Node A(进程内会话表 _sessions 是单机语义;
   # 会话层外置后才能多副本)。故不做 B→A 滚动,只部署 A。
   DEPLOY_DIR: /opt/boyuan-agent
 
@@ -44,7 +44,7 @@ jobs:
       - run: uv run pytest
 
   # ── 2) 构建并推送镜像 ────────────────────────────────────
-  # 为什么必须在 CI 构建而不是服务器上构建(2026-09-09 首次上线实测):
+  # 为什么必须在 CI 构建而不是服务器上构建(首次上线实测):
   #   · Node A 拉不到 ghcr.io —— builder 基础镜像 ghcr.io/astral-sh/uv 卡在
   #     11MB/22MB 停 1394 秒;腾讯云镜像加速只代理 Docker Hub,不含 ghcr.io
   #   · Node A 的 pypi.org 也超时(镜像源通,但过不了基础镜像那关)
@@ -121,12 +121,12 @@ jobs:
             set -e
             cd ${{ env.DEPLOY_DIR }}/deploy
 
-            # .env.prod 是服务器独有的密钥文件(SEC-01,不入库);缺了就中止,
+            # .env.prod 是服务器独有的密钥文件(不入库);缺了就中止,
             # 免得 compose 用空变量把容器起成不可用状态
             test -f .env.prod || { echo ".env.prod 不存在,先按 deploy/README.md 配置" >&2; exit 1; }
 
             # --env-file 必带:compose 的 ${} 插值只默认读 .env,不读 .env.prod
-            # (env_file: 只注入容器,不参与插值 —— 两套机制,见 PR #138)
+            # (env_file: 只注入容器,不参与插值 —— 两套机制)
             DC="docker compose --env-file .env.prod -f docker-compose.prod.yml"
 
             # 记下当前镜像摘要,失败时回滚到它

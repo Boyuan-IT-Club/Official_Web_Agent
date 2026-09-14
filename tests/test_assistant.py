@@ -1,4 +1,4 @@
-"""GRA-04 ReAct 单循环单测:装配三档/凭证不可见/静态前缀/工具转换/fake-model 链路。"""
+"""ReAct 单循环单测:装配三档/凭证不可见/静态前缀/工具转换/fake-model 链路。"""
 
 import inspect
 from collections.abc import Iterator  # noqa: E402
@@ -191,7 +191,7 @@ async def test_react_loop_with_fake_model_tool_roundtrip(monkeypatch: pytest.Mon
 async def test_react_loop_read_tool_runs_as_asker_under_scope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A·SEC-02 端到端:asker_scope 在 web turn 开启,经真实 LangGraph agent
+    """端到端:asker_scope 在 web turn 开启,经真实 LangGraph agent
     (非直调)驱动一个真只读工具(get_open_cycle → readonly._read)时,后端请求
     必须以来问者本人 JWT 身份(get_as_user),而非服务账号。
 
@@ -265,8 +265,8 @@ async def test_react_loop_read_tool_runs_as_asker_under_scope(
 
 
 def test_role_tool_tables_stay_consistent() -> None:
-    """防漂移:admin 档必须登记 _ALL_TOOLS 的全部工具(TOOL-05/SEC-02
-    演化时,新工具只登记一张表会静默对全部角色不可见)。"""
+    """防漂移:admin 档必须登记 _ALL_TOOLS 的全部工具
+    (新工具只登记一张表会静默对全部角色不可见)。"""
     import official_agent.graphs.assistant as assistant_mod
 
     assert set(assistant_mod._ROLE_TOOL_NAMES["admin"]) == set(assistant_mod._ALL_TOOLS)
@@ -307,7 +307,7 @@ def test_build_model_openai_compatible_missing_config_fails() -> None:
         build_model(settings)
 
 
-# ── 身份/工具契约进 system prompt(#166 修复)──────
+# ── 身份/工具契约进 system prompt ──────
 
 
 def test_tool_contract_unknown_forbids_claims() -> None:
@@ -333,7 +333,7 @@ def test_tool_contract_admin_lists_tools_and_failure_talk() -> None:
 
 
 def test_identity_and_contract_live_in_system_prompt_not_user_message() -> None:
-    """#166:身份/契约进 system prompt,绝不作为用户消息(泄漏成气泡)。"""
+    """身份/契约进 system prompt,绝不作为用户消息(泄漏成气泡)。"""
     from official_agent.graphs.assistant import (
         build_system_prompt,
         compose_first_message,

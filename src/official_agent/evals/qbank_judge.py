@@ -1,8 +1,8 @@
-"""LLM-as-judge executor(#155/#62):四维 1-5 分报告——**只报告不阻塞**。
+"""LLM-as-judge executor:四维 1-5 分报告——**只报告不阻塞**。
 
 数据集 evals/datasets/qbank_judge.yaml:标准 dossier fixture + 题组。
 无 LLM 配置 → SKIP;有 LLM → 跑 judge,套件恒 PASS(分数进 metrics/报告),
-阈值等 AG8(#156)校准后由基线/门禁接管。
+阈值校准后由基线/门禁接管。
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ async def run_suite(path: Path, *, distribution: bool = False, **_: Any) -> Suit
     ]
     metrics = {f"judge_{d['dimension']}": float(d["score"]) for d in report["dimensions"]}
 
-    # 报告落盘(#155 契约):AG8 校准与人工抽查的数据源;fail-open
+    # 报告落盘:阈值校准与人工抽查的数据源;fail-open
     report_path = path.parent.parent / "last_qbank_judge_report.json"
     with contextlib.suppress(OSError):
         report_path.write_text(
@@ -71,7 +71,7 @@ async def run_suite(path: Path, *, distribution: bool = False, **_: Any) -> Suit
         name=path.stem,
         kind="qbank_judge",
         source=path.name,
-        status="PASS",  # 报告模式:恒不 FAIL(阈值校准后由 AG8 决定门禁)
+        status="PASS",  # 报告模式:恒不 FAIL(阈值校准后才转为门禁)
         cases=cases,
         metrics=metrics,
         notes=[f"judge 报告模式(只报告不阻塞): overall={report.get('overall', '')[:80]}"],

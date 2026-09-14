@@ -1,4 +1,4 @@
-"""注入防御测试(#163):模式库/数据区标签/契约挂载/探针执行器。"""
+"""注入防御测试:模式库/数据区标签/契约挂载/探针执行器。"""
 
 import json
 
@@ -24,7 +24,7 @@ def _identity(role: str) -> ResolvedIdentity:
     )
 
 
-# ── 模式库(#159 决议:忽略指令/system 泄漏/角色扮演/评分操纵) ──
+# ── 模式库(忽略指令/system 泄漏/角色扮演/评分操纵) ──
 
 
 def test_scan_hits_all_design_families() -> None:

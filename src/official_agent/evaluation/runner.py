@@ -1,14 +1,14 @@
-"""B2 执行组织(#126):进程内 asyncio task runner + job 状态表。
+"""执行组织:进程内 asyncio task runner + job 状态表。
 
 - 触发:管理员手动(单/批量),POST /admin/evaluation/run → submit()
-- 方案A(评审闸门1):前端只认 resume_id,user_id/cycle_id 由后端权威派生,
+- 前端只认 resume_id,user_id/cycle_id 由后端权威派生,
   开工前断言"按 user_id 查回的 resume == 本 job resume",防止错位操作。
 - 每 job 一个 asyncio task(信号量限并发,LLM 慢操作);状态全在
   evaluation_job 表,进程重启后 pending/running 残留由启动自动恢复
-  (闸门3:lifespan 调 retry_stale 全量扫,超 10 分钟+attempts 未满才重排)
-- AI 0 分 = 初筛不过特殊标记:卡内 hard_zero 落列,不自动拒(#135)
-- 失败可重试:mark failed + requeue;审计走 agent_audit_log(#124 双录)
-- 题库线独立状态(闸门6):qbank_status=succeeded/failed/skipped,
+  (lifespan 调 retry_stale 全量扫,超 10 分钟+attempts 未满才重排)
+- AI 0 分 = 初筛不过特殊标记:卡内 hard_zero 落列,不自动拒
+- 失败可重试:mark failed + requeue;审计走 agent_audit_log 双录
+- 题库线独立状态:qbank_status=succeeded/failed/skipped,
   评分成功题库失败 → job succeeded + qbank_status=failed,管理面可见。
 """
 
@@ -32,7 +32,7 @@ _MAX_CONCURRENCY = 4
 
 @dataclass(frozen=True)
 class TriggerItem:
-    """初筛触发项。方案A(评审闸门1):只认 resume_id 一个事实源。
+    """初筛触发项。只认 resume_id 一个事实源。
 
     user_id 不再由前端携带——开工前由 fetch_resume_authority 从后端
     按简历号派生权威归属,杜绝"A 标 6、B 被评分"的错位。
@@ -50,7 +50,7 @@ def _write_eval_usage_log(
     qbank_version: int,
     usage: dict,
 ) -> None:
-    """eval 通道用量日志(#154/D9):thread_id 关联 job;四列 token 进 M6 面板。
+    """eval 通道用量日志:thread_id 关联 job;四列 token 进会话用量面板。
 
     fail-open:日志写失败不拖垮 job(与审计同语义)。"""
     try:
@@ -70,7 +70,7 @@ def _write_eval_usage_log(
 
 
 def _log_event(job_id: int, cycle_id: int, resume_id: int, stage: str, **fields: object) -> None:
-    """评测线结构化事件日志(#183):单行 key=value,分钟级定位失败阶段。
+    """评测线结构化事件日志:单行 key=value,分钟级定位失败阶段。
 
     只记 id/阶段/耗时/版本/错误类别,绝不落简历原文或 PII;trace id 由
     job 级 turn-trace(set in _run_job)进 traceparent 与 Langfuse,
@@ -97,12 +97,11 @@ async def _set_resume_status(resume_id: int, status: int) -> None:
 
 
 async def fetch_candidate_github(user_id: int) -> str:
-    """从候选档案取 github 登录名(D17/#149):GET /api/admin/profiles/{userId}
+    """从候选档案取 github 登录名:GET /api/admin/profiles/{userId}
     → detail.github(地址或裸登录名)→ 归一化为登录名。
 
-    评测提交认领(submissions)是第二来源,档案为空时暂不回退(诚实边界,
-    见 #149 验收记录)。任何失败返回空串——github_key 缺失只关评测线,
-    不拖垮评分与仓线。"""
+    评测提交认领(submissions)是第二来源,档案为空时暂不回退(诚实边界)。
+    任何失败返回空串——github_key 缺失只关评测线,不拖垮评分与仓线。"""
     try:
         client = await get_backend_client()
         data = await client.get(f"/api/admin/profiles/{user_id}")
@@ -118,14 +117,14 @@ async def fetch_scoring_fields(user_id: int, cycle_id: int) -> tuple[int, list[F
     """服务账号取简历详情,映射为打分维度(textarea 型字段)。
 
     对应 GET /api/resumes/admin/{userId}/{cycleId}(resume:view 权限走
-    服务账号,与 B1 的 PII 纪律一致:脱敏由后端返回层+字段面决定,这里
+    服务账号,与评分线的 PII 纪律一致:脱敏由后端返回层+字段面决定,这里
     只取 textarea 型主观题)。返回 (resume_id, fields)。
     """
     client = await get_backend_client()
     data = await client.get(f"/api/resumes/admin/{user_id}/{cycle_id}")
     resume_id = int(data.get("resumeId") or 0)
     if resume_id <= 0:
-        # 缺 resumeId 静默落 0 会产生查不到的幽灵卡(B2 评审 P2)
+        # 缺 resumeId 静默落 0 会产生查不到的幽灵卡
         raise RuntimeError("后端响应缺 resumeId,拒绝评分")
     fields = [
         FieldText(
@@ -141,7 +140,7 @@ async def fetch_scoring_fields(user_id: int, cycle_id: int) -> tuple[int, list[F
 
 
 async def fetch_resume_authority(resume_id: int) -> dict:
-    """方案A:按简历号向后端取权威 user_id/cycle_id(闸门1)。
+    """按简历号向后端取权威 user_id/cycle_id。
 
     对应 Backend GET /api/resumes/admin/by-resume/{resumeId}(resume:view)。
     只认 resume_id 一个事实源——前端不再传 user_id,这里派生:
@@ -168,12 +167,12 @@ async def fetch_resume_authority(resume_id: int) -> dict:
 
 
 def _mask_fields_for_model(fields: list[FieldText], *, resume_id: int) -> list[FieldText]:
-    """#176 出口契约:简历字段进评分/出题模型前强制深度脱敏。
+    """出口契约:简历字段进评分/出题模型前强制深度脱敏。
 
-    打分面(FieldText docstring #123 契约)本就要求 value 已脱敏,但此前
-    无强制——评估线绕过了 chat 工具返回层的 mask_pii_deep。这里在唯一
+    打分面(FieldText 契约)本就要求 value 已脱敏,但此前无强制——
+    评估线绕过了 chat 工具返回层的 mask_pii_deep。这里在唯一
     入口(_run_job)统一执行:value 以 {字段键: 原文} 结构过 mask_pii_deep
-    ——键级白名单管姓名类字段(姓名不进文本正则,#164),文本正则管
+    ——键级白名单管姓名类字段(姓名不进文本正则),文本正则管
     手机/身份证/邮箱/QQ(学号等 5-11 位数字同规则)。命中打安全日志
     (只记数量与 resume_id,不落原文)。
     """
@@ -182,7 +181,7 @@ def _mask_fields_for_model(fields: list[FieldText], *, resume_id: int) -> list[F
     out: list[FieldText] = []
     hits = 0
     for f in fields:
-        # placeholder 与 value 走同一键级掩(#176 评审):姓名类字段的
+        # placeholder 与 value 走同一键级掩:姓名类字段的
         # 「与 placeholder 同文」全等判在掩码后仍成立
         masked_value = mask_pii_deep([{f.field_key: f.value}])[0][f.field_key]
         masked_ph = mask_pii_deep([{f.field_key: f.placeholder}])[0][f.field_key]
@@ -210,11 +209,11 @@ class EvaluationRunner:
 
     def __init__(self) -> None:
         self._sem = asyncio.Semaphore(_MAX_CONCURRENCY)
-        # asyncio 只持任务弱引用:不保存会被 GC,job 静默卡死(B2 评审 P1)
+        # asyncio 只持任务弱引用:不保存会被 GC,job 静默卡死
         self._tasks: set[asyncio.Task] = set()
-        # #193 幂等派发:进程内在跑 job 登记——create_jobs 幂等复用活跃 job_id
+        # 幂等派发:进程内在跑 job 登记——create_jobs 幂等复用活跃 job_id
         # 后,submit/重试若再无条件派发会双跑同一简历。单 worker 语义;跨副本
-        # 由 DB 唯一活跃索引 + attempts 上限兜底(扩副本前需外置,见 #172 map)。
+        # 由 DB 唯一活跃索引 + attempts 上限兜底(扩副本前需外置)。
         self._inflight: set[int] = set()
 
     def _spawn(self, coro) -> None:
@@ -223,12 +222,12 @@ class EvaluationRunner:
         task.add_done_callback(self._tasks.discard)
 
     def _try_dispatch(self, job_id: int, cycle_id: int, *, trigger_user_id: int) -> bool:
-        """同 job 进程内只派发一次(#193);返回是否实际派发。
+        """同 job 进程内只派发一次;返回是否实际派发。
 
         已在执行(含并发双击、重试双发、stale 恢复撞上在跑慢 job)→ 跳过;
         执行完成由守卫协程的 finally 清理登记,之后再触发是合法复评。"""
         if job_id in self._inflight:
-            logging.getLogger(__name__).info("job %s 已在执行,跳过重复派发(#193 幂等)", job_id)
+            logging.getLogger(__name__).info("job %s 已在执行,跳过重复派发", job_id)
             return False
         self._inflight.add(job_id)
 
@@ -242,7 +241,7 @@ class EvaluationRunner:
             self._spawn(_guarded())
         except Exception:
             # create_task 失败(如事件循环已关):登记必须回收,否则该 job
-            # 在本进程内永久无法再派发(#193 评审 P3)
+            # 在本进程内永久无法再派发
             self._inflight.discard(job_id)
             raise
         return True
@@ -252,7 +251,7 @@ class EvaluationRunner:
     ) -> list[int]:
         if not items:
             return []
-        # 方案A(闸门1):前端只给 resume_id,user_id 由后端按简历号权威派生。
+        # 前端只给 resume_id,user_id 由后端按简历号权威派生。
         # 逐个核对返回的 resumeId == 请求 resume_id,不一致抛错(batch 全拒)。
         authoritative: list[tuple[int, int]] = []
         for item in items:
@@ -263,7 +262,7 @@ class EvaluationRunner:
             authoritative,
             cycle_id,
         )
-        # 先派发后审计:审计失败不得让已建的 job 永远 pending(B2 E2E 实测)
+        # 先派发后审计:审计失败不得让已建的 job 永远 pending
         for job_id in job_ids:
             self._try_dispatch(job_id, cycle_id, trigger_user_id=trigger_user_id)
         try:
@@ -292,7 +291,7 @@ class EvaluationRunner:
             set_turn_trace_id,
         )
 
-        # #183:job 级 correlation id——Langfuse trace、出站 Backend 请求
+        # job 级 correlation id——Langfuse trace、出站 Backend 请求
         # traceparent、审计 trace_id、结构化日志四面同 id(确定性可复算)。
         trace_token = set_turn_trace_id(eval_job_trace_id(job_id))
         try:
@@ -318,7 +317,7 @@ class EvaluationRunner:
                 attempts=int(job.get("attempts") or 0) + 1,
                 model=get_effective_settings().model_strong,
             )
-            # 用户反馈:简历状态加「AI初筛中」(瞬态 6),结束后回落 2——
+            # 简历状态加「AI初筛中」(瞬态 6),结束后回落 2——
             # 否则触发了初筛但状态无变化,让人困惑。
             # 注意:6 与回 2 只作用于权威 resume_id,不会误改别的简历。
             await _set_resume_status(resume_id, 6)
@@ -328,14 +327,14 @@ class EvaluationRunner:
             try:
                 t_eval = time.monotonic()
                 fetched_resume_id, fields = await fetch_scoring_fields(job["user_id"], cycle_id)
-                # 闸门1 硬断言:后端按 user_id+cycle 派生出的简历必须就是本 job
+                # 硬断言:后端按 user_id+cycle 派生出的简历必须就是本 job
                 # 的简历;不一致说明数据错位,立即失败,绝不带病继续。
                 if fetched_resume_id != resume_id:
                     raise RuntimeError(
                         f"简历归属错位:job resume_id={resume_id},"
                         f"后端按 user_id={job['user_id']} 返回 {fetched_resume_id}——拒绝评分"
                     )
-                # #176 出口契约:评分与出题两个模型入口共用这份脱敏后字段
+                # 出口契约:评分与出题两个模型入口共用这份脱敏后字段
                 fields = _mask_fields_for_model(fields, resume_id=resume_id)
                 scoring_usage: dict[str, int | None] = {}
                 card = await run_evaluation(
@@ -371,7 +370,7 @@ class EvaluationRunner:
                     input_tokens=scoring_usage.get("input_tokens"),
                     output_tokens=scoring_usage.get("output_tokens"),
                 )
-                # 调查 bundle → qbank:题库线失败不再静默(闸门6 qbank_status),
+                # 调查 bundle → qbank:题库线失败不再静默(qbank_status 落库),
                 # job 记 succeeded + qbank_status=failed——评分卡有效,题库缺失
                 # 管理面可见、可单独重试。
                 t_qbank = time.monotonic()
@@ -399,8 +398,8 @@ class EvaluationRunner:
                         prompt_version=str(envelope.get("prompt_version", "")),
                     )
                     qbank_status = "succeeded"
-                    # D9/#154:探索+出题用量进 conversation_log(evaluation 通道,
-                    # 关联 job;复用 M6 #113 四列管道,不新建表)
+                    # 探索+出题用量进 conversation_log(evaluation 通道,
+                    # 关联 job;复用四列 token 管道,不新建表)
                     usage_total = envelope.get("explore_usage_total") or {}
                     await asyncio.to_thread(
                         _write_eval_usage_log,
@@ -479,7 +478,7 @@ class EvaluationRunner:
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
             # 6 是瞬态:成功路径在审计前回落 2(失败路径已回落),
-            # 否则简历永久卡"初筛中"(闸门3)。
+            # 否则简历永久卡"初筛中"。
             await _set_resume_status(resume_id, 2)
             # 完成审计在保护段外:审计失败不得把已 succeeded 的 job 翻成 failed
             try:
@@ -519,7 +518,7 @@ class EvaluationRunner:
     async def retry_stale(self, cycle_id: int) -> list[int]:
         """残留恢复:超时限的 failed/pending/running 未超上限 job 回 pending 并派发。
 
-        闸门3:启动时与手动(include_stale)共用;attempts 达上限的 job 不重排。
+        启动时与手动(include_stale)共用;attempts 达上限的 job 不重排。
         """
         job_ids = await asyncio.to_thread(evaluation.requeue_stale, cycle_id)
         for job_id in job_ids:
@@ -527,9 +526,9 @@ class EvaluationRunner:
         return job_ids
 
     async def recover_stale_on_startup(self, *, older_than_minutes: int = 10) -> list[int]:
-        """闸门3 启动自动恢复:全量扫残留(不限周期),重派未超上限的僵 job。
+        """启动自动恢复:全量扫残留(不限周期),重派未超上限的僵 job。
 
-        requeue_stale_all_cycles 返回 [{job_id, cycle_id}](#175):恢复必须在
+        requeue_stale_all_cycles 返回 [{job_id, cycle_id}]:恢复必须在
         **原 cycle** 派发——曾把整行 dict 当 job_id、cycle 硬编码 0,多周期
         数据下恢复必错位。返回重派的 job_id 列表。
         """

@@ -1,4 +1,4 @@
-"""B-AG2 入口瀑布与归属四级测试(#150;spec §3.1 + ADR-0008)。
+"""入口瀑布与归属四级测试(ADR-0008)。
 
 respx fake 仓;四级各一例 + fork 参与判定 + 搜索撞名降级 + 贡献声明 +
 route_node 集成。
@@ -49,7 +49,7 @@ async def test_trusted_contribution_via_commits() -> None:
 
 @respx.mock
 async def test_trusted_contribution_via_pr_when_no_commits() -> None:
-    respx.get(f"{base}/repos/org/other/commits").mock(_json([]))  # D3:无领先 commit
+    respx.get(f"{base}/repos/org/other/commits").mock(_json([]))  # 无领先 commit
     respx.get(f"{base}/search/issues").mock(
         _json({"items": [{"number": 7, "title": "feat", "pull_request": {"url": "u"}}]})
     )
@@ -74,7 +74,7 @@ async def test_unverified_search_hit_without_evidence() -> None:
     assert result.deep_dive_allowed is False  # 不深挖,仅 guided
 
 
-# ── fork 参与判定(D3:不要求领先父仓) ───────────────────
+# ── fork 参与判定:不要求领先父仓 ───────────────────
 
 
 @respx.mock
@@ -158,7 +158,7 @@ async def test_waterfall_no_keywords_returns_none() -> None:
     assert result is None  # 提不出关键词 → guided/skip,不硬猜
 
 
-# ── 贡献声明(D4) ────────────────────────────────────────
+# ── 贡献声明 ────────────────────────────────────────────
 
 
 def test_detect_contribution_target() -> None:
@@ -250,11 +250,11 @@ def test_keyword_candidates_extracts_latin_and_quoted() -> None:
     assert not lowered & {"github", "http", "https", "com", "www", "org"}
 
 
-# ── 评审 P1 回归:词界等值匹配,防绑定名下无关仓被误判点名 ──
+# ── 词界等值匹配,防绑定名下无关仓被误判点名 ──
 
 
 def test_repo_matching_requires_word_boundary() -> None:
-    """关键词 'blog' 不得子串命中 'myblogengine'(D2:只深挖点名项目)。"""
+    """关键词 'blog' 不得子串命中 'myblogengine'(只深挖点名项目)。"""
     from official_agent.evaluation.attribution import _repo_matches
 
     row = {"name": "myblogengine", "description": "a blog engine"}
@@ -276,7 +276,7 @@ def test_contribution_regex_ignores_tech_stack_slash() -> None:
 
 @respx.mock
 async def test_route_node_contribution_claim_bound_no_evidence_guides() -> None:
-    """贡献声明 + 绑定但查无 commits/PR → claimed,不深挖只 guided(D4)。"""
+    """贡献声明 + 绑定但查无 commits/PR → claimed,不深挖只 guided。"""
     respx.get(f"{base}/repos/org/toolkit/commits").mock(_json([]))
     respx.get(f"{base}/search/issues").mock(_json({"items": []}))
     state = {

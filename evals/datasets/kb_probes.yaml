@@ -1,5 +1,5 @@
-# RAG KB 召回门禁数据集(R7,#134):确定性评测,低于基线或负例误命中 → 挡合并。
-# #148 统一 runner 格式:顶层 runner 声明执行器。
+# RAG KB 召回门禁数据集:确定性评测,低于基线或负例误命中 → 挡合并。
+# 统一 runner 格式:顶层 runner 声明执行器。
 #
 # - positive:query 的检索 top3 内必须命中 expect.any_of_sources 之一(标题匹配);
 #   best_rank 用于 MRR。
@@ -8,7 +8,7 @@
 #   模型/扩充语料后需重校(uv run python evals/run_evals.py --suite kb_probes
 #   --distribution 看 DISTRIBUTION)。
 #
-# 新增知识条目后:为新内容补 positive 探针;线上 badcase 回流为探针(OBS-06)。
+# 新增知识条目后:为新内容补 positive 探针;线上 badcase 回流为探针。
 
 runner: kb_probes
 

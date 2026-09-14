@@ -1,10 +1,10 @@
-"""#169 重启续聊 + 有界 session registry 路由测试。
+"""重启续聊 + 有界 session registry 路由测试。
 
 同 test_web_routes 先例:TestClient + monkeypatch,不真连库/checkpointer。
 关键契约:
 - 内存未命中 + 显式 session_id → resolve_thread 属主/active 校验;
   通过则以原 thread_id 重建运行时(is_new=False,不再静默换新会话);
-- 跨属主/已终结/不存在统一 404(不区分原因,SEC-07 防枚举);
+- 跨属主/已终结/不存在统一 404(不区分原因,防会话枚举);
 - resolve_thread 故障 → 503 fail-closed;
 - 注册表有界:空闲 TTL 与容量上限淘汰只删运行时对象,不碰 PG。
 """
@@ -26,7 +26,7 @@ from official_agent.web.app import create_app
 
 
 class _CheckpointerStub:
-    """checkpointer 替身(#194):恢复路径现在要求非 None,测试不能再给 None。"""
+    """checkpointer 替身:恢复路径现在要求非 None,测试不能再给 None。"""
 
 
 @contextlib.asynccontextmanager
@@ -162,7 +162,7 @@ def test_resume_fail_closed_when_registry_check_errors(
 
 
 def _state_stub(session_id: str) -> routes._SessionState:
-    """_SessionState 替身:淘汰逻辑现在读 turn_lock(#194),不能拿 object() 充数。"""
+    """_SessionState 替身:淘汰逻辑现在读 turn_lock,不能拿 object() 充数。"""
     return routes._SessionState(session_id, _identity(), "tok", object())
 
 
@@ -215,7 +215,7 @@ def test_registry_lru_touch_keeps_recent(monkeypatch) -> None:
     assert "web:u7:new" not in routes._sessions
 
 
-# ── 真 PG 档案层:resolve_thread 属主/状态往返(#169 验收) ──
+# ── 真 PG 档案层:resolve_thread 属主/状态往返 ──
 
 
 def _pg_url() -> str:
@@ -271,7 +271,7 @@ def test_resolve_thread_roundtrip_real_pg() -> None:
     _ = os  # 保持导入完整
 
 
-# ── #170:单轮墙钟超时 / 安全错误契约 / 递归上限 / 全局并发闸 ──
+# ── 单轮墙钟超时 / 安全错误契约 / 递归上限 / 全局并发闸 ──
 
 
 class _HangingAgent:
@@ -318,7 +318,7 @@ def _install_turn_settings(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_turn_timeout_returns_stable_copy_and_releases_lock(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#170:卡住的轮次在墙钟时限内中止,客户端收稳定文案,锁可靠释放。"""
+    """卡住的轮次在墙钟时限内中止,客户端收稳定文案,锁可靠释放。"""
     import time as _time
 
     agent = _HangingAgent()
@@ -351,7 +351,7 @@ def test_turn_timeout_returns_stable_copy_and_releases_lock(
 def test_error_events_never_leak_internal_details(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#170:原始异常(内网地址/SDK 体)不得进 SSE,只给稳定文案+trace。"""
+    """原始异常(内网地址/SDK 体)不得进 SSE,只给稳定文案+trace。"""
     agent = _BoomAgent(RuntimeError("SECRET postgres://user:pw@10.0.0.9:5432/db boomed"))
     _install(monkeypatch, thread=None)
     _install_turn_settings(monkeypatch)
@@ -372,7 +372,7 @@ def test_error_events_never_leak_internal_details(
 def test_recursion_limit_forwarded_in_config(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#170:recursion_limit 显式进 astream config。"""
+    """recursion_limit 显式进 astream config。"""
     agent = _HangingAgent()
     _install(monkeypatch, thread=None)
     _install_turn_settings(monkeypatch)
@@ -403,7 +403,7 @@ def test_recursion_limit_forwarded_in_config(
 def test_model_gate_saturation_returns_busy(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#170:全局并发闸满 → 稳定 busy 事件,不无限排队占 SSE。"""
+    """全局并发闸满 → 稳定 busy 事件,不无限排队占 SSE。"""
 
     class _FullGate:
         """永不放行的假闸(闸满的最坏情形)。"""
@@ -440,7 +440,7 @@ class _FakeGateAgent:
 def test_auth_backend_down_is_503_not_401(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#170:后端不可达 → 503;凭证无效仍 401——两类失败不再混淆。"""
+    """后端不可达 → 503;凭证无效仍 401——两类失败不再混淆。"""
     from official_agent.tools.client import BackendError, BackendUnavailableError
 
     async def _down(*_a: object, **_k: object):
@@ -462,11 +462,11 @@ def test_auth_backend_down_is_503_not_401(
     assert resp.status_code == 401
 
 
-# ── #194 复审 P0/P1 回归 ──
+# ── 淘汰与恢复的 fail-closed 回归 ──
 
 
 def test_evict_skips_inflight_turn(monkeypatch) -> None:
-    """#194 复审 P0:持锁会话不得被 TTL/LRU 淘汰。
+    """持锁会话不得被 TTL/LRU 淘汰。
 
     淘汰执行中的运行时会让同一 session_id 的下个请求重建出「新对象 +
     新锁」,与原对象并发写同一 checkpoint thread。此测试钉住:在途会话
@@ -493,7 +493,7 @@ def test_evict_skips_inflight_turn(monkeypatch) -> None:
 
 
 def test_evict_skips_inflight_but_still_evicts_idle(monkeypatch) -> None:
-    """#194 复审 P0:在途条目跳过不得阻断其余条目淘汰(容量仍能收敛)。"""
+    """在途条目跳过不得阻断其余条目淘汰(容量仍能收敛)。"""
     import time as _time
 
     from official_agent.config import get_settings
@@ -518,7 +518,7 @@ def test_evict_skips_inflight_but_still_evicts_idle(monkeypatch) -> None:
 
 
 def test_resume_without_checkpointer_is_503(monkeypatch: pytest.MonkeyPatch) -> None:
-    """#194 复审 P1:档案在但 checkpointer 不可用 → 503,不假装续聊成功。
+    """档案在但 checkpointer 不可用 → 503,不假装续聊成功。
 
     旧行为返回 is_new=False 并构建无持久化 agent:用户看到「续聊成功」
     而上下文为空。直接驱动 _get_or_create_session,把 app.state.checkpointer
@@ -550,7 +550,7 @@ def test_resume_without_checkpointer_is_503(monkeypatch: pytest.MonkeyPatch) -> 
 def test_gate_busy_logs_conversation_and_emits_one_error(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#194 复审 P1:闸满必须落 conversation_log,且只发一个 error 事件。
+    """闸满必须落 conversation_log,且只发一个 error 事件。
 
     旧行为在获取闸超时后直接 return,跳过 _log_conversation——资源饱和
     事件恰好在观测面消失。

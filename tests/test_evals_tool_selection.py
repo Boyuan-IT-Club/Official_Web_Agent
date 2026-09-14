@@ -1,4 +1,4 @@
-"""tool_selection executor 单测(#148):断言语义全 fake,不花 API 费。
+"""tool_selection executor 单测:断言语义全 fake,不花 API 费。
 
 真实图 × 真实 LLM 的链路由 test_assistant 覆盖;这里只验 runner 的断言面。
 """

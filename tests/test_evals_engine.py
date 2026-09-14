@@ -1,4 +1,4 @@
-"""eval 引擎单测(#148):发现/分发/退出码/基线对比,全 fake executor。"""
+"""eval 引擎单测:发现/分发/退出码/基线对比,全 fake executor。"""
 
 import json
 from pathlib import Path

@@ -1,9 +1,9 @@
-"""CLI 对话入口(INF-03):开发调试主力,M1 验收载体。
+"""CLI 对话入口:开发调试主力。
 
-链路:模拟身份凭证 → GRA-01 身份解析 → GRA-04 agent 工厂 → 流式多轮对话。
-身份信息作为首条用户消息注入(静态前缀纪律);检查点持久化由 MEM-01
+链路:模拟身份凭证 → 身份解析 → agent 工厂 → 流式多轮对话。
+身份信息作为首条用户消息注入(静态前缀纪律);检查点持久化由
 checkpointer 承担(Postgres),多轮历史跨进程续接;session=thread_id。
-Langfuse callbacks fail-open 挂载(OBS-01)。
+Langfuse callbacks fail-open 挂载。
 
 用法:
     uv run official-agent chat                       # .env 服务账号身份
@@ -118,7 +118,7 @@ def chat(
 ) -> None:
     """本地多轮对话,流式输出,支持指定模拟身份。
 
-    --session 是会话别名(SEC-07):同名续接该用户最近 active 会话,不是裸
+    --session 是会话别名:同名续接该用户最近 active 会话,不是裸
     thread_id。thread_id 由系统按 {channel}:u{user}:{random8} 生成。
     """
     if username and not password:
@@ -134,14 +134,14 @@ async def _chat(username: str, password: str, session: str) -> None:
             else {"kind": "cli"}
         )
     except (BackendError, httpx.HTTPError) as exc:
-        # 后端不可达/网关错也走人话,不裸栈(review Inf03Review 实测)
+        # 后端不可达/网关错也走人话,不裸栈
         console.print(f"[red]身份解析失败:[/red] {exc}")
         console.print("[yellow]提示: 确认后端已启动且 .env 的 BACKEND_BASE_URL 正确[/yellow]")
         raise typer.Exit(1) from None
 
     user_token = (await get_backend_client()).token or ""
 
-    # 线程档(SEC-07):--session 是用户侧别名,存 agent_threads.subject。
+    # 线程档:--session 是用户侧别名,存 agent_threads.subject。
     # 同名续接该用户最近 active 会话,无则新开;不传则每次新会话。
     # thread_id 由系统生成 {channel}:u{user}:{random8},不拼用户可控串。
     tid = ""
@@ -163,7 +163,7 @@ async def _chat(username: str, password: str, session: str) -> None:
             tid = create_thread("cli", user_id).thread_id
         except Exception as exc:  # noqa: BLE001 — 建档失败不阻断对话
             # 降级:不用共享/可猜 dev —— 生成随机唯一 tid 保 trace 隔离
-            # (PG 挂了无持久化,但 thread_id 不跨用户共享,不违反 SEC-07 §1)
+            # (PG 挂了无持久化,但 thread_id 不跨用户共享,也不可猜)
             console.print(f"[dim]建档失败(PG 不可用,本会话不持久化):[/dim] {exc}")
             tid = new_thread_id("cli", user_id or 0)
 
@@ -174,10 +174,10 @@ async def _chat(username: str, password: str, session: str) -> None:
     async with AsyncExitStack() as stack:
         try:
             saver = await stack.enter_async_context(get_checkpointer())
-            ensure_agent_threads_table()  # L-1:幂等建 agent_threads 档案表
-            ensure_audit_table()  # L-1:幂等建 agent_audit_log(SEC-03,空库自举)
+            ensure_agent_threads_table()  # 幂等建 agent_threads 档案表
+            ensure_audit_table()  # 幂等建 agent_audit_log(空库自举)
         except Exception as exc:  # noqa: BLE001 — PG 未起/配置错 → 降级
-            msg = "[dim]Postgres 未连接,本轮无持久化(MEM-01 需启动 Langfuse PG):[/dim]"
+            msg = "[dim]Postgres 未连接,本轮无持久化(需启动 Langfuse PG):[/dim]"
             console.print(f"{msg} {exc}")
             saver = None
 
@@ -195,7 +195,7 @@ async def _chat(username: str, password: str, session: str) -> None:
             f"exit/退出 结束"
         )
 
-        # #166 修复:身份/契约已移入 system prompt(build_assistant_agent),
+        # 身份/契约已移入 system prompt(build_assistant_agent),
         # 不再注入首条用户消息——对话消息面不含内部指令。
         chat_history: list = []  # 仅降级路径使用:本地历史累积
         while True:
@@ -211,7 +211,7 @@ async def _chat(username: str, password: str, session: str) -> None:
                 return
 
             if saver is not None:
-                # 持久化路径:#166 后无身份前缀,消息直接以用户原文接力
+                # 持久化路径:无身份前缀,消息直接以用户原文接力
                 messages = [HumanMessage(content=user_input)]
             else:
                 # 降级:本地累积,保证多轮不失忆(原 CLI 语义)
@@ -234,7 +234,7 @@ async def _chat(username: str, password: str, session: str) -> None:
                 console.print(f"\n[red]本轮执行失败:[/red] {exc}")
                 if "api_key" in str(exc).lower() or "anthropic" in str(exc).lower():
                     console.print("[yellow]提示: .env 需配置 ANTHROPIC_API_KEY[/yellow]")
-                # H-2:失败轮不进历史。有 saver 时下次 aget_state 仍无→自动重发前缀;
+                # 失败轮不进历史。有 saver 时下次 aget_state 仍无→自动重发前缀;
                 # 降级时把本轮输入放回 chat_history(保上下文)
                 if saver is None:
                     chat_history.append(HumanMessage(content=user_input))
@@ -250,20 +250,20 @@ async def _run_turn(
 ) -> list:
     """跑一轮:流式打印 token 与工具状态,返回本轮增量累积的消息历史。
 
-    历史也由 checkpointer 持久化(MEM-01);返回值供调用方在无 checkpointer
+    历史也由 checkpointer 持久化;返回值供调用方在无 checkpointer
     场景(如测试替身)继续累积。
 
-    OBS-02:轮开头设轮级 trace id(= thread_id,set 时归一为 W3C 32-hex),client 层
+    轮开头设轮级 trace id(= thread_id,set 时归一为 W3C 32-hex),client 层
     据此兜底注入 traceparent;Langfuse 生效时 span 优先,该值实际不生效。
     """
     console.print("[bold green]agent>[/bold green] ", end="")
     trace_token = set_turn_trace_id(session)
-    buffered: list[str] = []  # GRA-04 #161:无工具档缓冲,流尾守卫后一次性输出
-    # #164:直印路径逐块过 PII 掩码器(buffer 分支由守卫整段处理)
+    buffered: list[str] = []  # 无工具档缓冲,流尾守卫后一次性输出
+    # 直印路径逐块过 PII 掩码器(buffer 分支由守卫整段处理)
     pii_masker = None if buffer_reply else ReplyPiiMasker()
     config = {
         "callbacks": callbacks,
-        "configurable": {"thread_id": session},  # MEM-01:thread_id 即线程档主键
+        "configurable": {"thread_id": session},  # thread_id 即线程档主键
     }
     new_messages: list = []  # 本轮增量(create_agent 的 updates 每节点只吐新增)
     try:
@@ -292,7 +292,7 @@ async def _run_turn(
     finally:
         reset_turn_trace_id(trace_token)
     if buffer_reply:
-        # GRA-04 #161:无工具档整段过编造守卫后一次性输出(不再逐块打印)
+        # 无工具档整段过编造守卫后一次性输出(不再逐块打印)
         from official_agent.security.fabrication_guard import guard_empty_tools_reply
 
         final_reply, verdict = guard_empty_tools_reply("".join(buffered))
@@ -310,7 +310,6 @@ async def _run_turn(
     console.print()
     # 增量累积:历史=原历史+本轮全部节点新增;空消息过滤防呆。
     # 勿用末节点整体替换——真实图每节点只吐增量,替换会丢身份与提问
-    # (review Inf03Review 实测抓出的缺陷)。
     meaningful = [
         m
         for m in new_messages

@@ -1,7 +1,7 @@
-"""出题质量 LLM-as-judge(#155/#62):dossier+题组 → 四维 1-5 分报告。
+"""出题质量 LLM-as-judge:dossier+题组 → 四维 1-5 分报告。
 
-首版**只报告不阻塞**(报告落 evals/last_qbank_judge_report.json;阈值等
-AG8 #156 校准后转门禁)。judge prompt 走 prompts/ 版本化(ADR-0004)。
+首版**只报告不阻塞**(报告落 evals/last_qbank_judge_report.json;阈值待校
+准后转门禁)。judge prompt 走 prompts/ 版本化(ADR-0004)。
 """
 
 from __future__ import annotations

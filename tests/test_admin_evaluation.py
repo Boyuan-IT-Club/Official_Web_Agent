@@ -1,4 +1,4 @@
-"""B2 /admin/evaluation* 路由测试:权限闸 + 触发/列表契约(mock runner)。"""
+"""/admin/evaluation* 路由测试:权限闸 + 触发/列表契约(mock runner)。"""
 
 import contextlib
 from collections.abc import AsyncIterator
@@ -61,7 +61,7 @@ def test_evaluation_requires_auth(client: TestClient) -> None:
 def test_evaluation_rejects_without_resume_audit(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#177:发起初筛是执行权 evaluation:run;查看权 resume:audit 不放行。"""
+    """发起初筛是执行权 evaluation:run;查看权 resume:audit 不放行。"""
     _install_resolve(monkeypatch, _identity(["agent:monitor", "kb:manage"]))
     resp = client.post(
         "/api/agent/admin/evaluation/run",
@@ -75,7 +75,7 @@ def test_evaluation_rejects_without_resume_audit(
 def test_evaluation_run_rejects_view_only_permission(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#177:只有 resume:audit(可看结果)不能发起运行——查看与执行分别授权。"""
+    """只有 resume:audit(可看结果)不能发起运行——查看与执行分别授权。"""
     _install_resolve(monkeypatch, _identity(["resume:audit"]))
     resp = client.post(
         "/api/agent/admin/evaluation/run",

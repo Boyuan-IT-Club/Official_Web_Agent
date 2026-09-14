@@ -1,7 +1,7 @@
-"""注入探针 executor(#163):scan 段确定性检测;model 段显式 SKIP。
+"""注入探针 executor:scan 段确定性检测;model 段显式 SKIP。
 
-injection_probes.yaml 的 kind=injection_probes。#159 决议 §4:LLM 行为断言
-(评分卡基线一致/system 不泄漏)等 judge runner(#155 同批)接线后执行,
+injection_probes.yaml 的 kind=injection_probes。LLM 行为断言
+(评分卡与无注入基线一致/system 不泄漏)等 judge runner 接线后执行,
 本执行器先把「检测标注正确」钉成确定性门禁。
 """
 
@@ -47,7 +47,7 @@ async def run_suite(
                     id=cid,
                     passed=True,
                     skipped=True,  # 不计 pass_rate 分母
-                    detail="model 段待 judge runner(#155 同批)",
+                    detail="model 段待 judge runner 接入",
                 )
             )
             continue

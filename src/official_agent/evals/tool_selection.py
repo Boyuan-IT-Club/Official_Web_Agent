@@ -1,4 +1,4 @@
-"""工具选择用例 executor(OBS-03,#148 收口)。
+"""工具选择用例 executor。
 
 吃 cases/*.yaml:role + input → 驱动真实 assistant ReAct 图(真实 LLM),
 后端 HTTP 用 canned fake 顶替(评测只关心「调了哪些工具、参数对不对」,

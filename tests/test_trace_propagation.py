@@ -1,4 +1,4 @@
-"""OBS-02 trace 透传单测:只测出站 header,不碰内部 contextvar 状态。
+"""trace 透传单测:只测出站 header,不碰内部 contextvar 状态。
 
 CI 无 Langfuse 配置:span 侧行为用 monkeypatch 注入,零外部依赖。
 """
@@ -16,7 +16,7 @@ from official_agent.tools.client import BackendClient
 BASE = "http://backend.test"
 LOGIN = f"{BASE}/api/auth/login"
 CYCLES = f"{BASE}/api/cycles/open"
-# #183:W3C 禁止 parent-id 全零——span-id 每请求随机,断言只认"16-hex 且非全零"
+# W3C 禁止 parent-id 全零——span-id 每请求随机,断言只认"16-hex 且非全零"
 _SPAN_RE = __import__("re").compile(r"^[0-9a-f]{16}$")
 
 
@@ -96,7 +96,7 @@ async def test_turn_id_fallback_without_span(monkeypatch) -> None:
     finally:
         reset_turn_trace_id(token)
 
-    # #183:W3C trace-id 段必须是 32 位 hex——截断 sha256 前 32 位
+    # W3C trace-id 段必须是 32 位 hex——截断 sha256 前 32 位
     # (旧实现发全长 64 位,严格消费端会丢弃非法头)
     want = hashlib.sha256(b"cli:u123:a1b2c3d4").hexdigest()[:32]
     assert trace_ids_of([api_route, user_route]) == [want] * 2

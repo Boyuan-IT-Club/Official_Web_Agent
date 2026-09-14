@@ -1,4 +1,4 @@
-"""SEC-09 凭证保管单测:存取/过期/优先级链/auth_status 无凭证泄漏。"""
+"""凭证保管单测:存取/过期/优先级链/auth_status 无凭证泄漏。"""
 
 import base64
 import json
@@ -91,7 +91,7 @@ async def test_stored_token_takes_priority(cred_file) -> None:
 
 @respx.mock
 async def test_no_credentials_and_no_env_gives_login_guidance(cred_file) -> None:
-    """P0 场景:无存储 token 且 .env 无账密 → 可行动指引(而非裸栈)。"""
+    """无存储 token 且 .env 无账密 → 可行动指引(而非裸栈)。"""
     respx.post("http://backend.test/api/auth/login")
     client = make_client()
 

@@ -1,4 +1,4 @@
-"""日志配置(M6 #113,决策 #103):stdout + .log 落盘 + 定量打包。
+"""日志配置:stdout + .log 落盘 + 定量打包。
 
 现状:repo 无任何 logging 配置(basicConfig/dictConfig 均无),部署后日志
 全靠 Python 默认(stderr)。本模块提供 setup_logging():

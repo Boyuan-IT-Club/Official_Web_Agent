@@ -1,9 +1,9 @@
-"""预置题库与 pick log 数据面(B5,#127):面试官挑题的持久层。
+"""预置题库与 pick log 数据面:面试官挑题的持久层。
 
 - interview_qbank:调查/兜底产出的题集(候选+周期+版本,JSONB 信封)
 - qbank_pick_log:面试官实际勾选(候选/场次/面试官/题)——反哺出题的证据,
-  候选人永不可见(#135 用户故事 19)
-- 表自举 L-1 先例;调用方管理事务
+  候选人永不可见
+- 表自举:DDL 进仓库,幂等;调用方管理事务
 """
 
 from __future__ import annotations
@@ -69,11 +69,11 @@ def save_qbank(
 ) -> int:
     """落题集:版本递增旧版保留(与 scorecard 同语义);返回 qbank_version。
 
-    #153:只收 evaluation_qbank/v2 信封(D13 直接替换,不兼容旧形状)——
+    只收 evaluation_qbank/v2 信封(直接替换,不兼容旧形状)——
     旧结构数据在本地开发库直接清(TRUNCATE interview_qbank),不迁移。"""
     if envelope.get("schema_name") != "evaluation_qbank/v2":
         raise ValueError(
-            "envelope 非 evaluation_qbank/v2(#153 直接替换):"
+            "envelope 非 evaluation_qbank/v2:"
             "本地开发库请清空 interview_qbank 旧结构数据后重跑"
         )
     # MAX+1 并发窗口:撞唯一键重读重试(同 evaluation.save_scorecard 先例)
@@ -136,7 +136,7 @@ def record_pick(
     question_ref: dict[str, Any],
     schedule_id: int | None = None,
 ) -> int:
-    """记一道勾选题(#179:question_ref 必须是 resolve_picks 解析出的权威
+    """记一道勾选题(question_ref 必须是 resolve_picks 解析出的权威
     条目,含 ref_id 与定位索引)。返回 pick id。"""
     with _conn() as conn:
         ensure_qbank_tables(conn)
@@ -183,7 +183,7 @@ def _ref_id(
     cycle_id: int,
     qbank_version: int,
 ) -> str:
-    """稳定题引用 id(#179):sha256 前 16 位,输入含 resume/cycle/题库版本
+    """稳定题引用 id:sha256 前 16 位,输入含 resume/cycle/题库版本
     + 组内定位(索引+角色+题文)。同文题靠索引区分,题库重跑换版本即换 id。"""
     parts = [str(resume_id), str(cycle_id), str(qbank_version)]
     for k in (
@@ -208,11 +208,11 @@ def flatten_v2_pickable(
     cycle_id: int,
     qbank_version: int,
 ) -> list[dict[str, Any]]:
-    """v2 信封 → 可挑题扁平视图(#153):UI 挑题不用懂组内嵌套。
+    """v2 信封 → 可挑题扁平视图:UI 挑题不用懂组内嵌套。
 
     每题带定位引用 question_ref(group_kind/role/category/chain_index/
     layer_index/question),record_pick 原样落 qbank_pick_log。
-    #179:传入 resume_id/cycle_id/qbank_version 时每题附加稳定 ref_id,
+    传入 resume_id/cycle_id/qbank_version 时每题附加稳定 ref_id,
     pick 时服务端据此权威绑定(见 resolve_picks),杜绝按题文反查串源。"""
     out: list[dict[str, Any]] = []
 
@@ -224,7 +224,7 @@ def flatten_v2_pickable(
     for gi, g in enumerate(envelope.get("groups", [])):
         kind_raw = g.get("group", "")
         kind = kind_raw if isinstance(kind_raw, str) else "repo"
-        # repo v2 组(#153):题目在 qbank_v2.group{entry/chains/reserves}
+        # repo v2 组:题目在 qbank_v2.group{entry/chains/reserves}
         qbank_v2 = g.get("qbank_v2")
         inner = (
             (qbank_v2 or {}).get("group")
@@ -291,7 +291,7 @@ def flatten_v2_pickable(
 def resolve_picks(
     resume_id: int, cycle_id: int, submitted: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """把客户端提交的题引用解析为**当前题库**的权威引用(#179)。
+    """把客户端提交的题引用解析为**当前题库**的权威引用。
 
     服务端是题引用的唯一真源,客户端文本不可信(同文题按题文反查会串
     来源)。匹配优先级:
@@ -337,7 +337,7 @@ def _match_entry(
         if len(by_id) == 1:
             return by_id[0], False
     if "anchor" in q:
-        # 旧形状投影(#179 之前的 frontend doPick):文本+anchor+证据全对上;
+        # 旧形状投影(权威 ref_id 引入之前的 frontend doPick):文本+anchor+证据全对上;
         # 注意 ref_id 未命中会落到这里按题文重查——题文仍唯一时绑定当前版条目
         cands = [
             e

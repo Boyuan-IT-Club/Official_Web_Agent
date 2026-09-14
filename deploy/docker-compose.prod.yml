@@ -1,11 +1,11 @@
-# Agent 生产部署(#116/#104 决策:独立容器,与 Backend 同机,共享 agent PG)。
+# Agent 生产部署(独立容器,与 Backend 同机,共享 agent PG)。
 # 本 compose 只管 agent 自家两件套;MySQL/Redis/RabbitMQ/官网 nginx 由既有
 # Backend 栈与宿主机 nginx 提供 —— 不重复起、不纳管。
 #
 # 前置(一次性):
 #   1. 镜像:docker build -t ${DOCKERHUB_USERNAME}/official-agent:tag . 后推送
-#      (#104 拍板:镜像推 Docker Hub 同名 org);或在本机 build 留 :latest
-#   2. 密钥:cp .env.prod.example .env.prod 并填值(gitignore;SEC-01 真实凭证
+#      (镜像推 Docker Hub 同名 org);或在本机 build 留 :latest
+#   2. 密钥:cp .env.prod.example .env.prod 并填值(gitignore;真实凭证
 #      只进服务器 .env.prod,永不进镜像/仓库)
 #   3. 日志卷:mkdir -p deploy/logs(容器内 root 写入,同 Backend volumes 风格)
 #   4. nginx:把 deploy/nginx/agent.prod.conf.example 的 location 块并入现有
@@ -33,7 +33,7 @@ services:
   agent:
     image: ${DOCKERHUB_USERNAME:-boyuanclub}/official-agent:${AGENT_VERSION:-latest}
     build: ..                       # 无网拉镜像时可本机构建兜底
-    restart: unless-stopped         # 健康检查失败自动重启(#116 AC)
+    restart: unless-stopped         # 健康检查失败自动重启
     env_file:
       - .env.prod
     environment:
@@ -51,8 +51,8 @@ services:
       timeout: 5s
       start_period: 30s
       retries: 3
-    # 单 worker 起步(#116);扩副本 = compose --scale agent=N(无状态,checkpointer 共享),
-    # 前提:会话表 _sessions 改外置(Ably 会话层,M3)后才能真多副本
+    # 单 worker 起步;扩副本 = compose --scale agent=N(无状态,checkpointer 共享),
+    # 前提:会话表 _sessions 改外置(Ably 会话层)后才能真多副本
 
 volumes:
   agent_pg_data:

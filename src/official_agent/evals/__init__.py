@@ -1,4 +1,4 @@
-"""通用 eval 体系(#148,OBS-03 收口)。
+"""通用 eval 体系。
 
 两个 suite 面:
 - ``evals/cases/*.yaml``  :用例断言(给定输入,断言 agent 行为)

@@ -1,4 +1,4 @@
-"""统一 eval runner 入口(#148,OBS-03)。
+"""统一 eval runner 入口。
 
 用法:
   uv run python evals/run_evals.py                      # 全量(cases + datasets)
@@ -28,7 +28,7 @@ EVALS_DIR = Path(__file__).resolve().parent
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="统一 eval runner(#148)")
+    parser = argparse.ArgumentParser(description="统一 eval runner")
     parser.add_argument("--only", choices=["cases", "datasets"], help="按面过滤")
     parser.add_argument("--suite", help="按 suite 名(文件 stem)过滤")
     parser.add_argument("--distribution", action="store_true", help="分布模式:只看不设门")

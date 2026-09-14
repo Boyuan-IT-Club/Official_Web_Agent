@@ -1,6 +1,6 @@
-"""B 模块管理 API(B2):/admin/evaluation——初筛触发与 job 面。
+"""初筛管理 API:/admin/evaluation——初筛触发与 job 面。
 
-权限:resume:audit(#135 用户故事 1:评审触发初筛;与 kb:manage/
+权限:resume:audit(评审触发初筛;与 kb:manage/
 agent:monitor 一样走 JWT permission_codes 自校)。
 审计双录:触发写 agent_audit_log(生成完成审计在 runner)。
 """
@@ -36,7 +36,7 @@ async def _require_resume_audit(
 async def _require_evaluation_run(
     request: Request, authorization: Annotated[str | None, Header()] = None
 ):
-    """初筛执行权(#177):与 resume:audit(查看权)解耦的独立权限码。
+    """初筛执行权:与 resume:audit(查看权)解耦的独立权限码。
 
     触发/重试 AI 初筛必须持 evaluation:run(后端 V46:仅超管与管理员
     授予;面试官/普通审核员不持有);前端按钮显隐用同一权限码,双侧
@@ -49,7 +49,7 @@ async def _require_evaluation_run(
 
 
 class RunBody(BaseModel):
-    """触发初筛:单份或批量。方案A(闸门1):只收 resume_id,user_id 由后端权威派生。"""
+    """触发初筛:单份或批量。只收 resume_id,user_id 由后端权威派生。"""
 
     cycle_id: int = Field(ge=1)
     items: list[eval_runner.TriggerItem] = Field(min_length=1, max_length=200)
@@ -68,7 +68,7 @@ async def run_evaluation_jobs(
             trigger_user_id=int(identity.get("user_id") or 0),
         )
     except RuntimeError as exc:
-        # 方案A(闸门1):权威归属核对失败属调用方数据错位 → 400,不是服务端故障
+        # 权威归属核对失败属调用方数据错位 → 400,不是服务端故障
         raise HTTPException(status_code=400, detail=f"简历归属核对失败:{exc}") from exc
     except Exception as exc:  # noqa: BLE001 — 统一 500 固定文案
         raise HTTPException(status_code=500, detail="提交初筛任务失败,请稍后重试") from exc
@@ -81,7 +81,7 @@ async def list_evaluation_jobs(
     cycle_id: int,
     status: str | None = None,
 ) -> dict[str, Any]:
-    """job 执行面列表(0 分队列在 B6 按 scorecard.hard_zero 过滤呈现)。"""
+    """job 执行面列表(0 分队列按 scorecard.hard_zero 过滤呈现)。"""
     try:
         jobs = await asyncio.to_thread(evaluation.list_jobs, cycle_id, status=status)
     except Exception as exc:  # noqa: BLE001
@@ -106,7 +106,7 @@ async def retry_failed_jobs(
     return {"retried": job_ids}
 
 
-# ── B5 预置题库(/admin/evaluation/qbank):面试官挑题面(#127/#128) ──
+# ── 预置题库(/admin/evaluation/qbank):面试官挑题面 ──
 
 
 def _require_any(*codes: str):
@@ -146,8 +146,8 @@ async def get_qbank(
         raise HTTPException(status_code=404, detail="该候选暂无预置题库")
     envelope = row.get("envelope") or {}
     row = dict(row)
-    # #153:v2 题组的可挑题扁平视图(UI 挑题不感知组内嵌套)
-    # #179:带 resume/cycle/版本生成稳定 ref_id,pick 时服务端权威绑定
+    # v2 题组的可挑题扁平视图(UI 挑题不感知组内嵌套)
+    # 带 resume/cycle/版本生成稳定 ref_id,pick 时服务端权威绑定
     row["pickable"] = qbank_store.flatten_v2_pickable(
         envelope,
         resume_id=int(row.get("resume_id") or resume_id),
@@ -166,7 +166,7 @@ async def pick_questions(
 ) -> dict[str, Any]:
     """记录面试官实际勾选的题(pick log;候选人永不可见)。
 
-    #179:客户端引用只作"意图",落库的是服务端按当前题库解析出的权威
+    客户端引用只作"意图",落库的是服务端按当前题库解析出的权威
     引用(含 ref_id/定位索引)——同文题、过期题库、伪造证据路径在解析
     阶段直接 422,不再按题文反查串源。"""
     try:
@@ -208,7 +208,7 @@ async def list_question_picks(
     return {"items": picks, "total": len(picks)}
 
 
-# ── B6 评审队列(#124/#128):0 分队列/采纳/改分/驳回 ──────────────────────
+# ── 评审队列:0 分队列/采纳/改分/驳回 ──────────────────────
 
 
 class AdoptBody(BaseModel):
@@ -256,7 +256,7 @@ async def get_scorecard_for_review(
     resume_id: int,
     cycle_id: int,
 ) -> dict[str, Any]:
-    """单候选评分卡:面试官(interview:evaluate)场景内只读维卡,#128。"""
+    """单候选评分卡:面试官(interview:evaluate)场景内只读维卡。"""
     row = await asyncio.to_thread(evaluation.latest_scorecard, resume_id, cycle_id)
     if row is None:
         raise HTTPException(status_code=404, detail="该候选暂无评分卡")
@@ -269,9 +269,9 @@ async def adopt_scorecard(
     identity: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
     authorization: Annotated[str | None, Header()] = None,
 ) -> dict[str, Any]:
-    """采纳 = 评审本人以自身身份向后端投一票(#124:AI 不占 scorer)。
+    """采纳 = 评审本人以自身身份向后端投一票(AI 不占 scorer)。
 
-    原子/幂等语义(#180):跨 Backend/审计/卡库三面没有事务,靠顺序 +
+    原子/幂等语义:跨 Backend/审计/卡库三面没有事务,靠顺序 +
     如实上报保证"管理员收到的结果 == 实际状态":
     1. 验卡在前:无卡/版本不存在 → 404,此时零副作用;
     2. 意图审计在前(ADR-0006):失败 → 503"未执行"——确实什么都没发生;
@@ -294,7 +294,7 @@ async def adopt_scorecard(
             raise HTTPException(status_code=404, detail="指定评分卡版本不存在")
         version = body.version
 
-    # 本次采纳的审计关联键:意图/结果两条记录共用,便于缺口配对(#180 评审)
+    # 本次采纳的审计关联键:意图/结果两条记录共用,便于缺口配对
     audit_thread = f"eval:{body.cycle_id}:{secrets.token_hex(4)}"
 
     # 2) 意图审计(fail-closed):审计失败 → 503,采纳未执行,可安全重试
@@ -318,7 +318,7 @@ async def adopt_scorecard(
         raise HTTPException(status_code=503, detail="审计服务不可用,采纳未执行,请稍后重试") from exc
 
     # 3) 投票(评审本人令牌)。后端 updateResumeScore 按 (resume, scorer)
-    #    upsert 一人一票(uk_resume_scorer,#180 评审已对后端源码证实),
+    #    upsert 一人一票(uk_resume_scorer,已对后端源码证实),
     #    超时后重试覆盖同票、不会双票。502 文案不谎报"未送达":超时路径
     #    可能后端已落票,结果未知,如实说。
     try:
@@ -400,7 +400,7 @@ async def reject_scorecard(
     identity: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
 ) -> dict[str, Any]:
     """驳回:卡置 rejected(AI 参考分不采纳);可复评(run 生成新版本)。"""
-    # 验卡在前(#180 评审:显式传不存在 version 时不得先落审计再 404)
+    # 验卡在前(显式传不存在 version 时不得先落审计再 404)
     versions = await asyncio.to_thread(evaluation.list_scorecards, body.resume_id, body.cycle_id)
     if body.version is None:
         if not versions:

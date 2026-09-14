@@ -1,4 +1,4 @@
-"""B1 评分子图测试:硬 0 短路不调模型 / 正常路径结构化输出 / 失败进 error。"""
+"""评分子图测试:硬 0 短路不调模型 / 正常路径结构化输出 / 失败进 error。"""
 
 import asyncio
 from unittest.mock import patch
@@ -52,7 +52,7 @@ def _settings():
 
 @pytest.mark.asyncio
 async def test_hard_zero_short_circuits_without_model() -> None:
-    """任一维绝对卡 → 整份硬 0,不调模型(#123 确定性规则优先)。"""
+    """任一维绝对卡 → 整份硬 0,不调模型(确定性规则优先)。"""
 
     def _boom(*a, **k):
         raise AssertionError("硬 0 路径不得调模型")
@@ -106,7 +106,7 @@ async def test_llm_failure_lands_in_error() -> None:
 
 @pytest.mark.asyncio
 async def test_temperature_low_on_scorer() -> None:
-    """评分走低温档(#123:model_strong+低温)。"""
+    """评分走低温档(model_strong+低温)。"""
     captured: dict = {}
 
     def _fake_build(settings, model=None, stream_usage=False, temperature=None):
@@ -126,7 +126,7 @@ async def test_temperature_low_on_scorer() -> None:
 
 
 def test_extract_json_tolerates_fences_and_noise() -> None:
-    """评审 P2:围栏/前导杂文/尾随杂文都能截出 JSON 主体。"""
+    """围栏/前导杂文/尾随杂文都能截出 JSON 主体。"""
     assert ev._extract_json('```json\n{"a": 1}\n```') == '{"a": 1}'
     assert ev._extract_json('好的,以下是结果:\n{"a": 1}') == '{"a": 1}'
     tail = '以下是结果:\n{"a": 1}\n注:权重仅供参考}'
@@ -136,7 +136,7 @@ def test_extract_json_tolerates_fences_and_noise() -> None:
 
 
 def test_dimension_incompleteness_raises() -> None:
-    """评审 P1-1:模型漏维 → error 态,绝不落'看起来完整'的卡。"""
+    """模型漏维 → error 态,绝不落'看起来完整'的卡。"""
     bad = (
         '{"dimensions": [{"field_key": "intro", "score": 80, '
         '"rationale": "r", "evidence": "做过两个 Web 项目"}],'
@@ -151,7 +151,7 @@ def test_dimension_incompleteness_raises() -> None:
 
 
 def test_fabricated_evidence_raises() -> None:
-    """评审 P1-2:证据非原文 → error 态(编造证据不得落卡)。"""
+    """证据非原文 → error 态(编造证据不得落卡)。"""
     bad = (
         '{"dimensions": ['
         '{"field_key": "intro", "score": 80, "rationale": "r", "evidence": "我获得过图灵奖"},'
@@ -168,7 +168,7 @@ def test_fabricated_evidence_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_placeholder_flows_into_hard_zero() -> None:
-    """B2 评审 P1:placeholder 必须进绝对卡判定(端到端通路)。"""
+    """placeholder 必须进绝对卡判定(端到端通路)。"""
     fields = [
         {
             "field_key": "intro",
@@ -193,7 +193,7 @@ async def test_placeholder_flows_into_hard_zero() -> None:
 
 @pytest.mark.asyncio
 async def test_all_zero_llm_card_marks_hard_zero() -> None:
-    """B2 评审 P1:AI 全 0 分卡也要落 hard_zero(0 分队列靠它捞)。"""
+    """AI 全 0 分卡也要落 hard_zero(0 分队列靠它捞)。"""
     payload = (
         '{"dimensions": ['
         '{"field_key": "intro", "score": 0, "rationale": "r",'
@@ -212,7 +212,7 @@ async def test_all_zero_llm_card_marks_hard_zero() -> None:
     assert card["total"] == 0.0
 
 
-# ── #183:评分 token 经 usage_out 回传 + correlation_id 进 config metadata ──
+# ── 评分 token 经 usage_out 回传 + correlation_id 进 config metadata ──
 
 
 class _UsageMsg:
@@ -238,7 +238,7 @@ def _usage_model(payload: str):
 
 @pytest.mark.asyncio
 async def test_scoring_usage_flows_to_usage_out() -> None:
-    """#183 P1:llm_score 的 usage 经节点返回值 → run_evaluation usage_out。"""
+    """llm_score 的 usage 经节点返回值 → run_evaluation usage_out。"""
     usage_out: dict = {}
 
     def _model(*a, **k):
@@ -261,7 +261,7 @@ async def test_scoring_usage_flows_to_usage_out() -> None:
 
 @pytest.mark.asyncio
 async def test_correlation_id_lands_in_root_metadata() -> None:
-    """#183 P2:correlation_id 经根 run config.metadata 进回调(Langfuse 关联键)。"""
+    """correlation_id 经根 run config.metadata 进回调(Langfuse 关联键)。"""
     from langchain_core.callbacks import BaseCallbackHandler
 
     seen: dict = {}

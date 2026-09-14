@@ -1,8 +1,8 @@
-"""MEM-01/#116 checkpointer 工厂单测:连接池契约 + setup 被 await + 资源清理。
+"""checkpointer 工厂单测:连接池契约 + setup 被 await + 资源清理。
 
-关键回归:
+关键契约:
 - AsyncPostgresSaver.setup() 是 async 的,同步调用会静默不建表(真库 bug)。
-- #116 联调踩坑:from_conn_string 是单连接,并发放大 + 断连毒化
+- 联调踩坑:from_conn_string 是单连接,并发放大 + 断连毒化
   (「another command is already in progress」)→ 必须用 AsyncConnectionPool,
   且池连接必须 autocommit=True + prepare_threshold=0(langgraph 官方生产要求)。
 """
@@ -56,7 +56,7 @@ async def test_get_checkpointer_uses_configured_postgres_url() -> None:
 
 @pytest.mark.asyncio
 async def test_get_checkpointer_uses_pool_not_single_connection() -> None:
-    """#116 回归钉:禁止退回 from_conn_string 单连接(断连毒化全服务)。"""
+    """禁止退回 from_conn_string 单连接(断连毒化全服务)。"""
     pool = _pool_mock()
     fake_saver = MagicMock()
     fake_saver.setup = AsyncMock()

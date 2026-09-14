@@ -1,11 +1,11 @@
-"""绝对卡确定性短路(B1,#123):进模型前的态度不端硬判,纯函数零 IO。
+"""绝对卡确定性短路:进模型前的态度不端硬判,纯函数零 IO。
 
 判定一个维度值为「绝对卡」:全空 / 单字 / 单字符重复(111/。。。) /
 纯数字标点 / placeholder 同文(请输入…/字段名本身/无)。任一打分维命中
-→ 整份硬 0(attitude=bad_faith),不调模型(#123:确定性规则优先)。
+→ 整份硬 0(attitude=bad_faith),不调模型(确定性规则优先)。
 
 误判兜底:硬 0 只是**初筛不过**信号(入 0 分队列,不自动拒),人工评审
-可改判——规则宁可略严,由 B6 评审队列兜底。
+可改判——规则宁可略严,由人工评审队列兜底。
 """
 
 from __future__ import annotations
@@ -14,20 +14,20 @@ import re
 from dataclasses import dataclass
 
 # 纯数字/标点(允许分隔符,但必须出现过数字):整栏 111、2024.09 等
-# #176 评审:脱敏产物 138****5678 亦视为纯数字敷衍——掩码前的纯数字
+# 脱敏产物 138****5678 亦视为纯数字敷衍——掩码前的纯数字
 # 敷衍回答不应因掩码引入的 * 而逃过确定性硬 0。
 _PURE_DIGIT = re.compile(r"^[\d\s.,，。、\-—_*]+$")
 # 常见 placeholder 前缀(表单引导文案)
 _PLACEHOLDER_PREFIX = ("请输入", "请填写", "请描述", "请介绍", "在此输入")
-# 主观题下的敷衍词( standalone 回答即绝对卡)
+# 主观题下的敷衍词(单独回答即绝对卡)
 _PLACEHOLDER_EXACT = frozenset({"无", "无。", "暂无", "没有", "同上", "略", ".", "。", "、"})
 
 
 @dataclass(frozen=True)
 class FieldText:
-    """一个待评维度。value 是简历原文(已脱敏,PII 不进打分面,#123)。
+    """一个待评维度。value 是简历原文(已脱敏,PII 不进打分面)。
 
-    placeholder 来自周期字段配置(B2 接线);有精确 placeholder 时
+    placeholder 来自周期字段配置;有精确 placeholder 时
     「与 placeholder 同文」按全等判,比前缀启发式更准。
     """
 
@@ -48,7 +48,7 @@ def is_hard_zero_value(value: str, *, title: str = "", placeholder: str = "") ->
         or bool(_PURE_DIGIT.fullmatch(v))
         or v in _PLACEHOLDER_EXACT
         or bool(ph and v == ph)  # 与配置的 placeholder 全等(最准)
-        # 前缀启发式仅在没有配置 placeholder 时兜底(评审 P2:先抄题再作答
+        # 前缀启发式仅在没有配置 placeholder 时兜底(先抄题再作答
         # 会被误卡,有配置时全等判已覆盖)
         or (not ph and v.startswith(_PLACEHOLDER_PREFIX))
         or bool(title and v == title.strip())  # 抄字段名本身

@@ -1,11 +1,11 @@
-"""评分子图(B1,#123/#126):precheck(绝对卡) → 条件分支 → llm_score → finalize。
+"""评分子图:precheck(绝对卡) → 条件分支 → llm_score → finalize。
 
-- 一总图两子图中的「评分子图」;调查子图(B3)与它平行
+- 一总图两子图中的「评分子图」;调查子图与它平行
 - 确定性规则优先:任一打分维命中绝对卡 → 整份硬 0,不调模型(省钱+可测)
 - LLM 轨:model_strong + 低温 0.1 + 提示词 JSON + strict Pydantic 校验
-  (检查点③实测:思考模式代理拒 json_schema 与强制 tool_choice)
+  (实测:思考模式代理拒 json_schema 与强制 tool_choice)
 - 输出是**卡 dict**(schema evaluation_scorecard/v1),落库由调用方
-  (state/evaluation.py,B2 接线)负责;本图纯计算无 DB IO
+  (state/evaluation.py,runner 接线)负责;本图纯计算无 DB IO
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ class EvaluationState(TypedDict, total=False):
     hard_zero_reasons: dict[str, str]
     card: dict[str, Any]
     error: str | None
-    llm_usage: dict[str, int | None]  # #183:评分模型调用的 token 用量(job 观测面)
+    llm_usage: dict[str, int | None]  # 评分模型调用的 token 用量(job 观测面)
 
 
 def _as_field_texts(fields: list[dict[str, str]]) -> list[FieldText]:
@@ -69,7 +69,7 @@ def _extract_json(text: str) -> str:
     """从模型回复中截取首个完整 JSON 对象(容忍代码围栏/前后杂文)。
 
     raw_decode 而非 rfind:尾随杂文含 `}` 时 rfind 会切进噪声产出非法
-    JSON(B2 评审 P2);raw_decode 取首个完整对象,天然正确。
+    JSON;raw_decode 取首个完整对象,天然正确。
     """
     import json
 
@@ -88,7 +88,7 @@ def _extract_json(text: str) -> str:
 
 
 async def precheck(state: EvaluationState) -> dict:
-    """绝对卡确定性短路:任一维命中 → 整份硬 0(#123)。"""
+    """绝对卡确定性短路:任一维命中 → 整份硬 0。"""
     reasons = detect_hard_zero(_as_field_texts(state["fields"]))
     return {"hard_zero": bool(reasons), "hard_zero_reasons": reasons}
 
@@ -133,7 +133,7 @@ async def finalize_hard(state: EvaluationState) -> dict:
 
 def _evidence_in(evidence: str, source: str) -> bool:
     """证据逐字性:归一空白后 evidence 是原文子串,或与原文的匹配块覆盖
-    ≥85%(B8 实测:模型忠实引述时偶有一字压缩——「大一起接触」→「大一接触」
+    ≥85%(实测:模型忠实引述时偶有一字压缩——「大一起接触」→「大一接触」
     ——近似引述放行;编造证据的公共块极短,仍拒绝)。"""
     from difflib import SequenceMatcher
 
@@ -153,19 +153,19 @@ def _evidence_in(evidence: str, source: str) -> bool:
 
 
 async def llm_score(state: EvaluationState, config: RunnableConfig | None = None) -> dict:
-    """结构化打分:逐维给分+依据+原文证据,态度判定;异常进 error(B2 可重试)。"""
+    """结构化打分:逐维给分+依据+原文证据,态度判定;异常进 error(可由调用方重试)。"""
     try:
         settings = get_effective_settings()
         model = build_model(settings, temperature=SCORING_TEMPERATURE)
-        # 结构化输出轨(检查点③实测拍板):当前代理的模型全是思考模式,
+        # 结构化输出轨:当前代理的模型全是思考模式,
         # json_schema response_format 与强制 tool_choice 均被拒(400)——
         # 落到提示词 JSON 轨:模型输出 JSON 文本,strict Pydantic 校验
-        # (schema.py extra=forbid)兜住形状;解析失败进 error 态由 B2 重试
+        # (schema.py extra=forbid)兜住形状;解析失败进 error 态由调用方重试
         blocks = [
             "### "
             + (f.get("title") or f["field_key"])
             + f" (field_key={f['field_key']})\n"
-            # #163:简历=不可信输入,原文包数据区标签(prompt 侧配数据区纪律)
+            # 简历=不可信输入,原文包数据区标签(prompt 侧配数据区纪律)
             + wrap_data_zone(f"resume:{f['field_key']}", str(f.get("value", "")))
             for f in state["fields"]
         ]
@@ -176,10 +176,10 @@ async def llm_score(state: EvaluationState, config: RunnableConfig | None = None
             + "\n\nfield_key 取值必须是:"
             + ",".join(f["field_key"] for f in state["fields"])
         )
-        # 结构化输出 + strict 后置校验(评审 P1):漏维/造维/证据非原文
+        # 结构化输出 + strict 后置校验:漏维/造维/证据非原文
         # 都不许落卡。模型偶发在 attitude 多塞键(reason_note 等)或拼接引述
         # → 子图内一次纠正重试(把校验错误回灌,并点名不得新增字段);
-        # 两次仍不合规才翻 error 态走 B2 重试
+        # 两次仍不合规才翻 error 态走调用方重试
         expected = [f["field_key"] for f in state["fields"]]
         sources = {f["field_key"]: f.get("value", "") for f in state["fields"]}
         result: ScorecardOutput | None = None
@@ -219,7 +219,7 @@ async def llm_score(state: EvaluationState, config: RunnableConfig | None = None
                         raise ValueError(
                             f"证据非原文(field_key={d.field_key}):{d.evidence[:40]!r}"
                         )
-                # #162 硬校验(#157 决议 §4):态度与分数的契约,违例同样回灌重试
+                # 硬校验:态度与分数的契约,违例同样回灌重试
                 if result.attitude.verdict == "bad_faith" and any(
                     d.score != 0 for d in result.dimensions
                 ):
@@ -231,11 +231,11 @@ async def llm_score(state: EvaluationState, config: RunnableConfig | None = None
                 if result.attitude.verdict == "bad_faith" and not any(
                     fk in result.attitude.reason for fk in expected
                 ):
-                    raise ValueError("bad_faith reason 必须点名具体 field_key(#157 决议 §4)")
+                    raise ValueError("bad_faith reason 必须点名具体 field_key")
             except ValueError as ve:  # 含 pydantic ValidationError(子类)
                 last_err = ve
                 result = None
-                # #163 防御纵深:ve 会嵌入模型产出的 d.evidence(与简历同源,
+                # 防御纵深:ve 会嵌入模型产出的 d.evidence(与简历同源,
                 # 可含注入 payload)。纠正段落在数据区**之外**,直接插 ve 会把
                 # 它抬成指令级文本 → 同样包数据区(标签内一律是数据)。
                 corrective = (
@@ -261,7 +261,7 @@ async def llm_score(state: EvaluationState, config: RunnableConfig | None = None
             "dimensions": [d.model_dump() for d in result.dimensions],
             "attitude": result.attitude.model_dump(),
             "total": weighted_total(scores, state.get("weights", {})),
-            # AI 全 0 = 初筛不过同样落 hard_zero(B2 评审 P1:0 分队列靠它捞)
+            # AI 全 0 = 初筛不过同样落 hard_zero(0 分队列靠它捞)
             "hard_zero": card_total_zero or result.attitude.verdict == "bad_faith",
             "hard_zero_reasons": (
                 {"_attitude": "AI 判定各维全 0,初筛不过"} if card_total_zero else {}
@@ -273,12 +273,12 @@ async def llm_score(state: EvaluationState, config: RunnableConfig | None = None
             },
         }
         return {"card": card, "error": None, "llm_usage": llm_usage}
-    except Exception as exc:  # noqa: BLE001 — 失败进 error 态,B2 任务可重试
+    except Exception as exc:  # noqa: BLE001 — 失败进 error 态,任务可重试
         return {"card": None, "error": f"{type(exc).__name__}: {exc}"}
 
 
 async def finalize(state: EvaluationState) -> dict:
-    """透传到终态(卡已在 llm_score 组装;单节点占位便于 B2 挂钩/审计)。"""
+    """透传到终态(卡已在 llm_score 组装;单节点占位便于挂钩/审计)。"""
     return {}
 
 
@@ -313,11 +313,11 @@ async def run_evaluation(
     usage_out: dict[str, int | None] | None = None,
     correlation_id: str | None = None,
 ) -> dict:
-    """便捷入口:跑完整子图,返回卡 dict;LLM 失败抛 RuntimeError(B2 落 job 失败)。
+    """便捷入口:跑完整子图,返回卡 dict;LLM 失败抛 RuntimeError(job 落失败)。
 
-    #183:usage_out 给定时回填评分模型 token 用量;correlation_id 给定时
+    usage_out 给定时回填评分模型 token 用量;correlation_id 给定时
     挂 Langfuse callbacks 并以 metadata.correlation_id 关联 trace(评测线
-    trace 面此前未接线,配置了也不产生 trace——评审 P2 修正)。"""
+    trace 面此前未接线,配置了也不产生 trace)。"""
     from official_agent.observability import langfuse_callbacks
 
     graph = build_evaluation_subgraph()

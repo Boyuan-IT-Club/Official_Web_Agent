@@ -1,12 +1,12 @@
-"""客服 Agent FastAPI 服务(INF-04):官网候选人只读问答通道。
+"""客服 Agent FastAPI 服务:官网候选人只读问答通道。
 
 分层:
 - 本模块:FastAPI app + lifespan(checkpointer 生命周期)+ 健康检查 + CORS
 - routes.py:业务路由(`/api/agent/chat` SSE)与会话管理
-- graphs/identity.resolve 的 kind=="web" 分支:官网 JWT → /auth/me 换身份(#89 A2,
-  已落地真实端点;解析失败由路由返回 401)
+- graphs/identity.resolve 的 kind=="web" 分支:官网 JWT → /auth/me 换身份
+  (已落地真实端点;解析失败由路由返回 401)
 
-与 CLI(INF-03)复用同一套装配:build_assistant_agent / langfuse_callbacks /
+与 CLI 复用同一套装配:build_assistant_agent / langfuse_callbacks /
 get_checkpointer / threads 建档 —— agent 进程内直连工具函数,不走 MCP 回环(ADR-0003)。
 """
 
@@ -38,23 +38,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with get_checkpointer() as saver:
         app.state.checkpointer = saver
         try:
-            # L-1:幂等建 agent_threads + agent_conversation_log + agent_config 表
-            # (SEC-07 / M6 #110 / #111)。缺表时降级(fail-open,ADR-0005)。
+            # 幂等建 agent_threads + agent_conversation_log + agent_config 表。
+            # 缺表时降级(fail-open,ADR-0005)。
             ensure_agent_threads_table()
             conversation.ensure_conversation_table()
             config_store.ensure_config_table()
-            # #171 评审:纯 web 部署也要有审计面(管理员原文读取审计依赖)
+            # 纯 web 部署也要有审计面(管理员原文读取审计依赖)
             from official_agent.state.audit import ensure_audit_table
 
             ensure_audit_table()
-            # #175:去重 legacy 重复活跃 job + 建部分唯一索引,必须先于恢复
+            # 去重 legacy 重复活跃 job + 建部分唯一索引,必须先于恢复
             from official_agent.state.evaluation import ensure_evaluation_job_ready
 
             ensure_evaluation_job_ready()
         except Exception:  # noqa: BLE001 — PG 未起/配置错 → 降级(fail-open,ADR-0005)
             app.state.checkpointer = None
-
-        # 闸门3 启动自动恢复:进程重启后,PG 里残留的 pending/running job
+        # 启动自动恢复:进程重启后,PG 里残留的 pending/running job
         # 由 lifespan 全量扫回并重派(超 10 分钟 + attempts 未满;达上限的
         # 转 failed 交人工)。失败 fail-open——PG 未起时跳过,下次重启再恢复。
         try:
@@ -66,9 +65,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "启动自动恢复失败,残留 job 留待下次/手动重试", exc_info=True
             )
 
-        # #171:会话 TTL 清理 job——软删档案超保留期(连带 checkpoint/对话日志)
+        # 会话 TTL 清理 job——软删档案超保留期(连带 checkpoint/对话日志)
         # 物理清理,每 6h 一轮,fail-open。thread_retention_days=0 时为 no-op:
-        # 保留天数是 #57 数据留存 ADR 的拍板项,ADR 落地前不启用。
+        # 保留天数由数据留存 ADR 决定,ADR 落地前不启用。
         ttl_stop = asyncio.Event()
 
         async def _session_ttl_loop() -> None:
@@ -93,7 +92,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     await asyncio.wait_for(ttl_stop.wait(), timeout=6 * 3600)
 
         ttl_task = asyncio.create_task(_session_ttl_loop())
-        # #164:挂起载荷 24h TTL 清理 job(每 6h 一轮,fail-open)
+
+        # 挂起载荷 24h TTL 清理 job(每 6h 一轮,fail-open)
         purge_stop = asyncio.Event()
 
         async def _purge_loop() -> None:
@@ -123,7 +123,7 @@ def create_app() -> FastAPI:
     """构建 FastAPI app。uvicorn 入口:``uvicorn official_agent.web.app:create_app``
     (factory 模式,便于测试注入)。"""
     settings = get_settings()
-    # M6 #113:日志 stdout + 落盘 RotatingFileHandler(幂等,测试安全)
+    # 日志 stdout + 落盘 RotatingFileHandler(幂等,测试安全)
     from official_agent.logging_conf import setup_logging
 
     setup_logging()

@@ -1,4 +1,4 @@
-"""M6 #111 /admin/config 管理 API 测试:读回显掩码/改热生效/权限。
+"""/admin/config 管理 API 测试:读回显掩码/改热生效/权限。
 
 用 FastAPI TestClient + monkeypatch(同 test_web_routes.py 先例):
 - resolve 被 monkeypatch(admin / 非 admin 身份)

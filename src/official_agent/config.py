@@ -1,4 +1,4 @@
-"""集中配置(INF-02):全部来自环境变量 / .env,真实凭证永不入库。"""
+"""集中配置:全部来自环境变量 / .env,真实凭证永不入库。"""
 
 from functools import lru_cache
 
@@ -16,45 +16,44 @@ class Settings(BaseSettings):
     # 凭证存储位置(可 env CREDENTIALS_DIR 覆盖;测试指向临时目录)
     credentials_dir: str = "~/.official-agent"
 
-    # 模型(分级路由,GRA-08)。provider=anthropic 走 ANTHROPIC_API_KEY;
+    # 模型(分级路由)。provider=anthropic 走 ANTHROPIC_API_KEY;
     # provider=openai-compatible 走 OpenAI 兼容端点(DeepSeek 等),
     # llm_api_key+llm_base_url 决定接入
     llm_provider: str = "anthropic"
     llm_base_url: str = ""
     llm_api_key: str = ""
     anthropic_api_key: str = ""
-    model_light: str = "claude-haiku-4-5-20251001"  # GRA-08 降档预留;当前无消费方
+    model_light: str = "claude-haiku-4-5-20251001"  # 降档预留;当前无消费方
     model_strong: str = "claude-sonnet-5"
 
     # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)
     postgres_url: str = "postgresql://localhost:5432/official_agent"
 
-    # 会话注册表(#169):进程内有界;淘汰只删运行时对象,PG 档案/checkpoint 不动
+    # 会话注册表:进程内有界;淘汰只删运行时对象,PG 档案/checkpoint 不动
     session_registry_max: int = 500
     session_registry_ttl_seconds: int = 3600
 
-    # 单轮执行预算(#170):墙钟超时与 LangGraph 递归上限;用户级配额归 #56
-    turn_wall_clock_timeout: int = 120  # 秒;票面建议 60–120
+    # 单轮执行预算:墙钟超时与 LangGraph 递归上限;用户级配额另设,不在此层
+    turn_wall_clock_timeout: int = 120  # 秒;建议 60–120
     turn_recursion_limit: int = 25
-    # 全局活跃模型调用并发闸(#170):跨用户资源保护;数值待 #56 配额口径一起拍板
+    # 全局活跃模型调用并发闸:跨用户资源保护;数值需与用户级配额口径统一
     model_call_global_concurrency: int = 4
     model_gate_acquire_timeout: int = 15  # 秒;闸满等待上限,超过回 busy
 
-    # 会话保留 TTL(#171):软删档案超期后物理清理(连带 checkpoint/对话日志)。
-    # **0 = 关闭**——保留天数是 #57 数据留存 ADR 的拍板项,ADR 落地前不启用。
+    # 会话保留 TTL:软删档案超期后物理清理(连带 checkpoint/对话日志)。
+    # **0 = 关闭**——保留天数由数据留存 ADR 决定,ADR 落地前不启用。
     thread_retention_days: int = 0
-
-    # GitHub 调查(D17/#149):调查工具层令牌,可选——匿名 60 次/时限流,
+    # GitHub 调查:调查工具层令牌,可选——匿名 60 次/时限流,
     # code search 等端点无 token 直接 401。不进 HOT_KEYS(凭证只留 .env)
     github_token: str = ""
 
-    # FastAPI 服务(INF-04):官网候选人客服通道
+    # FastAPI 服务:官网候选人客服通道
     agent_host: str = "127.0.0.1"
     agent_port: int = 8001
     # CORS 白名单:官网前端域名(默认 dev:React CRA http://localhost:3000)
     agent_cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
-    # 飞书(M3)
+    # 飞书
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
     feishu_verification_token: str = ""
@@ -65,7 +64,7 @@ class Settings(BaseSettings):
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
 
-    # 运行时上下文(M6 #114):会话超阈值压缩。调优参数,冷启动生效(不入 HOT_KEYS
+    # 运行时上下文:会话超阈值压缩。调优参数,冷启动生效(不入 HOT_KEYS
     # ——改它们无需重建 LLM client,仅影响下一轮压缩判定)
     context_compress_threshold_tokens: int = 24000
     context_recent_keep_messages: int = 12
@@ -76,7 +75,7 @@ def get_settings() -> Settings:
     return Settings()
 
 
-# 可热载低敏键白名单(M6 #111):这些键可被 agent_config 表覆盖并热生效。
+# 可热载低敏键白名单:这些键可被 agent_config 表覆盖并热生效。
 # 高敏/启动必需键(真实 key/密码/连接串/host/port)永远只在 .env,不可入库覆盖。
 HOT_KEYS: frozenset[str] = frozenset(
     {
@@ -89,7 +88,7 @@ HOT_KEYS: frozenset[str] = frozenset(
 
 
 def invalidate_settings_cache() -> None:
-    """使 get_settings 的 lru_cache 失效(M6 #111 热生效)。
+    """使 get_settings 的 lru_cache 失效(热生效)。
 
     调用后下次 get_settings() 重新读 .env;依赖该配置的组件
     (LLM client 等)在下次构造时自然用新值。
@@ -98,7 +97,7 @@ def invalidate_settings_cache() -> None:
 
 
 def get_effective_settings():
-    """返回合并 DB 覆盖的 Settings(DB 低敏值优先于 env;#111 热生效)。
+    """返回合并 DB 覆盖的 Settings(DB 低敏值优先于 env;热生效)。
 
     lazy import 避免循环:config_store 依赖本模块的 get_settings。
     """

@@ -1,4 +1,4 @@
-"""M6 #110 conversation_log 数据层单测:mock 连接,验证 SQL 与字段契约 + PII 过滤。
+"""conversation_log 数据层单测:mock 连接,验证 SQL 与字段契约 + PII 过滤。
 
 真实写库由开发机真库验证覆盖(同 test_state_audit.py 纪律)。
 """
@@ -68,7 +68,7 @@ def test_ensure_conversation_table_creates_table() -> None:
     assert any("CREATE TABLE IF NOT EXISTS agent_conversation_log" in c for c in calls)
     assert any("idx_conversation_user" in c for c in calls)
     assert any("idx_conversation_thread" in c for c in calls)
-    # 老库幂等补列(#113 prefix_hash / #114 compress_event):缺列 = INSERT 全失败
+    # 老库幂等补列(prefix_hash / compress_event):缺列 = INSERT 全失败
     assert any("ADD COLUMN IF NOT EXISTS prefix_hash" in c for c in calls)
     assert any("ADD COLUMN IF NOT EXISTS compress_event" in c for c in calls)
 
@@ -98,7 +98,7 @@ def test_write_conversation_inserts_fields() -> None:
 
 
 def test_write_conversation_records_compress_event() -> None:
-    """M6 #114:压缩事件(触发轮/token/覆盖)随轮落行。"""
+    """压缩事件(触发轮/token/覆盖)随轮落行。"""
     row = _conversation_row()
     conn = _mock_conn(row)
     with patch.object(conversation, "_conn", return_value=conn):
@@ -132,7 +132,7 @@ def test_write_conversation_masks_pii_before_insert() -> None:
 
 
 def test_write_conversation_error_row_strips_content() -> None:
-    """异常/错误行只存 error_code + 元数据,不存对话内容(#102/#110 决策)。"""
+    """异常/错误行只存 error_code + 元数据,不存对话内容。"""
     conn = _mock_conn(_conversation_row())
     with patch.object(conversation, "_conn", return_value=conn):
         conversation.write_conversation(
@@ -152,7 +152,7 @@ def test_write_conversation_error_row_strips_content() -> None:
     assert params[7] == "model_error"  # error_code 保留
 
 
-# ── 查询(#112) ──────────────────────────────────────────────────────────
+# ── 查询 ────────────────────────────────────────────────────────────────
 
 
 def test_list_conversations_returns_projected_rows() -> None:
@@ -201,7 +201,7 @@ def test_list_conversations_filters_by_user() -> None:
 
 
 def test_list_conversations_filters_by_thread() -> None:
-    """M6 #115:详情页按 thread_id 拉同会话全部轮次。"""
+    """详情页按 thread_id 拉同会话全部轮次。"""
     conn = _mock_conn([])
     conn.execute.return_value.fetchall.return_value = []
     with patch.object(conversation, "_conn", return_value=conn):
@@ -213,7 +213,7 @@ def test_list_conversations_filters_by_thread() -> None:
 
 
 def test_list_conversations_projects_usage_fields() -> None:
-    """M6 #115:用量页从列表投影取 token/缓存字段(聚合看板归 #65)。"""
+    """用量页从列表投影取 token/缓存字段(聚合看板单独归属)。"""
     conn = _mock_conn([])
     conn.execute.return_value.fetchall.return_value = []
     with patch.object(conversation, "_conn", return_value=conn):
@@ -242,7 +242,7 @@ def test_get_conversation_missing_returns_none() -> None:
 
 def test_list_conversations_sql_projects_no_full_message() -> None:
     """列表 SQL 必须投影 user_message_head,绝不裸选 user_message/reply_summary
-    (防全文泄漏进运营列表的回归;评审 #112 MINOR)。"""
+    (防全文泄漏进运营列表的回归)。"""
     conn = _mock_conn([])
     conn.execute.return_value.fetchall.return_value = []
     with patch.object(conversation, "_conn", return_value=conn):
@@ -257,7 +257,7 @@ def test_list_conversations_sql_projects_no_full_message() -> None:
     assert re.search(r"(?<!left\()\buser_message\b(?!, 20\))", select_part) is None
 
 
-# ── usage(#113) ─────────────────────────────────────────────────────────
+# ── usage ───────────────────────────────────────────────────────────────
 
 
 def test_extract_usage_from_metadata() -> None:
@@ -290,7 +290,7 @@ def test_extract_usage_empty() -> None:
 
 
 def test_write_conversation_stores_usage() -> None:
-    """write 传 usage → INSERT 含 token/cache 列(#113)。"""
+    """write 传 usage → INSERT 含 token/cache 列。"""
     row = _conversation_row()
     row.update(
         input_tokens=150,
@@ -318,7 +318,7 @@ def test_write_conversation_stores_usage() -> None:
 
 
 def test_prefix_stability_hash_is_deterministic() -> None:
-    """prefix 稳定性 hash:同输入同值,变输入变值(#113 命中证据)。"""
+    """prefix 稳定性 hash:同输入同值,变输入变值(命中证据)。"""
     from official_agent.state.conversation import prefix_hash
 
     h1 = prefix_hash("system prompt A", ["tool_a", "tool_b"])
@@ -358,7 +358,7 @@ def test_extract_usage_langchain_cached_tokens_mapping() -> None:
     assert usage["cache_miss_tokens"] == 60
 
 
-# ── usage 提取(#115/#113):缓存率真实性 ────────────────────────────────
+# ── usage 提取:缓存率真实性 ───────────────────────────────────────────
 
 
 def test_extract_usage_metadata_derives_miss_from_input_minus_hit() -> None:

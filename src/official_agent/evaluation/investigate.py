@@ -1,8 +1,8 @@
-"""调查子图路由与值得度(B3,#130,含 #129 合并裁定):纯函数决策层。
+"""调查子图路由与值得度:纯函数决策层。
 
-- 路由(#130):短文本+有仓→深挖;短文本+无仓→skip;
+- 路由:短文本+有仓→深挖;短文本+无仓→skip;
   有项目文本但无仓/仓不可读→通用引导题(不 skip 项目维)
-- 值得度(#130):README 体量/提交数/文件面结构 → none|low|high → 定题数
+- 值得度:README 体量/提交数/文件面结构 → none|low|high → 定题数
 - 全部零 IO(IO 在 github_client/LLM 节点),决策可单测
 """
 
@@ -20,7 +20,7 @@ _REPO_URL = re.compile(
     re.IGNORECASE,
 )
 
-# 有实质内容的最短长度(#130「短文本但说了做了什么」)
+# 有实质内容的最短长度(「短文本但说了做了什么」)
 _MIN_SUBSTANTIVE = 24
 
 # 值得度信号
@@ -40,7 +40,7 @@ def _strip_repo(owner: str, repo: str) -> tuple[str, str] | None:
 def extract_repos(text: str) -> list[tuple[str, str]]:
     """提取文本里**全部** github.com/owner/repo,保序去重。
 
-    M-1(遗留①):旧 extract_repo 只返回首个匹配,第二个仓(如候选简历里的
+    旧 extract_repo 只返回首个匹配,第二个仓(如候选简历里的
     myloop-meta)被静默丢弃。调用方据此逐仓深挖。
     """
     seen: set[tuple[str, str]] = set()
@@ -62,7 +62,7 @@ def extract_repo(text: str) -> tuple[str, str] | None:
 def route_project(
     project_text: str, repo_readable: bool | None
 ) -> Literal["deep_dive", "skip", "guided"]:
-    """路由判据(#130)。repo_readable:None=无仓位置;True/False=有仓且探测结果。
+    """路由判据。repo_readable:None=无仓位置;True/False=有仓且探测结果。
 
     - 有仓 + 可读 → deep_dive
     - 无仓 + 无实质内容 → skip(此维不浪费题)

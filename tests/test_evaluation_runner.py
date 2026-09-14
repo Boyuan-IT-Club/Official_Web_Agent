@@ -1,4 +1,4 @@
-"""B2 执行组织测试:runner 状态迁移 / job store SQL / 触发提交。
+"""执行组织测试:runner 状态迁移 / job store SQL / 触发提交。
 
 只测外部行为:fetch 与评分图被替换,验证状态机与审计;真库往返走集成档。
 """
@@ -35,7 +35,7 @@ def _mock_conn(fetchone=None, fetchall=None, rowcount=1):
 
 
 def test_create_jobs_select_first_then_insert(monkeypatch) -> None:
-    """闸门2:SELECT-first——已有活跃 job 复用,无则 INSERT。"""
+    """幂等创建:SELECT-first——已有活跃 job 复用,无则 INSERT。"""
     # 第一个 item:无活跃 → INSERT 返回 7
     conn = _mock_conn(fetchone={"job_id": 7})
     monkeypatch.setattr(ev_store, "_conn", lambda: conn)
@@ -56,19 +56,19 @@ def test_mark_job_rejects_unknown_status() -> None:
 
 
 def test_requeue_failed_scoped_by_cycle_and_skips_exhausted(monkeypatch) -> None:
-    """闸门3:失败重试按周期限定,且跳过 attempts 已达上限的 job(交人工)。"""
+    """失败重试按周期限定,且跳过 attempts 已达上限的 job(交人工)。"""
     conn = _mock_conn(fetchall=[{"job_id": 5}])
     monkeypatch.setattr(ev_store, "_conn", lambda: conn)
     assert ev_store.requeue_failed(2026) == [5]
     sql, params = conn.execute.call_args.args
     assert "status = 'failed'" in sql and "RETURNING job_id" in sql
     assert "attempts < %s" in sql
-    # #175:参数含双上限(自身资格 + 同组更新失败行资格)
+    # 参数含双上限(自身资格 + 同组更新失败行资格)
     assert params == (2026, ev_store._MAX_ATTEMPTS, ev_store._MAX_ATTEMPTS)
 
 
 def test_requeue_failed_skips_attempts_exhausted(monkeypatch) -> None:
-    """闸门3:attempts 达上限的失败 job 不重排(交人工),不进返回列表。"""
+    """attempts 达上限的失败 job 不重排(交人工),不进返回列表。"""
     conn = _mock_conn(fetchall=[])
     monkeypatch.setattr(ev_store, "_conn", lambda: conn)
     # 生产 SQL 带 attempts < %s 过滤;fetchall 空 → 无重排
@@ -159,7 +159,7 @@ async def test_run_job_success_marks_succeeded(monkeypatch) -> None:
     assert seen["marks"] == ["running", "succeeded"]
     assert seen["resume_id"] == 99  # 以取回的 resumeId 为准(job 存的是取数键)
     assert seen["saved"] == (99, 66.0)
-    # D17/#149 接线:github_key 从档案取、GITHUB_TOKEN 从 settings 传参进 bundle
+    # 接线:github_key 从档案取、GITHUB_TOKEN 从 settings 传参进 bundle
     assert seen["bundle_kwargs"]["github_key"] == "someuser"
     assert "github_token" in seen["bundle_kwargs"]
 
@@ -203,7 +203,7 @@ async def test_submit_empty_items_creates_nothing() -> None:
 
 
 def test_spawn_keeps_task_references() -> None:
-    """B2 评审 P1:派发任务必须持强引用,否则可能被 GC 静默丢 job。"""
+    """派发任务必须持强引用,否则可能被 GC 静默丢 job。"""
     runner = EvaluationRunner()
     loop = asyncio.new_event_loop()
     try:
@@ -214,7 +214,7 @@ def test_spawn_keeps_task_references() -> None:
 
 @pytest.mark.asyncio
 async def test_recover_stale_dispatches_with_original_cycle(monkeypatch) -> None:
-    """#175:启动恢复必须按行内原 (job_id, cycle_id) 派发。
+    """启动恢复必须按行内原 (job_id, cycle_id) 派发。
 
     曾把 requeue_stale_all_cycles 返回的整行 dict 当 job_id、cycle 硬编码 0
     ——多周期数据下恢复必错位。"""
@@ -240,7 +240,7 @@ async def test_recover_stale_dispatches_with_original_cycle(monkeypatch) -> None
 
 @pytest.mark.asyncio
 async def test_try_dispatch_dedupes_until_completion(monkeypatch) -> None:
-    """#193:同 job 在跑期间重复派发被跳过;完成后清理登记,可合法复评。"""
+    """同 job 在跑期间重复派发被跳过;完成后清理登记,可合法复评。"""
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -263,7 +263,7 @@ async def test_try_dispatch_dedupes_until_completion(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_submit_double_click_runs_job_once(monkeypatch) -> None:
-    """#193:create_jobs 幂等复用活跃 job_id 后,双击提交只执行一次。"""
+    """create_jobs 幂等复用活跃 job_id 后,双击提交只执行一次。"""
     runs: list[int] = []
     release = asyncio.Event()
 
@@ -276,7 +276,7 @@ async def test_submit_double_click_runs_job_once(monkeypatch) -> None:
         return {"resume_id": resume_id, "user_id": 42, "cycle_id": 2026}
 
     monkeypatch.setattr(ev_runner, "fetch_resume_authority", _authority)
-    # 两次提交 DB 层都返回同一活跃 job(闸门2 SELECT-first 语义)
+    # 两次提交 DB 层都返回同一活跃 job(幂等 SELECT-first 语义)
     monkeypatch.setattr(ev_runner.evaluation, "create_jobs", lambda items, cycle_id: [7])
     monkeypatch.setattr(ev_runner.audit, "write_audit", lambda **k: None)
     monkeypatch.setattr(EvaluationRunner, "_run_job", _record_run)
@@ -299,7 +299,7 @@ async def _spawn_probe(runner: EvaluationRunner) -> None:
 
 
 def test_attempts_only_bumps_on_running(monkeypatch) -> None:
-    """B2 评审 P2:attempts=实际执行次数,终态不再翻倍。"""
+    """attempts=实际执行次数,终态不再翻倍。"""
     calls: list[tuple] = []
 
     class _FakeConn:
@@ -328,7 +328,7 @@ def test_attempts_only_bumps_on_running(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_failure_marks_full_timeline_and_audits() -> None:
-    """B2 评审 P2:失败用例断言完整时序;触发审计被调用。"""
+    """失败用例断言完整时序;触发审计被调用。"""
 
     async def _boom(user_id, cycle_id):
         raise RuntimeError("backend down")
@@ -364,7 +364,7 @@ async def test_failure_marks_full_timeline_and_audits() -> None:
 
 @pytest.mark.asyncio
 async def test_eval_usage_log_written_per_job(monkeypatch) -> None:
-    """#154/D9:job 完成后 evaluation 通道用量日志落 conversation_log(关联 job)。"""
+    """job 完成后 evaluation 通道用量日志落 conversation_log(关联 job)。"""
 
     seen: dict = {}
 
@@ -429,7 +429,7 @@ async def test_eval_usage_log_written_per_job(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_run_job_masks_pii_before_models(monkeypatch, caplog) -> None:
-    """#176 出口契约:姓名(结构键)与手机/邮箱/QQ/学号(自由文本)不得进评分/出题模型。"""
+    """出口契约:姓名(结构键)与手机/邮箱/QQ/学号(自由文本)不得进评分/出题模型。"""
     import logging as _logging
 
     seen: dict = {}
@@ -505,7 +505,7 @@ async def test_run_job_masks_pii_before_models(monkeypatch, caplog) -> None:
 
 @pytest.mark.asyncio
 async def test_run_job_sets_correlation_trace_and_structured_logs(caplog) -> None:
-    """#183:job 运行期间 turn trace id = eval_job_trace_id(job_id),
+    """job 运行期间 turn trace id = eval_job_trace_id(job_id),
     结构化事件按阶段落行且不含简历原文。"""
     import logging as _logging
 
@@ -575,7 +575,7 @@ def test_eval_job_trace_id_deterministic() -> None:
 
 @pytest.mark.asyncio
 async def test_pii_exit_covers_x_id_and_long_student_ids() -> None:
-    """#176 评审 P2:身份证尾号 X、12-17 位学号/准考证号必须被掩。"""
+    """身份证尾号 X、12-17 位学号/准考证号必须被掩。"""
     from official_agent.security.pii import mask_pii
 
     masked = mask_pii("证件 11010119900307775X 学号 202102345678")
@@ -585,7 +585,7 @@ async def test_pii_exit_covers_x_id_and_long_student_ids() -> None:
 
 
 def test_hard_zero_survives_masking(monkeypatch) -> None:
-    """#176 评审 P3:纯数字敷衍回答掩码后(含 *)仍命中确定性硬 0。"""
+    """纯数字敷衍回答掩码后(含 *)仍命中确定性硬 0。"""
     from official_agent.evaluation.scoring import is_hard_zero_value
 
     assert is_hard_zero_value("138****5678")

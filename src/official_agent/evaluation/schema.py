@@ -1,7 +1,7 @@
-"""评分输出契约(B1,#123):仓库首个 strict Pydantic 结构化输出。
+"""评分输出契约:仓库首个 strict Pydantic 结构化输出。
 
 strict 语义:extra="forbid" + 字段约束。输出轨为提示词 JSON + 本 schema
-校验(检查点③实测:当前代理模型全为思考模式,json_schema response_format
+校验(实测:当前代理模型全为思考模式,json_schema response_format
 与强制 tool_choice 都被 400 拒)——schema 即提示词的一部分,字段名/枚举值
 改一个字模型行为就变,所以本文件是 prompt 级资产。
 
@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class DimensionScore(BaseModel):
     """单维评分:分 + 依据 + 原文证据句。
 
-    evidence 必须是该维 textarea 的原文片段(句级,#123)——评审复核的锚,
+    evidence 必须是该维 textarea 的原文片段(句级)——评审复核的锚,
     模型编造证据时评委可直接对照简历打回。
     """
 
@@ -56,7 +56,7 @@ class QuestionEvidence(BaseModel):
 
 
 class AnswerReference(BaseModel):
-    """参考答案三锚(#125/#127):面试官据此判断答得算好/达标/弱。"""
+    """参考答案三锚:面试官据此判断答得算好/达标/弱。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -66,7 +66,7 @@ class AnswerReference(BaseModel):
 
 
 class InterviewQuestion(BaseModel):
-    """单道预置面试题(envelope 核心;B5 qbank 落库的最小单元)。"""
+    """单道预置面试题(envelope 核心;qbank 落库的最小单元)。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -79,10 +79,10 @@ class InterviewQuestion(BaseModel):
 
 
 class QuestionSet(BaseModel):
-    """一次调查产出的题集;questions 空 = skip/零信号(合法,#130)。
+    """一次调查产出的题集;questions 空 = skip/零信号(合法)。
 
     mode/prompt_version 是信封字段(非模型输出,生成后注入)——类型化进
-    schema,让 B5 qbank 拿到的形状可通过自身校验(B3 评审 P2)。
+    schema,让下游 qbank 拿到的形状可通过自身校验。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -93,7 +93,7 @@ class QuestionSet(BaseModel):
     prompt_version: str = ""
 
 
-# ── 题组 schema v2(#152;D12/D13 直接替换,不兼容旧 questions 形状) ──
+# ── 题组 schema v2(直接替换,不兼容旧 questions 形状) ──
 
 CATEGORY = Literal[
     "C1_背景与动机",
@@ -121,7 +121,7 @@ class ChainLayer(BaseModel):
 
 
 class QuestionChain(BaseModel):
-    """追问链:层层依赖的连环问(下一问以上一问的回答为前提,D12)。"""
+    """追问链:层层依赖的连环问(下一问以上一问的回答为前提)。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -155,7 +155,7 @@ class ReserveQuestion(BaseModel):
 
 
 class QuestionGroupV2(BaseModel):
-    """一个仓的题组:入口 1 + 追问链 2-4 + 备选 2-3(D12);guided 模式 chains/reserves 可空。"""
+    """一个仓的题组:入口 1 + 追问链 2-4 + 备选 2-3;guided 模式 chains/reserves 可空。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -171,7 +171,7 @@ class QuestionGroupV2(BaseModel):
 
 
 class ExploreMeta(BaseModel):
-    """探索段元信息(可观测/可展示;D9 用量管道接 M6,#154)。
+    """探索段元信息(可观测/可展示;用量管道接会话用量面板)。
 
     cache 命中/未命中取 DeepSeek prompt_cache 语义(extract_usage)。"""
 
@@ -186,7 +186,7 @@ class ExploreMeta(BaseModel):
 
 
 class UsageMeta(BaseModel):
-    """单次/聚合 LLM 用量(D9;None=未采集,fail-open)。"""
+    """单次/聚合 LLM 用量(None=未采集,fail-open)。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -197,10 +197,10 @@ class UsageMeta(BaseModel):
 
 
 class QbankV2(BaseModel):
-    """调查出题信封 v2(D13:evaluation_qbank/v2,直接替换不兼容)。
+    """调查出题信封 v2(evaluation_qbank/v2,直接替换不兼容)。
 
     attribution/degraded 是信封一等概念(ADR-0008:unverified 绝不出仓题;
-    D7:预算触顶 degraded 出题)。mode/guide 沿用旧语义:guided=仓库材料
+    预算触顶 degraded 出题)。mode/guide 沿用旧语义:guided=仓库材料
     缺失的通用引导组(此时 entry 可以是引导题,chains 空)。
     """
 
@@ -214,11 +214,11 @@ class QbankV2(BaseModel):
     degraded: bool = False
     degrade_reason: str = ""
     explore_meta: ExploreMeta = Field(default_factory=ExploreMeta)
-    generation_usage: UsageMeta | None = None  # 出题段单次调用用量(#154)
+    generation_usage: UsageMeta | None = None  # 出题段单次调用用量
     prompt_version: str = ""
 
 
-# ── LLM-as-judge 出题质量报告(#155/#62;首版只报告不阻塞) ──
+# ── LLM-as-judge 出题质量报告(首版只报告不阻塞) ──
 
 JUDGE_DIMENSION = Literal["relevance", "specificity", "fairness", "differentiation"]
 
@@ -234,7 +234,7 @@ class JudgeDimensionScore(BaseModel):
 
 
 class JudgeReport(BaseModel):
-    """judge 报告整体;阈值等 AG8(#156)校准后才转门禁。"""
+    """judge 报告整体;阈值待校准后才转门禁。"""
 
     model_config = ConfigDict(extra="forbid")
 

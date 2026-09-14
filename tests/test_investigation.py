@@ -1,4 +1,4 @@
-"""B3 调查子图·仓深挖测试:路由/值得度/GitHub 客户端(respx)/子图三路径。"""
+"""调查子图·仓深挖测试:路由/值得度/GitHub 客户端(respx)/子图三路径。"""
 
 import json
 from typing import Any
@@ -22,7 +22,7 @@ def test_extract_repo_tolerates_git_suffix_and_noise() -> None:
 
 
 def test_extract_repos_returns_all_and_dedupes() -> None:
-    """M-1:多仓候选不再只取第一个;保序+去重;.git/尾随标点清洗。"""
+    """多仓候选不再只取第一个;保序+去重;.git/尾随标点清洗。"""
     text = (
         "前端 https://github.com/me/web.git 后端 github.com/me/api, 重复 https://github.com/me/web"
     )
@@ -188,7 +188,7 @@ def _v2_payload(
 
 
 def _install_fake_explore(monkeypatch, chars: int = 2000) -> None:
-    """探索段替身(#151):返回带材料与路径的 dossier,worthiness 由体量定。"""
+    """探索段替身:返回带材料与路径的 dossier,worthiness 由体量定。"""
 
     from official_agent.evaluation.dossier import Dossier
 
@@ -231,12 +231,12 @@ async def test_deep_dive_happy_path(monkeypatch) -> None:
     qs = await ig.run_investigation("我做了 https://github.com/me/demo 报名页重构")
     assert qs["mode"] == "repo_deep_dive"
     assert qs["group"]["entry"]["evidence"]["path"] == "src/app.py"  # 路径真实在仓
-    assert len(qs["group"]["chains"]) == 2  # D12:追问链 2-4
+    assert len(qs["group"]["chains"]) == 2  # 追问链 2-4
 
 
 @pytest.mark.asyncio
 async def test_probe_failure_degrades_to_guided(monkeypatch) -> None:
-    """仓探测失败 → guided 降级,题不带仓路径(#130:私有/不可达注明)。"""
+    """仓探测失败 → guided 降级,题不带仓路径(私有/不可达注明)。"""
 
     class _PrivateGH(_FakeGH):
         async def repo(self, owner, repo):
@@ -284,7 +284,7 @@ async def test_skip_path_no_model_call(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_deep_dive_fabricated_path_rejected(monkeypatch) -> None:
-    """证据路径不在仓内(编造)→ RuntimeError,B2 可重试。"""
+    """证据路径不在仓内(编造)→ RuntimeError,可重试。"""
     payload = json.loads(_v2_payload())
     payload["entry"]["evidence"]["path"] = "src/编造的路径.py"
     _install_fake_gh_and_model(monkeypatch, json.dumps(payload, ensure_ascii=False))
@@ -293,7 +293,7 @@ async def test_deep_dive_fabricated_path_rejected(monkeypatch) -> None:
 
 
 def test_repo_regex_boundaries() -> None:
-    """B3 评审 P2:句点收尾/伪站名不误配不误粘。"""
+    """句点收尾/伪站名不误配不误粘。"""
     assert inv.extract_repo("项目是 github.com/owner/repo.") == ("owner", "repo")
     assert inv.extract_repo("看 mygithub.com/owner/repo 这个") is None
     assert inv.extract_repo("github.com/owner/repo.git 已归档") == ("owner", "repo")
@@ -301,7 +301,7 @@ def test_repo_regex_boundaries() -> None:
 
 @pytest.mark.asyncio
 async def test_empty_dossier_degrades_to_guided(monkeypatch) -> None:
-    """探索零材料 → guided 降级(§3.4:GitHub 不可达/探索全败,替代旧 worthiness=none)。"""
+    """探索零材料 → guided 降级(GitHub 不可达/探索全败,替代旧 worthiness=none)。"""
 
     def _fake_run_explore(project_text, **kw):
         async def _impl():
@@ -343,7 +343,7 @@ async def test_empty_dossier_degrades_to_guided(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_explore_midway_failure_degrades_to_guided(monkeypatch) -> None:
-    """B3 评审 P2 → #151:route 探测通过但探索段全败 → 降级 guided + 注明。"""
+    """route 探测通过但探索段全败 → 降级 guided + 注明。"""
 
     def _fake_run_explore(project_text, **kw):
         async def _impl():
@@ -385,7 +385,7 @@ async def test_explore_midway_failure_degrades_to_guided(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_chain_count_below_minimum_rejected(monkeypatch) -> None:
-    """追问链 <2 → 结构校验拒绝,B2 可重试(D12)。"""
+    """追问链 <2 → 结构校验拒绝,可重试。"""
     payload = json.loads(_v2_payload())
     payload["chains"] = payload["chains"][:1]
     _install_fake_gh_and_model(monkeypatch, json.dumps(payload, ensure_ascii=False))
@@ -394,7 +394,7 @@ async def test_chain_count_below_minimum_rejected(monkeypatch) -> None:
 
 
 async def test_deep_dive_allow_empty_path_with_note(monkeypatch) -> None:
-    """纯取向题(无单一文件锚点)允许空路径,note 必填(评审 P2)。"""
+    """纯取向题(无单一文件锚点)允许空路径,note 必填。"""
     entry = _entry_q("C1_背景与动机", "", "为什么选择这个方向?")
     entry["evidence"]["note"] = "纯取向题,跨多文件"
     payload = json.loads(_v2_payload(entry=entry))
@@ -425,11 +425,11 @@ async def test_v2_categories_not_forced_uniform(monkeypatch) -> None:
     }
 
 
-# ── #152 后置校验(评审 P1:缺失的测试) ──
+# ── 后置校验 ──
 
 
 def test_adversarial_blacklist_rejects_all_forms() -> None:
-    """对抗前提黑名单逐词生效(P0 回归:布尔优先级曾致 5 词死代码)。"""
+    """对抗前提黑名单逐词生效(布尔优先级曾致 5 词死代码)。"""
     from official_agent.evaluation.investigate_graph import _validate_group_v2
 
     dossier_text = "README.md src/app.py tests/test_app.py"
@@ -442,7 +442,7 @@ def test_adversarial_blacklist_rejects_all_forms() -> None:
 
 
 def test_legitimate_anchoring_question_passes() -> None:
-    """简历锚定横切:合法「你自述里提到 X,为什么选它」不误拒(P0 伴随)。"""
+    """简历锚定横切:合法「你自述里提到 X,为什么选它」不误拒。"""
     from official_agent.evaluation.investigate_graph import _validate_group_v2
 
     payload = json.loads(_v2_payload())
@@ -466,7 +466,7 @@ def test_chain_source_not_in_dossier_rejected() -> None:
 
 
 def test_reserve_path_whitelist_enforced() -> None:
-    """备选题 evidence.path 白名单同样校验(P1:曾只查 entry)。"""
+    """备选题 evidence.path 白名单同样校验(曾只查 entry)。"""
     from official_agent.evaluation.investigate_graph import _validate_group_v2
 
     payload = json.loads(_v2_payload())
@@ -481,7 +481,7 @@ def test_reserve_path_whitelist_enforced() -> None:
 
 @pytest.mark.asyncio
 async def test_thin_dossier_over_limit_rejected(monkeypatch) -> None:
-    """敷衍 dossier(体量 <400 字符)题量 >3 → 拒绝重试(D10)。"""
+    """敷衍 dossier(体量 <400 字符)题量 >3 → 拒绝重试。"""
     payload = json.loads(_v2_payload())  # 缺省组 8 题 > 3
     _install_fake_gh_and_model(
         monkeypatch, json.dumps(payload, ensure_ascii=False), explore_chars=50
@@ -492,7 +492,7 @@ async def test_thin_dossier_over_limit_rejected(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_generation_usage_into_envelope(monkeypatch) -> None:
-    """#154:出题段单次 usage → 信封 generation_usage(D9 出题半边)。"""
+    """出题段单次 usage → 信封 generation_usage。"""
 
     class _Msg:
         content = json.loads(_v2_payload())

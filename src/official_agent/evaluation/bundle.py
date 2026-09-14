@@ -1,7 +1,7 @@
-"""B4 证据线组装(#131/#132/#133):评测错因/奖项/兜底 → 统一题集信封。
+"""证据线组装(评测错因/奖项/兜底)→ 统一题集信封。
 
-与 B3 仓深挖平行的一条「调查 bundle」:一次跑完所有证据线,产出一个
-qbank 信封(groups 分线,source 汇总)。题数硬校验纪律同 B3。
+与仓深挖线平行的一条「调查 bundle」:一次跑完所有证据线,产出一个
+qbank 信封(groups 分线,source 汇总)。题数硬校验纪律与仓线深挖一致。
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def _project_text(fields: list) -> str:
 
 
 async def _b4_questions(payload_hint: str, *, count_min: int, count_max: int) -> list[dict]:
-    """B4 共用的提示词 JSON 出题(错因追问/技能题组)。"""
+    """共用的提示词 JSON 出题(错因追问/技能题组)。"""
     settings = get_effective_settings()
     model = build_model(settings, temperature=0.2)
     prompt_text = (
@@ -59,7 +59,7 @@ async def _b4_questions(payload_hint: str, *, count_min: int, count_max: int) ->
     qs = QuestionSet.model_validate_json(_extract_json(content))
     questions = [q.model_dump() for q in qs.questions]
     if not count_min <= len(questions) <= count_max:
-        raise ValueError(f"B4 题数越界:{len(questions)}")
+        raise ValueError(f"题数越界:{len(questions)}")
     return questions
 
 
@@ -74,18 +74,18 @@ async def run_bundle(
 ) -> dict[str, Any]:
     """跑全部证据线,返回 qbank 信封(groups 分线+15 分钟建议组合)。
 
-    - 仓线:B3 子图(deep/guided/skip 内部自决)
-    - 评测线:有评测记录且非满分 → 失败 test 错因追问(#132)
-    - 奖项线:简历有奖项 → 背景卡+纯过程追问;搜索不可用(检查点⑤)→ 不可考
-    - 兜底线(#133):以上全无 → 基础三维 + 部门技能题组
+    - 仓线:调查子图(deep/guided/skip 内部自决)
+    - 评测线:有评测记录且非满分 → 失败 test 错因追问
+    - 奖项线:简历有奖项 → 背景卡+纯过程追问;搜索通道不可用 → 不可考
+    - 兜底线:以上全无 → 基础三维 + 部门技能题组
     """
     provider = search_provider or NullSearchProvider()
     groups: list[dict[str, Any]] = []
     project_text = _project_text(fields)
 
-    # 仓线(B3)。M-1 多仓:项目文本里每个 GitHub 仓各深挖一次,产出独立
+    # 仓线。多仓:项目文本里每个 GitHub 仓各深挖一次,产出独立
     # repo group(带 owner/repo 标识),不再只挖第一个。单线失败降级为空错误组,
-    # 不炸整条 bundle(B4 评审 P2)。
+    # 不炸整条 bundle。
     repo_candidates = extract_repos(project_text)
     # 无仓/有项目文本但无仓 URL → 仍跑一次,让子图内部路由到 guided/skip
     if not repo_candidates:
@@ -104,7 +104,7 @@ async def run_bundle(
                     "group": "repo",
                     "owner": owner or "",
                     "repo": f"{owner}/{name}" if pinned else "",
-                    # #153:v2 信封整体嵌套(qbank_v2),不展开——QbankV2 自带
+                    # v2 信封整体嵌套(qbank_v2),不展开——QbankV2 自带
                     # group 键(dict),展开会覆盖 kind 字符串并污染 pick log
                     "qbank_v2": repo_envelope,
                 }
@@ -122,7 +122,7 @@ async def run_bundle(
                 }
             )
 
-    # 评测线(#132)
+    # 评测线
     if github_key:
         from official_agent.evaluation import autograding as ag
 
@@ -151,7 +151,7 @@ async def run_bundle(
                     }
                 )
 
-    # 奖项线(#131):verified 的背景卡也进信封(检查点⑤到位后面试官有料可读)
+    # 奖项线:verified 的背景卡也进信封(搜索通道到位后面试官有料可读)
     awards = extract_awards(fields)
     award_questions: list[dict] = []
     award_briefs: list[dict] = []
@@ -171,8 +171,8 @@ async def run_bundle(
             }
         )
 
-    # 兜底线(#133):仓线无题、无评测、无奖项 → 基础三维 + 部门技能题组。
-    # #153:repo 组已 v2(题目在 group.entry/chains 里),证据判定两种形状都认
+    # 兜底线:仓线无题、无评测、无奖项 → 基础三维 + 部门技能题组。
+    # repo 组已 v2(题目在 group.entry/chains 里),证据判定两种形状都认
     def _group_has_evidence(g: dict[str, Any]) -> bool:
         qbank_v2 = g.get("qbank_v2")
         if isinstance(qbank_v2, dict):
@@ -228,7 +228,7 @@ async def run_bundle(
                 )
         else:
             all_questions.extend(g.get("questions", []))
-    # D9/#154:聚合 repo 组探索/出题用量(其余线 v1 形状无用量面)
+    # 聚合 repo 组探索/出题用量(其余线 v1 形状无用量面)
     usage_total: dict[str, int | None] = {
         "input_tokens": None,
         "output_tokens": None,

@@ -1,4 +1,4 @@
-# 出题探针数据集(#155,spec §7;runner kind=injection 同款确定性评测)。
+# 出题探针数据集(runner kind=injection 同款确定性评测)。
 # 六探针:①十类覆盖 ②链 3-5 层 ③题量 ≤15/敷衍 ≤3 ④evidence.path 白名单
 #         ⑤对抗前提黑名单 ⑥链源真实性
 # 每条 case 喂 validate_qbank_v2_group(与 generate 主路径同一校验机器):
@@ -188,7 +188,7 @@ cases:
             - { question: "L3?", expected_signal: "s" }
       reserves: *reserves
 
-  # ①' 十类覆盖(spec §4 十类枚举逐一可达):单组结构上限 7 槽
+  # ①' 十类覆盖(十类枚举逐一可达):单组结构上限 7 槽
   # (入口1+链3+备选3),故两组互补覆盖十类——每组各自通过
   - id: probe-ten-categories-part1-pass
     validate: pass

@@ -1,5 +1,5 @@
-# LLM-as-judge 数据集(#155/#62):标准 dossier fixture + 题组 → 四维 1-5 分报告。
-# 首版只报告不阻塞(阈值等 AG8 #156 校准);无 LLM 配置 → SKIP。
+# LLM-as-judge 数据集:标准 dossier fixture + 题组 → 四维 1-5 分报告。
+# 只报告不阻塞(阈值校准后才转门禁);无 LLM 配置 → SKIP。
 
 runner: qbank_judge
 

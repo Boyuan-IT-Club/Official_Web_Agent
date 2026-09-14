@@ -1,12 +1,12 @@
-"""写工具集(TOOL-04 机制先行 + GRA-05):写操作经 interrupt 人工确认。
+"""写工具集:写操作经 interrupt 人工确认。
 
 确认契约(ADR-0005):写工具执行前必须经人工确认——图内挂起(interrupt,
 携带人类可读操作摘要),用户批准(approve)/拒绝(reject)后恢复;批准后仍
-校验确认令牌(指纹绑定,TOOL-04 完整实现)。非图上下文(直接调用)一律
+校验确认令牌(指纹绑定)。非图上下文(直接调用)一律
 转 ConfirmationRequired,写路径 fail-closed。
 
-权限边界在这一层的代码里,不依赖模型自觉。每次执行记审计行(SEC-03,
-字段契约见 ADR-0006)。
+权限边界在这一层的代码里,不依赖模型自觉。每次执行记审计行
+(字段契约见 ADR-0006)。
 
 move_interview 已砍除(后端 manual-adjust 端点 deprecated,
 改用 assign_interview → preferences/{resumeId}/assign)。
@@ -37,7 +37,7 @@ def _confirm_or_fail(summary: str) -> bool:
 def _require_token(confirmation_token: str | None) -> None:
     if not confirmation_token:
         raise ConfirmationRequired("此操作需要人工确认令牌,请先经 interrupt 确认流程")
-    # TODO(TOOL-04): 指纹校验——令牌须对应当前 thread 挂起记录的操作指纹
+    # TODO(zewang): 指纹校验——令牌须对应当前 thread 挂起记录的操作指纹
     # hash(工具名+关键参数),不一致即拒;一次性,执行即作废(ADR-0005)。
 
 
@@ -52,7 +52,7 @@ async def assign_interview(
     if not _confirm_or_fail(f"将把简历 #{resume_id} 分配到目标场次 #{target_session_id},请确认"):
         return {"cancelled": True, "message": "操作已取消:用户拒绝,未执行"}
     _require_token(confirmation_token)
-    raise NotImplementedError("TOOL-04")
+    raise NotImplementedError("分配面试场次(需人工确认)")
 
 
 async def handle_reschedule(
@@ -71,7 +71,7 @@ async def handle_reschedule(
     if not _confirm_or_fail(f"将{action}改期申请 #{request_id}(备注:{admin_note or '无'}),请确认"):
         return {"cancelled": True, "message": "操作已取消:用户拒绝,未执行"}
     _require_token(confirmation_token)
-    raise NotImplementedError("TOOL-04")
+    raise NotImplementedError("处理改期申请(需人工确认)")
 
 
 async def submit_resume_score(
@@ -80,10 +80,10 @@ async def submit_resume_score(
     """写回简历评分(整数 0~100,落库并署名打分人)。
 
     对应 PUT /api/resumes/{id}/score(body 仅 score;维度分与依据的落库通道
-    尚不存在,已列入 SEC-01 后端谈判清单)。⚠ 写操作;B 流水线批量写回走
+    尚不存在)。⚠ 写操作;B 流水线批量写回走
     评审确认语义,不经本对话令牌(ADR-0005)。
     """
     if not _confirm_or_fail(f"将给简历 #{resume_id} 打 {score} 分,请确认"):
         return {"cancelled": True, "message": "操作已取消:用户拒绝,未执行"}
     _require_token(confirmation_token)
-    raise NotImplementedError("TOOL-04")
+    raise NotImplementedError("写回简历评分(需人工确认)")

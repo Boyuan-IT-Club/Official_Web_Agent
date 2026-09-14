@@ -1,4 +1,4 @@
-"""出题探针 executor(#155,spec §7):六探针确定性门禁。
+"""出题探针 executor:六探针确定性门禁。
 
 数据集 evals/datasets/qbank_probes.yaml:每条 case 喂
 validate_qbank_v2_group(与 generate 主路径同一校验机器)——

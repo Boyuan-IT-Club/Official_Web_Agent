@@ -1,4 +1,4 @@
-"""写操作审计日志(SEC-03):每笔写操作落库可查。
+"""写操作审计日志:每笔写操作落库可查。
 
 权威存储:agent 侧 Postgres(ADR-0006 §审计与回溯契约;Langfuse 可删改,
 不作权威)。审计行字段契约见 ADR-0006:
@@ -8,7 +8,7 @@
 decision 存 `u{user}:approve` / `u{user}:reject`(ADR-0006「谁批准/拒绝」):
 批准人 = decision 前缀(触发人 acting_user_id ≠ 批准人时仍可追溯,批处理管道
 「触发者≠批准者」场景不丢失)。
-decision_summary:agent 决策依据的人类可读摘要(interrupt 携带,TOOL-04 接线)。
+decision_summary:agent 决策依据的人类可读摘要(interrupt 携带)。
 token:一次性确认令牌值(与 action 同指纹,ADR-0005)。
 
 写路径三重闸(ADR-0006):工具装配 → interrupt → 指纹令牌;审计行在
@@ -50,7 +50,7 @@ def _conn() -> psycopg.Connection[dict[str, Any]]:
 
 
 def ensure_audit_table() -> None:
-    """幂等建 agent_audit_log 表(SEC-03;L-1 同款自举)。"""
+    """幂等建 agent_audit_log 表(DDL 进仓库,新环境可自举)。"""
     with _conn() as conn:
         conn.execute(
             """
@@ -93,18 +93,18 @@ def write_audit(
 
         decision: `u{user}:approve`(批准执行)/ `u{user}:reject`(拒绝)——interrupt
         恢复决策,批准人编码在前缀(ADR-0006「谁批准/拒绝」)。
-        decision_summary:agent 决策依据的人类可读摘要(interrupt 携带,TOOL-04 接线)。
+        decision_summary:agent 决策依据的人类可读摘要(interrupt 携带)。
         token:一次性确认令牌值(与 action 同指纹,ADR-0005)。
-        result:执行结果摘要(成功/失败的可行动文案,TOOL-06)。
-        trace_id 串 Langfuse(OBS-02)全过程;缺省取 current_trace_id()
-    (优先级 span > 轮 id > 全零,永非空;延迟导入保 #95 前 CI 绿,
-        显式传 trace_id 的调用方不受影响)。
+        result:执行结果摘要(成功/失败的可行动文案)。
+        trace_id 串 Langfuse 全过程;缺省取 current_trace_id()
+    (优先级 span > 轮 id > 全零,永非空;延迟导入使观测模块未就绪时
+        也不影响导入,显式传 trace_id 的调用方不受影响)。
     """
     if trace_id is None:
         from official_agent.observability import current_trace_id
 
         trace_id = current_trace_id()
-    # #164 出口契约:审计 action 写入口过 deep 掩(action 含工具参数,可能
+    # 出口契约:审计 action 写入口过 deep 掩(action 含工具参数,可能
     # 携带姓名/手机号等;decision_summary/result 同为出边界文本)
     from official_agent.security.pii import mask_pii, mask_pii_deep
 

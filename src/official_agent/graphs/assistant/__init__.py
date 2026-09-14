@@ -1,9 +1,9 @@
-"""A 模块 ReAct 单循环(GRA-04):按身份装配只读工具集 → create_agent。
+"""A 模块 ReAct 单循环:按身份装配只读工具集 → create_agent。
 
 形态(ADR-0003):无意图分类,「意图」由模型在循环内选工具隐式表达。
 装配须与后端 RBAC 对齐(ADR-0006「社团官网层问答助手」):不能只按粗粒度
 role 给工具,否则会把后端 V22 已从社员角色撤下(如 resume:view)的越权面
-经 query tool 原样露出。**收口后的目标装配(SEC-02 落地,本文件底部
+经 query tool 原样露出。**目标装配(本文件底部
 `_ROLE_TOOL_NAMES`/装配表仍是旧 role 分档,是已知遗留)**:
 - admin:只读工具集全量(以本人 JWT get_as_user 调后端,后端复核)
 - member:全局(跨人)查询工具一律不装配 —— member 不再有 resume:view(V22
@@ -12,15 +12,15 @@ role 给工具,否则会把后端 V22 已从社员角色撤下(如 resume:view)�
   供本人取当前开放周期再查本人面试),查询绑定本人 JWT,模型侧不见凭证。
 - unknown:空集(无工具,纯问答;装配层是第一道闸,ADR-0005)
 
-只读通道决断(2026-09-09):本问答助手(官网对话 web 通道)**只读、不装配
-任何写工具** —— 写操作闭环是 GRA-05/M3(interrupt 需 MEM-01 checkpointer),
+只读通道:本问答助手(官网对话 web 通道)**只读、不装配
+任何写工具** —— 写操作闭环(interrupt 需 checkpointer 支持),
 不在本助手能力面内;后续亦暂不扩展写工具。
 
-system prompt 纪律(#166 后修订):
+system prompt 纪律:
 - 静态正文(prompts/assistant.md)与角色无关、字节稳定;
-- 身份/权限段 + 工具契约随角色变化,进 **system prompt**(#166 修复——
-  原实现把它们塞进首条用户消息,被 checkpointer 当对话原文存下、经历史
-  回看投影成 user 气泡泄漏给使用者);
+- 身份/权限段 + 工具契约随角色变化,进 **system prompt**(修复:身份与契约段曾
+  作为首条用户消息被 checkpointer 当对话原文持久化,经历史回看投影成
+  user 气泡泄漏给使用者);
 - 代价:prompt cache 从「全局稳定」降为「按角色分档命中」(同角色会话内
   仍稳定),prefix_hash(load_system_prompt(), tool_names) 作为基准证据不变。
 """
@@ -110,18 +110,18 @@ def assemble_tools(identity: ResolvedIdentity, user_token: str = "") -> list:
     tools = []
     for name in names:
         raw = _bind_my_interview(user_token) if name == "get_my_interview" else _ALL_TOOLS[name]
-        # GRA-04/#163:工具返回出口统一过注入守卫(数据区标签+确定性扫描)
+        # 工具返回出口统一过注入守卫(数据区标签+确定性扫描)
         tools.append(mount_input_guard(raw))
     return tools
 
 
 def identity_message(identity: ResolvedIdentity) -> str:
-    """身份/权限段落:进 system prompt(#166 修复)。
+    """身份/权限段落:进 system prompt。
 
     只含对话需要的档案:称呼、职位、权限边界。不含 user_id/source 等内部
-    标识(用户明确要求)——agent 面对用户时应像面对一个人。
+    标识——agent 面对用户时应像面对一个人。
 
-    #166 前这段作为首条**用户消息**注入,被 checkpointer 当对话原文存下、
+    这段曾作为首条**用户消息**注入,被 checkpointer 当对话原文存下、
     经历史回看投影成角色为 user 的气泡泄漏给使用者;现改为 system message,
     与对话消息彻底分离。
     """
@@ -152,7 +152,7 @@ def tool_roster(identity: ResolvedIdentity) -> list[str]:
 
 
 def tool_contract(identity: ResolvedIdentity) -> str:
-    """工具契约段(GRA-04,#161):工具清单随角色变化,进 system prompt。
+    """工具契约段:工具清单随角色变化,进 system prompt。
 
     - 有工具档:列清单,只准陈述工具真实返回的内容,失败/被拒必须如实
       说明并引导人工,不得编造;
@@ -177,19 +177,19 @@ def tool_contract(identity: ResolvedIdentity) -> str:
 
 
 def build_system_prompt(identity: ResolvedIdentity) -> str:
-    """完整 system prompt = 静态正文 + 身份段 + 工具契约(#166)。
+    """完整 system prompt = 静态正文 + 身份段 + 工具契约。
 
     身份/契约随角色变化 ⇒ system 前缀不再跨角色字节稳定,prompt cache
-    按角色分档命中(同角色会话内仍稳定)。这是 #166 的取舍:内部上下文
+    按角色分档命中(同角色会话内仍稳定)。这是身份进 system 的取舍:内部上下文
     绝不进对话消息面,代价是缓存粒度从「全局」降为「按角色」。
     """
     return f"{load_system_prompt()}\n\n{identity_message(identity)}\n\n{tool_contract(identity)}"
 
 
 def compose_first_message(user_token: str = "") -> str:
-    """首条用户消息(#166 后:身份/契约已入 system,此入口只作兼容)。
+    """首条用户消息(身份/契约已入 system,此入口只作兼容)。
 
-    #166 前 compose_first_message(identity) 把身份段+工具契约拼成首条
+    早先 compose_first_message(identity) 把身份段+工具契约拼成首条
     用户消息,被 checkpointer 当对话原文存下、经回看投影泄漏。现已无内部
     字段走消息面;调用方(CLI/SSE)直接以用户原文开轮即可。
     """
@@ -203,13 +203,13 @@ def build_model(
     stream_usage: bool = False,
     temperature: float | None = None,
 ) -> Any:
-    """按配置构造对话模型(GRA-08 路由的接入点)。
+    """按配置构造对话模型(路由层接入点)。
 
     - anthropic:ANTHROPIC_API_KEY(默认)
     - openai-compatible:OpenAI 兼容端点(DeepSeek 等),LLM_BASE_URL+
       LLM_API_KEY——换模型供应商不改代码
     model 缺省用 model_strong(对话主模型);其他用途(压缩摘要等)显式传名。
-    stream_usage:流式请求附带 usage 终块(#113 用量自采)——DeepSeek/OpenAI
+    stream_usage:流式请求附带 usage 终块(供调用方自采用量)——DeepSeek/OpenAI
     兼容端点必须显式 stream_options.include_usage,且该参数只能随 stream=true
     使用(非流式 ainvoke 会 400),故只给对话主模型开;摘要器等 ainvoke 调用
     方保持缺省 False。
@@ -245,13 +245,13 @@ def build_assistant_agent(
     """构建 A 模块 ReAct agent。调用方(CLI/SSE)负责身份解析与消息装配,
     并把 langfuse_callbacks 挂到 invoke 的 config(fail-open,ADR-0005)。
 
-    system prompt = 静态正文 + 身份段 + 工具契约(#166,身份进 system 不再
-    泄漏进对话消息面)。
+    system prompt = 静态正文 + 身份段 + 工具契约(身份段走 system,
+    不泄漏进对话消息面)。
 
-    checkpointer(MEM-01):传 AsyncPostgresSaver 则启用多轮持久化;
+    checkpointer:传 AsyncPostgresSaver 则启用多轮持久化;
     None 则纯内存(CLI --session 标识仅作 trace 用)。
     stream_usage:openai-compatible 端点只许 stream_options 随 stream=true 出现,
-    非流式 ainvoke 调用方(eval runner #148)必须传 False。"""
+    非流式 ainvoke 调用方(如 eval runner)必须传 False。"""
     settings = get_effective_settings()
     return create_agent(
         build_model(settings, stream_usage=stream_usage),

@@ -1,10 +1,10 @@
-"""B4:autograding 错因(B3 之外的证据线之一,#132)。
+"""autograding 错因:评测失败归因的一条证据线。
 
 - 取「最近且最好一次」评测:先按总分最高,同分取最近(pick_latest_best)
 - 非满分才触发错因分析;满分直接略过该线
 - 错因归类按失败 test 名关键词:超时/环境/边界/逻辑(默认);归类只服务
   追问措辞,不是定论——面试探「读反馈→归因→修复」的闭环
-- evidence = 报告任务名+失败 test 名(不泄源码,#132)
+- evidence = 报告任务名+失败 test 名(不泄源码)
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def extract_failures(submission: dict) -> list[TestFailure]:
 
 
 def classify(failures: list[TestFailure]) -> dict[str, list[tuple[str, str]]]:
-    """失败 → 归因桶;桶值保留 (任务名, test 名)——#132:evidence 必须两者都带。
+    """失败 → 归因桶;桶值保留 (任务名, test 名)——evidence 必须两者都带。
 
     关键词序:边界先于环境(常见命名 test_edge_error_* 不该落环境桶)。
     """
@@ -61,7 +61,7 @@ def classify(failures: list[TestFailure]) -> dict[str, list[tuple[str, str]]]:
 
 
 def is_full_score(submission: dict) -> bool:
-    """满分(全部任务满分)→ 该线略过(#132)。total 缺失视为不触发。"""
+    """满分(全部任务满分)→ 该线略过。total 缺失视为不触发。"""
     total = submission.get("total_score")
     max_total = submission.get("max_total_score")
     if total is None or max_total in (None, 0):

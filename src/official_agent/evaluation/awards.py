@@ -1,9 +1,9 @@
-"""B4:奖项 brief(可注入搜索)+ 无证据兜底基础三维/部门技能题组(#131/#133)。
+"""奖项 brief(可注入搜索)+ 无证据兜底基础三维/部门技能题组。
 
-- SearchProvider 协议:web_search 通道(检查点⑤)未接入前用 NullProvider
+- SearchProvider 协议:web_search 通道未接入前用 NullProvider
   ——查不到即标「不可考,仅以候选人陈述为准」,追问收窄纯过程,绝不编含金量
 - 无证据候选:基础三维每维 3-4 深题 + 按部门技能题组(2-4 浅-中) +
-  约 15 分钟建议组合(#133)
+  约 15 分钟建议组合
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ class SearchProvider(Protocol):
 
 
 class NullSearchProvider:
-    """无 web_search 通道(检查点⑤):一切奖项都走「不可考」路径。"""
+    """无 web_search 通道:一切奖项都走「不可考」路径。"""
 
     async def search(self, query: str) -> list[dict[str, Any]]:
         return []
@@ -83,9 +83,9 @@ def extract_awards(fields: list[FieldText]) -> list[str]:
 
 
 async def build_award_brief(provider: SearchProvider, award_title: str) -> dict[str, Any]:
-    """奖项背景卡(#131):查得到给背景摘要,查不到标「不可考」。
+    """奖项背景卡:查得到给背景摘要,查不到标「不可考」。
 
-    两条纪律:#131 明文——查不到绝不编含金量;追问永远收窄到候选人
+    两条纪律:查不到绝不编含金量;追问永远收窄到候选人
     本人的作品/角色/复盘(纯过程),不考奖项本身。
     """
     results = await provider.search(f"{award_title} 比赛 主办方 规模")
@@ -146,7 +146,7 @@ BASE_THREE = [
 
 
 def base_three_questions() -> list[dict[str, Any]]:
-    """无证据候选的基础三维兜底(每维一题深挖,#133:非占位)。"""
+    """无证据候选的基础三维兜底(每维一题深挖,非占位)。"""
     return [
         {
             "anchor": "guided",

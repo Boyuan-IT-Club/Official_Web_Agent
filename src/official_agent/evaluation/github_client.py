@@ -1,12 +1,12 @@
-"""GitHub 只读客户端(B3,#130;B-AG1 八工具,#149/D6)。
+"""GitHub 只读客户端(八工具面)。
 
-- 只读:仓库元数据 / README / 提交历史 / 文件树 + D6 八工具面(search_repos /
+- 只读:仓库元数据 / README / 提交历史 / 文件树 + 八工具面(search_repos /
   list_user_repos / repo_meta / list_files / read_file / search_in_repo /
   read_commits+commit_detail / search_issues)
-- base_url 可注入(respx 测试);GITHUB_TOKEN 经 settings 接线(D17,#149),
+- base_url 可注入(respx 测试);GITHUB_TOKEN 经 settings 接线,
   code search 等端点无 token 必 401
-- 私有/不可达统一抛 GitHubUnavailable(路由降级为通用引导题,#130)
-- 单工具结果截断(D7):单文件/单 patch ≤8K 字符,截断留痕
+- 私有/不可达统一抛 GitHubUnavailable(路由降级为通用引导题)
+- 单工具结果截断:单文件/单 patch ≤8K 字符,截断留痕
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from urllib.parse import quote
 import httpx
 
 _DEFAULT_BASE = "https://api.github.com"
-_MAX_TEXT_CHARS = 8000  # D7:单文件/单 patch 截断上限
+_MAX_TEXT_CHARS = 8000  # 单文件/单 patch 截断上限
 
 
 class GitHubUnavailable(RuntimeError):
@@ -70,12 +70,12 @@ class GitHubClient:
         data = await self._get_json(f"/repos/{owner}/{repo}")
         return data if isinstance(data, dict) else {}
 
-    # ── D6 八工具面(#149) ─────────────────────────────────────
+    # ── 八工具面 ───────────────────────────────────────────────
 
     async def repo_meta(self, owner: str, repo: str) -> dict:
-        """仓基本面投影(D6 repo_meta):定位/fork 判定/默认分支/活跃度。
+        """仓基本面投影(repo_meta):定位/fork 判定/默认分支/活跃度。
 
-        fork 时 parent.full_name 一并带回(入口瀑布 D2:fork → 查 authored
+        fork 时 parent.full_name 一并带回(入口瀑布:fork → 查 authored
         commits ⇒ trusted-contribution)。"""
         data = await self.repo(owner, repo)
         meta: dict = {
@@ -96,16 +96,16 @@ class GitHubClient:
     async def list_files(
         self, owner: str, repo: str, *, branch: str | None = None, limit: int = 600
     ) -> tuple[list[str], bool]:
-        """文件路径清单(D6 list_files)= tree_paths 语义:(paths, truncated)。"""
+        """文件路径清单(list_files)= tree_paths 语义:(paths, truncated)。"""
         return await self.tree_paths(owner, repo, branch=branch, limit=limit)
 
     async def read_file(
         self, owner: str, repo: str, path: str, *, branch: str | None = None
     ) -> dict:
-        """读单文件(D6 read_file):文本 ≤8K 字符(D7),目录回子项清单。
+        """读单文件(read_file):文本 ≤8K 字符,目录回子项清单。
 
         目录不是错误:返回 {"type":"dir", children:[…]},agent 应改用 list_files
-        视角;404/私有/网络错统一 GitHubUnavailable(降级语义,#130)。"""
+        视角;404/私有/网络错统一 GitHubUnavailable(降级语义)。"""
         params = {"ref": branch} if branch else None
         data = await self._get_json(
             f"/repos/{owner}/{repo}/contents/{quote(path.lstrip('/'))}", params=params
@@ -139,7 +139,7 @@ class GitHubClient:
         }
 
     async def search_repos(self, query: str, *, per_page: int = 10) -> list[dict]:
-        """按项目名/关键词搜仓(D6 search_repos):入口瀑布第 3 步(未绑定时)。"""
+        """按项目名/关键词搜仓:入口瀑布第 3 步(未绑定时)。"""
         data = await self._get_json(
             "/search/repositories",
             params={"q": query, "per_page": per_page, "sort": "best-match"},
@@ -148,9 +148,9 @@ class GitHubClient:
         return [self._repo_row(item) for item in items if isinstance(item, dict)]
 
     async def list_user_repos(self, username: str, *, per_page: int = 100) -> list[dict]:
-        """列出用户名下仓(D6 list_user_repos):入口瀑布第 2 步(绑定时匹配 P)。
+        """列出用户名下仓:入口瀑布第 2 步(绑定时按关键词匹配)。
 
-        type=owner 只看名下仓(fork 的 parent 不混入;D2:绑定账号下的其他
+        type=owner 只看名下仓(fork 的 parent 不混入;绑定账号下的其他
         仓不看,但 fork 仓本身仍是候选本人的深挖对象)。"""
         data = await self._get_json(
             f"/users/{username}/repos",
@@ -161,7 +161,7 @@ class GitHubClient:
     async def search_in_repo(
         self, owner: str, repo: str, query: str, *, per_page: int = 20
     ) -> list[dict]:
-        """仓内代码搜索(D6 search_in_repo);GitHub 要求带 token,匿名必 401。"""
+        """仓内代码搜索;GitHub 要求带 token,匿名必 401。"""
         data = await self._get_json(
             "/search/code",
             params={"q": f"{query} repo:{owner}/{repo}", "per_page": per_page},
@@ -186,7 +186,7 @@ class GitHubClient:
         author: str | None = None,
         per_page: int = 30,
     ) -> list[dict]:
-        """提交历史(D6 read_commits):author 可选过滤(D3 fork 判定/贡献核对)。
+        """提交历史:author 可选过滤(fork 判定/贡献核对)。
 
         含 sha(供 commit_detail 下钻单 commit diff)。空仓返回 []。"""
         params: dict = {"per_page": per_page}
@@ -213,9 +213,9 @@ class GitHubClient:
         max_patch_chars: int = _MAX_TEXT_CHARS,
         max_total_chars: int = 3 * _MAX_TEXT_CHARS,
     ) -> dict:
-        """单 commit 详情(D6 read_commits 的 diff 下钻):files + patch(截断)。
+        """单 commit 详情(read_commits 的 diff 下钻):files + patch(截断)。
 
-        per-file ≤8K(D7),总预算 24K(=3×单文件上限,保证单文件截断后仍能
+        per-file ≤8K,总预算 24K(=3×单文件上限,保证单文件截断后仍能
         展开);总预算按「装得下才装」贪心,破限文件只计数,结尾汇总留痕。"""
         data = await self._get_json(f"/repos/{owner}/{repo}/commits/{sha}")
         if not isinstance(data, dict):
@@ -255,7 +255,7 @@ class GitHubClient:
     async def search_issues(
         self, owner: str, repo: str, query: str, *, is_pr: bool = True, per_page: int = 20
     ) -> list[dict]:
-        """issue/PR 搜索(D6 search_issues):贡献声明核对(D4,is:pr 查贡献)。
+        """issue/PR 搜索:贡献声明核对(is:pr 查贡献)。
 
         query 拼进 repo: 限定;author:xxx 由调用方写进 query。"""
         kind = "is:pr" if is_pr else "is:issue"
@@ -282,7 +282,7 @@ class GitHubClient:
 
     @staticmethod
     def _repo_row(item: dict) -> dict:
-        """搜索/列表结果的仓投影:工具面只回决策所需字段(TOOL-05)。"""
+        """搜索/列表结果的仓投影:工具面只回决策所需字段。"""
         owner = item.get("owner") or {}
         return {
             "full_name": str(item.get("full_name", "")),
@@ -296,7 +296,7 @@ class GitHubClient:
             "html_url": str(item.get("html_url") or ""),
         }
 
-    # ── 既有 B3 面(#130,investigate v2 子图在用,#152 收口) ──
+    # ── 既有调查面(investigate 子图在用) ──────────────────────
 
     async def readme(self, owner: str, repo: str) -> str:
         """README 原文(raw);没有 README → 空串(值得度扣分项,不报错)。"""
