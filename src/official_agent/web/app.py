@@ -122,8 +122,10 @@ def create_app() -> FastAPI:
     )
 
     from official_agent.web import routes
+    from official_agent.web.kb_admin import router as kb_admin_router
 
     app.include_router(routes.router, prefix="/api/agent")
+    app.include_router(kb_admin_router, prefix="/api/agent")
 
     @app.get("/health")
     async def health() -> dict[str, str]:

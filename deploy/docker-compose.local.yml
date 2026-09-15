@@ -14,11 +14,15 @@ name: official-agent-local
 
 services:
   # ── Agent 自有 PG(ADR-0007:checkpointer/审计/conversation_log 唯一存储)──
+  # RAG #134:kb_chunks 向量列依赖 pgvector 扩展,镜像换 pgvector(基于 postgres:17,
+  # 数据卷兼容);5433 供宿主机联调/集成测试直连(5432 让给既有实例)
   agent-pg:
-    image: postgres:17
+    image: pgvector/pgvector:pg17
     environment:
       POSTGRES_PASSWORD: agent_dev
       POSTGRES_DB: official_agent
+    ports:
+      - "127.0.0.1:5433:5432"
     volumes:
       - agent_pg_data:/var/lib/postgresql/data
     healthcheck:

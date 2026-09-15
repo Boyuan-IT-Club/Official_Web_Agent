@@ -22,7 +22,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
 from official_agent.web.app import create_app
@@ -758,3 +758,123 @@ def test_guard_rewrite_persists_to_checkpointer(
     assert len(seen_messages) == 2
     assert isinstance(seen_messages[0], RemoveMessage) and seen_messages[0].id == "ai-1"
     assert "没有可用的数据查询权限" in seen_messages[1].content
+
+
+# ── RAG #134 R4:delta.sources 引用映射(契约 #90 扩展) ──────────────────
+
+
+class _KbAgent:
+    """假 agent:调 search_knowledge(两个来源)后给带 [n] 的回复。"""
+
+    async def astream(self, *args, config: RunnableConfig, **kwargs):
+        yield "messages", (AIMessageChunk(content="据知识库[1]"), {})
+        yield "updates", {
+            "tools": {
+                "messages": [
+                    ToolMessage(
+                        content=json.dumps(
+                            {
+                                "status": "ok",
+                                "results": [
+                                    {"source_id": "kb_a", "title": "技术部介绍"},
+                                    {"source_id": "kb_b", "title": "招新流程"},
+                                ],
+                            }
+                        ),
+                        name="search_knowledge",
+                        tool_call_id="call_1",
+                    )
+                ]
+            }
+        }
+        yield "messages", (AIMessageChunk(content=",流程见[2]。"), {})
+
+
+def test_chat_emits_sources_on_final_delta(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """轮内有 search_knowledge → done 前一条 delta 带 sources(内容为空)。"""
+    from official_agent.web import routes
+
+    _install_fakes(monkeypatch, auth_ok_data())
+    monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: _KbAgent())
+    resp = client.post(
+        "/api/agent/chat",
+        headers={"Authorization": "Bearer tok"},
+        json={"message": "技术部做什么?"},
+    )
+    assert resp.status_code == 200
+    events = _sse_events(resp)
+    with_sources = [e for e in events if e.get("sources")]
+    assert len(with_sources) == 1
+    src_event = with_sources[0]
+    assert src_event["type"] == "delta"  # 不改消息 type 枚举(#90)
+    assert src_event["content"] == ""  # 空内容,旧消费者无感
+    assert src_event["sources"] == [
+        {"source_id": "kb_a", "title": "技术部介绍"},
+        {"source_id": "kb_b", "title": "招新流程"},
+    ]  # 保序:正文 [1]/[2] 对应此列表下标+1
+
+
+def test_chat_without_kb_tool_has_no_sources_field(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归:未用知识库 → 任何事件都不带 sources 键(旧消费者完全兼容)。"""
+    _install_fakes(monkeypatch, auth_ok_data())
+    resp = client.post(
+        "/api/agent/chat",
+        headers={"Authorization": "Bearer tok"},
+        json={"message": "hi"},
+    )
+    events = _sse_events(resp)
+    assert any(e["type"] == "done" for e in events)  # 正常收尾
+    assert all("sources" not in e for e in events)  # 旧消费者完全兼容
+
+
+def test_collect_sources_dedupes_and_tolerates_bad_payload() -> None:
+    """多轮 search_knowledge 去重保序;坏 JSON 只丢引用不抛。"""
+    from official_agent.web.routes import _collect_sources
+
+    sources: list = []
+    seen: set = set()
+    _collect_sources(
+        ToolMessage(
+            content=json.dumps(
+                {
+                    "status": "ok",
+                    "results": [{"source_id": "kb_a", "title": "A"}],
+                }
+            ),
+            name="search_knowledge",
+            tool_call_id="c1",
+        ),
+        sources,
+        seen,
+    )
+    _collect_sources(
+        ToolMessage(
+            content=json.dumps(
+                {
+                    "status": "ok",
+                    "results": [
+                        {"source_id": "kb_a", "title": "A"},  # 重复 → 跳过
+                        {"source_id": "kb_c", "title": "C"},
+                    ],
+                }
+            ),
+            name="search_knowledge",
+            tool_call_id="c2",
+        ),
+        sources,
+        seen,
+    )
+    assert sources == [
+        {"source_id": "kb_a", "title": "A"},
+        {"source_id": "kb_c", "title": "C"},
+    ]
+    _collect_sources(
+        ToolMessage(content="not-json{", name="search_knowledge", tool_call_id="c3"),
+        sources,
+        seen,
+    )
+    assert len(sources) == 2  # 坏载荷不影响已收集引用
