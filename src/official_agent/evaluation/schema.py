@@ -110,10 +110,10 @@ CATEGORY = Literal[
 
 ATTRIBUTION_LEVEL = Literal["trusted-own", "trusted-contribution", "claimed", "unverified", "none"]
 
-#: 题组容量上限。链数按简历深挖的上界取(技术栈最多 6 个名词,每个名词
-#: 一条技术链);备选数是技术栈独立广度题的容器。硬顶仍是 15 题,见
-#: validate_qbank_v2_group——放宽容量不等于鼓励堆题。
-MAX_CHAINS = 6
+#: 题组容量上限。链数取**可达上界**:总量硬顶 15 题、入口占 1、每链至少 3 层,
+#: 故 4×3+1=13 可达、5×3+1=16 已超顶——放到 6 只会让模型照做出题再稳定撞硬顶。
+#: 备选按技术栈广度题的容器取 6。放宽容量不等于鼓励堆题。
+MAX_CHAINS = 4
 MAX_RESERVES = 6
 
 

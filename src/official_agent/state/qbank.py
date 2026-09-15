@@ -257,6 +257,7 @@ def flatten_v2_pickable(
                             layer_index=li,
                             question=layer.get("question", ""),
                             expected_signal=layer.get("expected_signal", ""),
+                            answer_reference=layer.get("answer_reference"),
                             theme=chain.get("theme", ""),
                         )
                     )

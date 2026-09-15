@@ -30,29 +30,32 @@ from official_agent.evaluation.github_client import GitHubClient, GitHubUnavaila
 from official_agent.evaluation.graph import _extract_json
 from official_agent.evaluation.investigate import extract_repo, route_project
 from official_agent.evaluation.schema import (
+    MAX_CHAINS,
     ExploreMeta,
     QbankV2,
     QuestionGroupV2,
     UsageMeta,
 )
-from official_agent.evaluation.tech_stack import extract_tech_stack
+from official_agent.evaluation.tech_stack import _normalize, extract_tech_stack
 from official_agent.graphs.assistant import build_model
 from official_agent.prompt_loader import load_prompt, load_prompt_meta
 
 #: 简历深挖的出题 prompt(与仓深挖的 grilling 分开:材料性质、出题主线都不同)
 CV_PROMPT_FILE = "evaluation/cv_dive.md"
-#: 技术栈材料块的表头:告诉模型这是防编造的可用名词清单
-TECH_STACK_HEADER = (
-    "技术栈清单(已从简历原文校验出处;**链的 theme 必须用这里的原样写法**,"
-    "不得编造清单外的技术):\n"
-)
+#: 技术栈清单在材料里的数据表头(规则文本在 cv_dive.md 里,ADR-0004)
+TECH_STACK_HEADER = "技术栈清单:\n"
 
 PROMPT_FILE = "evaluation/grilling.md"
 SCORING_TEMPERATURE = 0.2
 
 
-def _prompt_version() -> str:
-    return load_prompt_meta(PROMPT_FILE).get("version", "unknown")
+def _prompt_version(prompt_file: str = PROMPT_FILE) -> str:
+    """信封落盘的 prompt 版本锚(ADR-0004)。
+
+    必须与**本次实际使用**的 prompt 一致:两条路径各有一套 prompt,写错版本
+    会让改 prompt 后的评测归因与重跑比对照错对象。
+    """
+    return load_prompt_meta(prompt_file).get("version", "unknown")
 
 
 class InvestigationState(TypedDict, total=False):
@@ -309,71 +312,70 @@ async def generate_node(state: InvestigationState) -> dict:
         thin = (not cv) and len(dossier_text.strip()) < 400
         settings = get_effective_settings()
         model = build_model(settings, temperature=SCORING_TEMPERATURE)
-        # ADR-0004:代码零 prompt 字符串——体量标记是数据,规则文本全在
-        # prompts/evaluation/ 下的出题 prompt。简历路径与仓路径是两套 prompt
-        # (材料性质与出题主线都不同),故按路径选文件。
+        # ADR-0004:prompt 放文件,代码只拼**数据**(材料与标记);两条路径的
+        # 规则文本各在自己的文件里,故按路径选文件。
         prompt_file = CV_PROMPT_FILE if cv else PROMPT_FILE
         material_note = f"材料体量={'贫乏' if thin else '充足'}。"
+        # 简历路径在档案之外**追加**技术栈清单(供逐技术出题);档案本身必须
+        # 保留——简历的项目栏、自我介绍、实习经历都在里面,项目深挖链靠它取材。
+        material = "dossier 材料:\n" + dossier_text
+        if cv:
+            material += "\n\n" + TECH_STACK_HEADER + _render_tech(state)
         prompt_text = (
             load_prompt(prompt_file)
             + "\n\n---\n\n候选人自述:\n"
             + state["project_text"]
             + "\n\n"
-            + (TECH_STACK_HEADER + _render_tech(state) if cv else "dossier 材料:\n" + dossier_text)
+            + material
             + "\n\n"
             + material_note
         )
-        resp = await model.ainvoke([HumanMessage(content=prompt_text)])
-        # 出题段单次 usage:raw token_usage 优先(DeepSeek cache 字段)
+
+        # 结构化输出的形状由 strict schema 兜住,但**语义**后置校验(链层数、
+        # 三档答案齐备、主题出自材料、题量硬顶)会偶发不过。这些错误对模型是
+        # 可自纠的,直接进 error 态会让整份简历一道题都拿不到 —— 故照评分轨
+        # 的先例,把校验错误回灌、子图内重试一次,两次仍不合规才翻 error。
         from official_agent.state.conversation import extract_usage
 
-        gen_usage = extract_usage(
-            (getattr(resp, "response_metadata", None) or {}).get("token_usage")
-            or getattr(resp, "usage_metadata", None)
-        )
-        raw = resp.content
-        if isinstance(raw, list):
-            raw = "".join(b.get("text", "") for b in raw if isinstance(b, dict))
-        content = raw if isinstance(raw, str) else str(raw)
-        group_payload: dict[str, Any] = json.loads(_extract_json(content))
-        repo_summary = str(group_payload.get("repo_summary", ""))
-
-        deep = bool(deep)
-        if deep or cv:
-            # 简历路径与仓路径共用同一台校验机器;区别只在 no_repo:简历没有仓,
-            # 题面若带仓内路径,那必然是模型的臆造,一律拒。
-            group = validate_qbank_v2_group(
-                group_payload,
-                dossier_text,
-                paths=list(state.get("paths", [])),
-                thin=thin,
-                no_repo=cv,
+        gen_usage: dict[str, Any] = {}
+        group = None
+        corrective = ""
+        last_err: Exception | None = None
+        for _attempt in range(2):
+            resp = await model.ainvoke([HumanMessage(content=prompt_text + corrective)])
+            gen_usage = extract_usage(
+                (getattr(resp, "response_metadata", None) or {}).get("token_usage")
+                or getattr(resp, "usage_metadata", None)
             )
-        else:
-            # guided:entry 引导题,chains 空;黑名单与「不带仓路径」不变量仍适用
-            guided_view = {
-                "entry": group_payload.get("entry"),
-                "chains": [],
-                "reserves": group_payload.get("reserves", []),
-            }
-            _validate_group_v2(guided_view, dossier_text, [])
-            guided_payload: dict[str, Any] = {
-                "entry": group_payload.get("entry")
-                or {
-                    "category": "C1_背景与动机",
-                    "question": "请讲讲这个项目:你负责哪部分?最大的收获是什么?",
-                    "answer_reference": {
-                        "strong": "讲清职责与收获",
-                        "acceptable": "讲清职责",
-                        "weak": "含糊其辞",
-                    },
-                    "evidence": {"path": "", "note": "仓不可读,通用引导"},
-                    "time_minutes": 3,
-                },
-                "chains": [],
-                "reserves": [],
-            }
-            group = QuestionGroupV2.model_validate(guided_payload)
+            raw = resp.content
+            if isinstance(raw, list):
+                raw = "".join(b.get("text", "") for b in raw if isinstance(b, dict))
+            content = raw if isinstance(raw, str) else str(raw)
+            try:
+                group_payload: dict[str, Any] = json.loads(_extract_json(content))
+                repo_summary = str(group_payload.get("repo_summary", ""))
+                deep = bool(deep)
+                if deep or cv:
+                    # 两条路径共用同一台校验机器;区别只在 no_repo:简历没有仓,
+                    # 题面若带仓内路径,那必然是模型的臆造。
+                    group = validate_qbank_v2_group(
+                        group_payload,
+                        dossier_text,
+                        paths=list(state.get("paths", [])),
+                        thin=thin,
+                        no_repo=cv,
+                    )
+                else:
+                    group = _guided_group(group_payload, dossier_text)
+                break
+            except Exception as exc:  # noqa: BLE001 — 回灌错误让模型自纠
+                last_err = exc
+                corrective = (
+                    "\n\n---\n\n上次输出不合规,错误信息如下,请据此修正后"
+                    f"**重新输出完整 JSON**(不要解释、不要只给差异):\n{exc}"
+                )
+        if group is None:
+            raise ValueError(f"出题两次仍不合规:{last_err}")
 
         envelope = QbankV2(
             repo_summary=repo_summary,
@@ -392,7 +394,7 @@ async def generate_node(state: InvestigationState) -> dict:
                 if any(v is not None for v in gen_usage.values())
                 else None
             ),
-            prompt_version=_prompt_version(),
+            prompt_version=_prompt_version(prompt_file),
         )
         return {"question_set": envelope.model_dump(), "error": None}
     except Exception as exc:  # noqa: BLE001 — 失败进 error 态,可由调用方重试
@@ -447,20 +449,17 @@ def _validate_group_v2(
             q = str(layer.get("question", ""))
             _check_question(q)
             texts.append(q)
-        # 链源真实性:链文本的拉丁词元至少一个出现在 dossier。
-        # 忽略表只剔我们自己的拴架词与英文停用词(见其常量注释)。
-        # theme 是链声明的来源,单独做主判定:若它只剩忽略词、又没有中文内容,
-        # 那就是拿材料标签拼的空壳,不是一条有来源的链。
-        # 纯中文主题无法与 dossier 做词元比对(诚实边界,由出题 prompt 铁律约束)。
+        # 链源真实性(仓深挖):链文本的拉丁词元至少一个出现在 dossier。
+        # 简历路径不走这条:那类 theme 是**技术名词**,像 `C++` 这种带符号的
+        # 名字根本过不了词元正则(会被误判成编造);简历侧的等价保证由链主题
+        # 与材料逐字比对承担(见 validate_qbank_v2_group 的 no_repo 分支)。
+        if no_repo:
+            continue
         joined = " ".join(texts)
         raw_tokens = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", joined)
         tokens = [t.lower() for t in raw_tokens if t.lower() not in _CHAIN_SOURCE_IGNORES]
-        theme_tokens = [
-            t.lower()
-            for t in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", theme)
-            if t.lower() not in _CHAIN_SOURCE_IGNORES
-        ]
         theme_raw = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", theme)
+        theme_tokens = [t.lower() for t in theme_raw if t.lower() not in _CHAIN_SOURCE_IGNORES]
         if theme_raw and not theme_tokens and not _has_cjk(theme):
             raise ValueError(f"链主题只有停用词,无可核对来源:theme={theme[:40]!r}")
         if tokens and not any(t in dossier_lowers for t in tokens):
@@ -488,7 +487,8 @@ def validate_qbank_v2_group(
     - 对抗前提黑名单/路径白名单/链源真实性(_validate_group_v2);
     - 结构:入口 1 + 链 2-6×3-5 层 + 总量硬顶 15 + 敷衍 dossier ≤3;
     - 简历路径(no_repo)额外两条:
-      ① 链主题必须能在材料里找到(防编造技术/项目名);
+      ① 题面引用的技术/项目名必须能在材料里找到(防编造)——链主题、入口题、
+         备选题都要查:没开链的技术题正是落在 reserves 上,只查链会漏掉那一半;
       ② 链的每一层都要有三档参考答案(面试官不熟悉该技术,没有答案可依)。
     """
     _validate_group_v2(group_payload, dossier_text, paths, no_repo=no_repo)
@@ -504,13 +504,14 @@ def validate_qbank_v2_group(
     if not group.entry.evidence.path and not group.entry.evidence.note:
         raise ValueError("题空路径须有 evidence.note")
     if len(group.chains) < 2:
-        raise ValueError(f"追问链不足:要求 2-6,模型给 {len(group.chains)}")
-    material = _normalize_text(dossier_text)
+        raise ValueError(f"追问链不足:要求 2-{MAX_CHAINS},模型给 {len(group.chains)}")
+    material = _normalize(dossier_text)
     for chain in group.chains:
         if not 3 <= len(chain.layers) <= 5:
             raise ValueError(f"链层数越界({chain.theme[:16]!r}):{len(chain.layers)}")
         if no_repo:
-            if _normalize_text(chain.theme) not in material:
+            # 链的 theme 是这条链「问的是哪项技术/哪个项目」的声明,必须出自简历。
+            if _normalize(chain.theme) not in material:
                 raise ValueError(f"链主题不在简历材料里(疑似编造):{chain.theme[:30]!r}")
             missing = [
                 i + 1 for i, layer in enumerate(chain.layers) if layer.answer_reference is None
@@ -520,9 +521,32 @@ def validate_qbank_v2_group(
     return group
 
 
-def _normalize_text(text: str) -> str:
-    """材料比对归一:忽略大小写与空白(与证据闸门同口径)。"""
-    return "".join((text or "").split()).casefold()
+def _guided_group(group_payload: dict[str, Any], dossier_text: str) -> QuestionGroupV2:
+    """guided:入口引导题,链与备选留空;黑名单与「不带仓路径」仍适用。"""
+    guided_view = {
+        "entry": group_payload.get("entry"),
+        "chains": [],
+        "reserves": group_payload.get("reserves", []),
+    }
+    _validate_group_v2(guided_view, dossier_text, [])
+    return QuestionGroupV2.model_validate(
+        {
+            "entry": group_payload.get("entry")
+            or {
+                "category": "C1_背景与动机",
+                "question": "请讲讲这个项目:你负责哪部分?最大的收获是什么?",
+                "answer_reference": {
+                    "strong": "讲清职责与收获",
+                    "acceptable": "讲清职责",
+                    "weak": "含糊其辞",
+                },
+                "evidence": {"path": "", "note": "材料不可读,通用引导"},
+                "time_minutes": 3,
+            },
+            "chains": [],
+            "reserves": [],
+        }
+    )
 
 
 def _attribution_level(level: Any) -> Any:

@@ -579,7 +579,7 @@ def test_chain_source_rejects_all_stopword_shell() -> None:
 
     payload = _cv_payload_with(["the and for with layer dossier"] * 2)
     with pytest.raises(ValueError, match="无可核对来源"):
-        _validate_group_v2(payload, "档案:报名页重构,用了 flask", [], no_repo=True)
+        _validate_group_v2(payload, "dossier: 报名页重构,用了 flask", [])
 
 
 def test_chain_source_rejects_plausible_english_fabrication() -> None:
@@ -588,7 +588,7 @@ def test_chain_source_rejects_plausible_english_fabrication() -> None:
 
     payload = _cv_payload_with(["resume candidate layer"] * 2)
     with pytest.raises(ValueError, match="链源不在 dossier"):
-        _validate_group_v2(payload, "档案:报名页重构,用了 flask", [], no_repo=True)
+        _validate_group_v2(payload, "dossier: 报名页重构,用了 flask", [])
 
 
 def test_chain_source_allows_chinese_theme_with_scaffolding_prefix() -> None:
@@ -598,7 +598,7 @@ def test_chain_source_allows_chinese_theme_with_scaffolding_prefix() -> None:
     payload = _cv_payload_with(
         ["源自 dossier C4 项目经验栏的报名页重构", "源自 dossier 的项目数据流"]
     )
-    _validate_group_v2(payload, "档案:报名页重构,用了 flask", [], no_repo=True)
+    _validate_group_v2(payload, "dossier: 报名页重构,用了 flask", [])
 
 
 def test_chain_source_still_rejects_fabricated_component() -> None:
@@ -608,7 +608,7 @@ def test_chain_source_still_rejects_fabricated_component() -> None:
     payload = json.loads(_v2_payload())
     payload["chains"][0]["theme"] = "kafka 消息队列的削峰设计"
     with pytest.raises(ValueError, match="链源不在 dossier"):
-        _validate_group_v2(payload, "档案:报名页重构,用了 flask", [], no_repo=True)
+        _validate_group_v2(payload, "dossier: 报名页重构,用了 flask", [])
 
 def test_reserve_path_whitelist_enforced() -> None:
     """备选题 evidence.path 白名单同样校验(曾只查 entry)。"""
@@ -888,13 +888,13 @@ async def test_strong_claim_techs_get_chains_weak_ones_do_not(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_all_techs_as_chains_over_budget_rejected(monkeypatch) -> None:
-    """每个技术都开 3 层链会撞总量硬顶 15 —— 超了就该被拒,不是硬塞。"""
+async def test_all_techs_as_chains_over_capacity_rejected(monkeypatch) -> None:
+    """每个技术都开链会超容量 —— 拒绝而不是硬塞(容量与题量硬顶双重把关)。"""
     names = ["Python", "PyTorch", "ResNet", "CNN", "YOLO"]
     resume = f"技术栈:\n{'、'.join(names)}\n项目经验:\n用 PyTorch 做了检测"
     tech = [{"name": n, "raw_text": f"技术栈:{'、'.join(names)}"} for n in names]
     _install_fake_cv_model(monkeypatch, _multi_tech_payload(names), tech=tech)
-    with pytest.raises(RuntimeError, match="题量超硬顶"):
+    with pytest.raises(RuntimeError, match="at most 4 items"):
         await ig.run_investigation("用 PyTorch 做了检测", resume_text=resume)
 
 
@@ -908,11 +908,94 @@ async def test_tech_chain_layers_carry_three_tier_answers(monkeypatch) -> None:
             ref = layer["answer_reference"]
             assert set(ref) == {"strong", "acceptable", "weak"}
 
-def test_fabricated_tech_theme_rejected() -> None:
-    """引用了简历中不存在的技术 → 拒绝(AC:防编造)。
 
-    两道防线都会拦下它:链源真实性(不在材料里)与主题比对(疑似编造)。
-    这里断言「被拒」这一外部行为,不锁死是哪一道先触发。
+@pytest.mark.asyncio
+async def test_cv_prompt_version_reflects_cv_prompt(monkeypatch) -> None:
+    """信封的 prompt_version 必须是本次实际用过的 prompt 版本(ADR-0004)。
+
+    两条路径各有 prompt;写错版本会让改 prompt 后的评测归因比错对象。
+    """
+    _install_fake_cv_model(monkeypatch, _cv_payload())
+    qs = await ig.run_investigation(_CV_RESUME)
+    assert qs["prompt_version"] == ig._prompt_version(ig.CV_PROMPT_FILE)
+    assert "cv_dive" in qs["prompt_version"]
+
+
+@pytest.mark.asyncio
+async def test_cv_material_keeps_resume_dossier(monkeypatch) -> None:
+    """技术栈清单是**追加**到档案上的,不能把简历材料挤掉。
+
+    项目深挖链靠档案里的项目栏/自我介绍/实习经历取材;替换掉档案等于让
+    这类链失去素材来源,而校验与计量还在照常算,属静默丢失。
+    """
+    seen: list[str] = []
+
+    class _Msg:
+        content = _cv_payload()
+
+    class _M:
+        async def ainvoke(self, messages):
+            seen.append(str(messages[0].content))
+            return _Msg()
+
+    class _S:
+        model_strong = "test-strong"
+
+    tech = [{"name": "PyTorch", "raw_text": "技术栈:PyTorch"}]
+    _install_fake_cv_model(monkeypatch, _cv_payload(), tech=tech)
+    monkeypatch.setattr(ig, "build_model", lambda *a, **k: _M())
+    await ig.run_investigation(_CV_RESUME)
+    sent = seen[0]
+    assert "技术栈清单" in sent  # 技术清单在
+    assert "dossier 材料" in sent  # 档案也在(没被挤掉)
+    assert "工业钢材缺陷检测" in sent  # 档案里确实是简历原文
+
+
+@pytest.mark.asyncio
+async def test_generate_retries_once_on_validation_error(monkeypatch) -> None:
+    """校验不过时把错误回灌让模型自纠 —— 一次失手不该让整份简历无题。
+
+    首次故意给 5 条链(超容量),第二次给合规输出;应产出合规题组而非报错。
+    """
+    bad = _multi_tech_payload([f"T{i}" for i in range(5)])
+    resumes = f"技术栈:\n{'、'.join(f'T{i}' for i in range(5))}"
+    tech = [{"name": f"T{i}", "raw_text": resumes} for i in range(5)]
+    calls: list[str] = []
+
+    class _Msg:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    class _M:
+        async def ainvoke(self, messages):
+            calls.append(str(messages[0].content))
+            return _Msg(bad if len(calls) == 1 else _multi_tech_payload(["T0", "T1"]))
+
+    class _S:
+        model_strong = "test-strong"
+
+    async def _fake_extract(text):
+        from official_agent.evaluation.tech_stack import TechStackItem
+
+        return [
+            TechStackItem(name=t["name"], raw_text=t["raw_text"], claimed_level="listed")
+            for t in tech
+        ]
+
+    monkeypatch.setattr(ig, "extract_tech_stack", _fake_extract)
+    monkeypatch.setattr(ig, "build_model", lambda *a, **k: _M())
+    monkeypatch.setattr(ig, "get_effective_settings", _S)
+    qs = await ig.run_investigation(resumes, resume_text=resumes)
+    assert len(calls) == 2  # 重试了一次
+    assert "不合规" in calls[1]  # 错误被回灌
+    assert len(qs["group"]["chains"]) == 2
+
+
+def test_fabricated_tech_theme_rejected() -> None:
+    """链声明问的是简历里没有的技术 → 拒绝(防编造的主要落点)。
+
+    链的 theme 是「这条链问哪项技术/哪个项目」的**声明**,可以拿简历原文
+    逐字核对,所以这里必须卡死。
     """
     from official_agent.evaluation.investigate_graph import validate_qbank_v2_group
 
@@ -922,8 +1005,33 @@ def test_fabricated_tech_theme_rejected() -> None:
         validate_qbank_v2_group(payload, "技术栈:Python、PyTorch", paths=[], no_repo=True)
 
 
+def test_question_text_may_use_terms_absent_from_resume() -> None:
+    """题面**正文**不按词元核对 —— 这是有意的边界,不是遗漏。
+
+    候选人写「卷积神经网络」,面试官题面写「CNN」;候选人写「Git」,题面问
+    「commit 粒度」——这些都是正当表述。按词元硬卡会把真实简历判成编造
+    (实测会把 5/5 全部拦死),所以正文只受对抗前提黑名单约束,技术真实性
+    由链 theme 与抽取器的原文闸门保证。
+    """
+    from official_agent.evaluation.investigate_graph import validate_qbank_v2_group
+
+    payload = json.loads(_multi_tech_payload(["Python", "PyTorch"]))
+    payload["entry"]["question"] = "CNN 和全连接的区别是什么?"
+    payload["entry"]["evidence"]["path"] = ""
+    payload["reserves"] = [
+        {
+            "category": "C8_真实性与贡献边界",
+            "question": "你 commit 的粒度是怎么把握的?",
+            "answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},
+            "evidence": {"path": "", "note": "n"},
+            "time_minutes": 3,
+        }
+    ]
+    validate_qbank_v2_group(payload, "技术栈:Python、PyTorch", paths=[], no_repo=True)
+
+
 def test_chain_layer_count_out_of_range_rejected() -> None:
-    """链层数越界 → 拒绝(AC:链层数越界被拒)。
+    """链层数越界 → 拒绝。
 
     两层先被 schema 的最小长度拦下(3-5);这里断言「被拒」而非具体措辞。
     """
@@ -937,7 +1045,7 @@ def test_chain_layer_count_out_of_range_rejected() -> None:
 
 
 def test_more_than_six_chains_rejected() -> None:
-    """技术名词上限 5-6:第七个被信封容量挡住(AC:受上限约束)。"""
+    """技术名词有上限:超出信封容量的链被拒。"""
     from official_agent.evaluation.schema import QuestionGroupV2
 
     payload = json.loads(_multi_tech_payload([f"T{i}" for i in range(7)]))
