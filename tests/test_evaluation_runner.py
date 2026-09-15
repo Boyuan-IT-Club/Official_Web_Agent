@@ -104,7 +104,7 @@ async def test_run_job_success_marks_succeeded(monkeypatch) -> None:
     seen: dict = {}
 
     async def _fetch(user_id, cycle_id):
-        return 99, _fields()
+        return 99, _fields(), ""
 
     async def _run_evaluation(fields, *, resume_id, cycle_id, weights=None, **_kw):
         seen["resume_id"] = resume_id
@@ -369,7 +369,7 @@ async def test_eval_usage_log_written_per_job(monkeypatch) -> None:
     seen: dict = {}
 
     async def _fetch(user_id, cycle_id):
-        return 99, _fields()
+        return 99, _fields(), ""
 
     async def _run_evaluation(fields, *, resume_id, cycle_id, weights=None, **_kw):
         return {"total": 66.0, "hard_zero": False, "dimensions": [], "attitude": {}}
@@ -448,7 +448,7 @@ async def test_run_job_masks_pii_before_models(monkeypatch, caplog) -> None:
                 title="自我介绍",
                 value="电话 13812345678,邮箱 me@x.com,QQ 123456789,学号 2021023456",
             ),
-        ]
+        ], ""
 
     def _values(fields):
         # run_evaluation 收 dict 投影,run_bundle 收 FieldText
@@ -523,7 +523,7 @@ async def test_run_job_sets_correlation_trace_and_structured_logs(caplog) -> Non
         return "someuser"
 
     async def _fetch(user_id, cycle_id):
-        return 99, _fields()
+        return 99, _fields(), ""
 
     async def _run_evaluation(fields, *, resume_id, cycle_id, weights=None, **_kw):
         seen["trace_during_eval"] = current_trace_id()
@@ -631,3 +631,69 @@ async def test_set_resume_status_hits_backend_route() -> None:
 
     assert put_route.called, "状态位未打后端真实路由(URL 形状回归)"
     assert put_route.calls.last.request.url.path == "/api/resumes/9005/status/6"
+
+
+# ── 年级元信息取数(只调出题深度,不进评分)────────────
+
+
+def test_extract_grade_finds_key_then_label() -> None:
+    """年级取值:先认键名,键名不认时回退 label。
+
+    周期配置里键名不稳定(而且 label 可以被改),两路都试;两路都没有就返回
+    空串,由出题侧走安全默认 —— 取不到年级不该让 job 失败。
+    """
+    by_key = [
+        {"fieldKey": "name", "fieldLabel": "姓名", "fieldType": "text", "fieldValue": "张三"},
+        {"fieldKey": "grade", "fieldLabel": "年级", "fieldType": "select", "fieldValue": "大一"},
+    ]
+    assert ev_runner._extract_grade(by_key) == "大一"
+
+    by_label = [
+        {"fieldKey": "custom_3", "fieldLabel": "大几", "fieldType": "select", "fieldValue": "大二"},
+    ]
+    assert ev_runner._extract_grade(by_label) == "大二"
+
+    assert ev_runner._extract_grade([]) == ""
+    assert ev_runner._extract_grade(
+        [{"fieldKey": "grade", "fieldLabel": "年级", "fieldValue": "  "}]
+    ) == ""
+
+
+def test_grade_is_not_part_of_scoring_fields() -> None:
+    """年级**不进评分字段面** —— 它是元信息,只调出题深度。
+
+    这是硬约束:把 grade 混进 fields 会同时改掉评分输入,
+    而那正是票面禁止的。所以它走独立返回值,不进列表。
+    """
+    # 直接验取数面的过滤条件:只有 textarea 进 fields
+    simple = [
+        {"fieldKey": "grade", "fieldLabel": "年级", "fieldType": "select", "fieldValue": "大一"},
+        {"fieldKey": "intro", "fieldLabel": "自我介绍", "fieldType": "textarea", "fieldValue": "X"},
+    ]
+    from official_agent.evaluation.scoring import FieldText as _FT
+
+    fields = [
+        _FT(
+            field_key=str(f.get("fieldKey") or ""),
+            title=str(f.get("fieldLabel") or ""),
+            value=str(f.get("fieldValue") or ""),
+            placeholder="",
+        )
+        for f in simple
+        if f.get("fieldType") == "textarea"
+    ]
+    assert [f.field_key for f in fields] == ["intro"]
+    # 年级仍取得到,只是不在评分面里
+    assert ev_runner._extract_grade(simple) == "大一"
+
+
+def test_extract_grade_ignores_non_grade_fields() -> None:
+    """只有年级栏的值会被取出 —— 其余字段(哪怕 text 型)不得被误当年级。
+
+    年级是**元信息**,取错字段会静默按错的档位出题。
+    """
+    simple = [
+        {"fieldKey": "name", "fieldLabel": "姓名", "fieldType": "text", "fieldValue": "大一"},
+        {"fieldKey": "major", "fieldLabel": "专业", "fieldType": "text", "fieldValue": "软件工程"},
+    ]
+    assert ev_runner._extract_grade(simple) == ""

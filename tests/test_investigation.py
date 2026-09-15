@@ -1114,3 +1114,116 @@ def test_deep_dive_chain_layer_still_optional_answer_reference() -> None:
         "README.md src/app.py tests/test_app.py",
         paths=["src/app.py", "README.md", "tests/test_app.py"],
     )
+
+
+# ── 年级分档:按年级调出题深度 ─────────────────────────
+
+
+def test_grade_band_maps_freshman_and_defaults_standard() -> None:
+    """年级 → 深度档:大一单独一档,其余(含缺失)一律标准档。
+
+    缺失必须有安全默认:分档拿不到年级时不能报错,也不能更严;标准档正是
+    引入档位之前的既有行为,故不涉及年级的调用方行为不变。
+    """
+    assert inv.grade_band("大一") == "freshman"
+    assert inv.grade_band("  大一 ") == "freshman"
+    assert inv.grade_band("大二") == "standard"
+    assert inv.grade_band("大三") == "standard"
+    assert inv.grade_band("") == "standard"  # 缺字段
+    assert inv.grade_band("研究生") == "standard"  # 认不出 → 标准,不是更严
+
+
+def test_freshman_short_chain_accepted_standard_rejected() -> None:
+    """同一条两层链:大一档收,标准档拒。
+
+    层数下界是**深度策略**而非形状,故必须先过 schema(下界 1)再由语义校验
+    按档判——否则大一短链会在模型层就被钉死,分档根本走不到。
+    """
+    payload = json.loads(_multi_tech_payload(["Python", "PyTorch"]))
+    for chain in payload["chains"]:
+        chain["layers"] = chain["layers"][:2]
+    payload["entry"]["evidence"]["path"] = ""
+    dossier = "技术栈:Python、PyTorch"
+
+    group = ig.validate_qbank_v2_group(
+        payload, dossier, paths=[], no_repo=True, grade_band="freshman"
+    )
+    assert all(len(c.layers) == 2 for c in group.chains)
+
+    with pytest.raises(ValueError, match="链层数越界"):
+        ig.validate_qbank_v2_group(
+            payload, dossier, paths=[], no_repo=True, grade_band="standard"
+        )
+
+
+def test_freshman_band_rejects_five_layers() -> None:
+    """大一档**上限也收紧**:5 层对大一就是问太深了。"""
+    payload = json.loads(_multi_tech_payload(["Python", "PyTorch"]))
+    for chain in payload["chains"]:
+        layer = chain["layers"][0]
+        chain["layers"] = [dict(layer) for _ in range(5)]
+    payload["entry"]["evidence"]["path"] = ""
+    with pytest.raises(ValueError, match="链层数越界"):
+        ig.validate_qbank_v2_group(
+            payload, "技术栈:Python、PyTorch", paths=[], no_repo=True, grade_band="freshman"
+        )
+
+
+def test_grade_band_default_keeps_standard_behavior() -> None:
+    """不传 grade_band 时等于标准档 —— 既有调用方(仓深挖/探针)行为不变。"""
+    payload = json.loads(_multi_tech_payload(["Python", "PyTorch"]))
+    payload["entry"]["evidence"]["path"] = ""
+    ig.validate_qbank_v2_group(payload, "技术栈:Python、PyTorch", paths=[], no_repo=True)
+
+
+def _cv_payload_with_layers(depth: int) -> str:
+    """按档位深浅生成题组:每个技术一条链,各 depth 层。"""
+    payload = json.loads(_multi_tech_payload(["Python", "PyTorch"]))
+    for chain in payload["chains"]:
+        chain["layers"] = [dict(chain["layers"][0]) for _ in range(depth)]
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_grade_band_reaches_material_but_grade_text_does_not(monkeypatch) -> None:
+    """档位进材料,**年级原文不进** —— 「年级」栏并不干净。
+
+    这一栏的语义是年级,但后端记录过线上把它填成姓名;把原文灌进 prompt
+    等于把一个未受信的字段当材料用。只给派生的档位标签。
+    """
+    seen: list[str] = []
+    payloads = {"大一": _cv_payload_with_layers(2), "大二": _cv_payload_with_layers(3)}
+    current = {"key": "大一"}
+
+    class _Msg:
+        response_metadata = {"token_usage": {}}
+
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    class _Model:
+        async def ainvoke(self, messages, *a, **k):
+            seen.append(messages[0].content)
+            return _Msg(payloads[current["key"]])
+
+    _install_fake_cv_model(monkeypatch, _cv_payload(), tech=[{"name": "Python"}])
+    # 必须在 _install_fake_cv_model 之后打桩:它会一并替换 build_model
+    monkeypatch.setattr(ig, "build_model", lambda *a, **k: _Model())
+
+    # 只认材料段的标记:prompt 正文本身也提到 «标准» 这个词,整串搜会误判
+    await ig.run_investigation(_CV_RESUME, grade="大一")
+    material = seen[-1].rsplit("技术栈清单:", 1)[-1]
+    assert "出题深度档:大一" in material
+    assert "出题深度档:标准" not in material
+
+    # 年级栏不干净:线上被填成姓名时,原文绝不能出现在材料里(只出档位标签)
+    seen.clear()
+    current["key"] = "大一"
+    await ig.run_investigation(_CV_RESUME, grade="大一 张三")
+    assert "张三" not in seen[-1]
+    assert "出题深度档:大一" in seen[-1]
+
+    seen.clear()
+    current["key"] = "大二"
+    await ig.run_investigation(_CV_RESUME, grade="大二")
+    assert "出题深度档:标准" in seen[-1].rsplit("技术栈清单:", 1)[-1]

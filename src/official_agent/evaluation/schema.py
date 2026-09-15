@@ -116,6 +116,11 @@ ATTRIBUTION_LEVEL = Literal["trusted-own", "trusted-contribution", "claimed", "u
 MAX_CHAINS = 4
 MAX_RESERVES = 6
 
+#: 链层数的**形状**上界。下界放到 1 而不是 3:层数下界是**出题深度策略**
+#: (随年级分档,大一短链),策略判定在语义校验里做——schema 只管形状。
+#: 放在这里写死等于把策略钉进模型层,分档就绕不过去。
+MAX_CHAIN_LAYERS = 5
+
 
 class ChainLayer(BaseModel):
     """追问链的一层:问题 + expected_signal(答到什么算过;层间依赖)。
@@ -145,7 +150,7 @@ class QuestionChain(BaseModel):
 
     category: CATEGORY
     theme: str = Field(min_length=1, description="链主题(仓路径:证据出处;简历路径:技术名词)")
-    layers: list[ChainLayer] = Field(min_length=3, max_length=5)
+    layers: list[ChainLayer] = Field(min_length=1, max_length=MAX_CHAIN_LAYERS)
 
 
 class EntryQuestion(BaseModel):

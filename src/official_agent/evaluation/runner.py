@@ -113,12 +113,41 @@ async def fetch_candidate_github(user_id: int) -> str:
         return ""
 
 
-async def fetch_scoring_fields(user_id: int, cycle_id: int) -> tuple[int, list[FieldText]]:
+#: 年级字段的识别:键名优先,回退到 label。周期配置里键名不稳定,且 label
+#: 可以被改(后端记录过「年级」那一格里存着姓名,label 不可尽信)——两路都试,
+#: 取不到就按「年级缺失」处理,由出题侧走安全默认。
+_GRADE_FIELD_KEYS = ("grade",)
+_GRADE_FIELD_LABELS = ("年级", "大几")
+
+
+def _extract_grade(simple_fields: list[dict]) -> str:
+    """从简历字段里取年级**原文**(元信息,不进评分)。
+
+    值可能是「大一」这类选项,也可能被误填成别的内容;这里只做搬运,
+    识别与分档交给 investigate.grade_band(纯函数、可单测)。
+    """
+    for f in simple_fields:
+        key = str(f.get("fieldKey") or "").strip().casefold()
+        label = str(f.get("fieldLabel") or "").strip()
+        if key in _GRADE_FIELD_KEYS or label in _GRADE_FIELD_LABELS:
+            value = str(f.get("fieldValue") or "").strip()
+            if value:
+                return value
+    return ""
+
+
+async def fetch_scoring_fields(
+    user_id: int, cycle_id: int
+) -> tuple[int, list[FieldText], str]:
     """服务账号取简历详情,映射为打分维度(textarea 型字段)。
 
     对应 GET /api/resumes/admin/{userId}/{cycleId}(resume:view 权限走
     服务账号,与评分线的 PII 纪律一致:脱敏由后端返回层+字段面决定,这里
-    只取 textarea 型主观题)。返回 (resume_id, fields)。
+    只取 textarea 型主观题)。返回 (resume_id, fields, grade)。
+
+    grade 是**元信息**:只影响出题深度,不进评分输入(评分仍只吃 textarea
+    字段面)。年级是 select 型,不在这份字段面里,故单列一个返回值带出去,
+    而不是混进 fields——混进去就同时改了评分输入。
     """
     client = await get_backend_client()
     data = await client.get(f"/api/resumes/admin/{user_id}/{cycle_id}")
@@ -126,6 +155,7 @@ async def fetch_scoring_fields(user_id: int, cycle_id: int) -> tuple[int, list[F
     if resume_id <= 0:
         # 缺 resumeId 静默落 0 会产生查不到的幽灵卡
         raise RuntimeError("后端响应缺 resumeId,拒绝评分")
+    simple_fields = list(data.get("simpleFields") or [])
     fields = [
         FieldText(
             field_key=str(f.get("fieldKey") or ""),
@@ -133,10 +163,10 @@ async def fetch_scoring_fields(user_id: int, cycle_id: int) -> tuple[int, list[F
             value=str(f.get("fieldValue") or ""),
             placeholder=str(f.get("placeholder") or ""),
         )
-        for f in data.get("simpleFields") or []
+        for f in simple_fields
         if f.get("fieldType") == "textarea"
     ]
-    return resume_id, fields
+    return resume_id, fields, _extract_grade(simple_fields)
 
 
 async def fetch_resume_authority(resume_id: int) -> dict:
@@ -326,7 +356,9 @@ class EvaluationRunner:
             qbank_status = "skipped"
             try:
                 t_eval = time.monotonic()
-                fetched_resume_id, fields = await fetch_scoring_fields(job["user_id"], cycle_id)
+                fetched_resume_id, fields, grade = await fetch_scoring_fields(
+                    job["user_id"], cycle_id
+                )
                 # 硬断言:后端按 user_id+cycle 派生出的简历必须就是本 job
                 # 的简历;不一致说明数据错位,立即失败,绝不带病继续。
                 if fetched_resume_id != resume_id:
@@ -384,6 +416,7 @@ class EvaluationRunner:
                         cycle_id=cycle_id,
                         github_key=await fetch_candidate_github(job["user_id"]) or None,
                         github_token=get_effective_settings().github_token,
+                        grade=grade,
                     )
                     qbank_version = await asyncio.to_thread(
                         qbank_store.save_qbank,

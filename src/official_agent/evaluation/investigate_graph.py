@@ -28,7 +28,13 @@ from official_agent.evaluation.dossier import dossier_from_resume
 from official_agent.evaluation.explore import run_explore
 from official_agent.evaluation.github_client import GitHubClient, GitHubUnavailable
 from official_agent.evaluation.graph import _extract_json
-from official_agent.evaluation.investigate import extract_repo, route_project
+from official_agent.evaluation.investigate import (
+    GRADE_BAND_LABELS,
+    LAYER_BOUNDS,
+    extract_repo,
+    grade_band,
+    route_project,
+)
 from official_agent.evaluation.schema import (
     MAX_CHAINS,
     ExploreMeta,
@@ -77,6 +83,8 @@ class InvestigationState(TypedDict, total=False):
     explore_usage: dict
     tech_items: list[dict]
     attribution: dict
+    #: 出题深度档(freshman/standard),由年级派生;元信息,不进评分
+    grade_band: str
     paths: list[str]
     paths_truncated: bool
     question_set: dict[str, Any]
@@ -321,6 +329,10 @@ async def generate_node(state: InvestigationState) -> dict:
         material = "dossier 材料:\n" + dossier_text
         if cv:
             material += "\n\n" + TECH_STACK_HEADER + _render_tech(state)
+            # 年级**原文不进材料**(那一栏并不干净,后端记录过里面存着姓名);
+            # 只给派生的档位标签,让 prompt 据此定链长与深度。
+            band = state.get("grade_band") or "standard"
+            material += f"\n\n出题深度档:{GRADE_BAND_LABELS.get(band, band)}。"
         prompt_text = (
             load_prompt(prompt_file)
             + "\n\n---\n\n候选人自述:\n"
@@ -364,6 +376,7 @@ async def generate_node(state: InvestigationState) -> dict:
                         paths=list(state.get("paths", [])),
                         thin=thin,
                         no_repo=cv,
+                        grade_band=state.get("grade_band") or "standard",
                     )
                 else:
                     group = _guided_group(group_payload, dossier_text)
@@ -481,11 +494,14 @@ def validate_qbank_v2_group(
     paths: list[str],
     thin: bool = False,
     no_repo: bool = False,
+    grade_band: str = "standard",
 ) -> QuestionGroupV2:
     """题组 v2 全量校验(探针与 generate 共用;六探针的判定机器)。
 
     - 对抗前提黑名单/路径白名单/链源真实性(_validate_group_v2);
-    - 结构:入口 1 + 链 2-6×3-5 层 + 总量硬顶 15 + 敷衍 dossier ≤3;
+    - 结构:入口 1 + 链 2-MAX_CHAINS + 总量硬顶 15 + 敷衍 dossier ≤3;
+    - 链层数按**出题深度档**定界(grade_band):标准档 3-5 层,大一档 1-2 层
+      ——深度策略只在这一处判定,schema 只留形状上界;
     - 简历路径(no_repo)额外两条:
       ① 题面引用的技术/项目名必须能在材料里找到(防编造)——链主题、入口题、
          备选题都要查:没开链的技术题正是落在 reserves 上,只查链会漏掉那一半;
@@ -507,8 +523,12 @@ def validate_qbank_v2_group(
         raise ValueError(f"追问链不足:要求 2-{MAX_CHAINS},模型给 {len(group.chains)}")
     material = _normalize(dossier_text)
     for chain in group.chains:
-        if not 3 <= len(chain.layers) <= 5:
-            raise ValueError(f"链层数越界({chain.theme[:16]!r}):{len(chain.layers)}")
+        low, high = LAYER_BOUNDS.get(grade_band, LAYER_BOUNDS["standard"])
+        if not low <= len(chain.layers) <= high:
+            raise ValueError(
+                f"链层数越界({chain.theme[:16]!r}):{len(chain.layers)} 不在 {low}-{high}"
+                f"({grade_band} 档)"
+            )
         if no_repo:
             # 链的 theme 是这条链「问的是哪项技术/哪个项目」的声明,必须出自简历。
             if _normalize(chain.theme) not in material:
@@ -610,6 +630,7 @@ async def run_investigation(
     github_base: str = "https://api.github.com",
     github_token: str = "",
     candidate_login: str = "",
+    grade: str = "",
 ) -> dict:
     """便捷入口:返回题集 dict(questions 可为空=skip/降级);LLM 失败抛 RuntimeError。
 
@@ -617,6 +638,8 @@ async def run_investigation(
     缺省按项目文本首个 GitHub URL。
     resume_text 传简历全文(技术栈常单列一栏,只给项目文本会让无仓路径
     看不见它);缺省退化为 project_text,单栏调用方行为不变。
+    grade 传年级原文(元信息):只用来派生**出题深度档**,不进评分;缺省即
+    「年级缺失」,分档走标准档(与加档位之前的行为一致)。
     """
     graph = build_investigation_subgraph()
     init: InvestigationState = {
@@ -625,6 +648,7 @@ async def run_investigation(
         "github_base": github_base,
         "github_token": github_token,
         "candidate_login": candidate_login,
+        "grade_band": grade_band(grade),
     }
     if repo:
         init["repo_owner"], init["repo_name"] = repo

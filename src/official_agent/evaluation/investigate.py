@@ -141,3 +141,30 @@ def route_project(
     if not (project_text or "").strip():
         return "skip"
     return "guided"
+
+
+#: 大一档的识别标记。周期配置里年级是 select(取值形如「大一」),但学制写法
+#: 五花八门,英文/带空格的写法一并收——识别不到会静默退回标准档,那是更深的
+#: 一档,对大一候选人偏难。
+_FRESHMAN_MARKERS = ("大一", "freshman", "year1", "1styear")
+
+#: 链层数区间按档位:**大一短链只问基础层**,标准档沿用既有的 3-5。
+#: 卷面上/下限的最终判定在 validate_qbank_v2_group(schema 只留形状上界)。
+LAYER_BOUNDS: dict[str, tuple[int, int]] = {"freshman": (1, 2), "standard": (3, 5)}
+
+#: 档位 → 材料里给模型看的话(进 prompt 的**只有档位**,不带年级原文)
+GRADE_BAND_LABELS: dict[str, str] = {"freshman": "大一", "standard": "标准"}
+
+
+def grade_band(grade: str) -> Literal["freshman", "standard"]:
+    """年级 → 出题深度档。缺失 / 无法识别 / 大二以上 → ``standard``。
+
+    只分两档是刻意的:用户规则的分界就是「大一很基础,大二基础+稍深入」,
+    再细分没有依据。**缺字段必须有安全默认**——这里返回 standard 而非报错,
+    且 standard 正是加档位之前的既有行为,故不涉及年级的调用方行为不变。
+
+    传入的年级原文**不外流**:调用方只把档位标签写进材料,原文既不进 prompt
+    也不落日志(后端记录过「年级」栏里存着姓名,这一栏并不干净)。
+    """
+    compact = "".join((grade or "").split()).casefold()
+    return "freshman" if any(m in compact for m in _FRESHMAN_MARKERS) else "standard"

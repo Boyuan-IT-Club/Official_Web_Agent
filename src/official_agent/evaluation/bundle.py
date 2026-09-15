@@ -96,6 +96,7 @@ async def run_bundle(
     github_key: str | None = None,
     github_token: str = "",
     search_provider: Any | None = None,
+    grade: str = "",
 ) -> dict[str, Any]:
     """跑全部证据线,返回 qbank 信封(groups 分线+15 分钟建议组合)。
 
@@ -103,6 +104,9 @@ async def run_bundle(
     - 评测线:有评测记录且非满分 → 失败 test 错因追问
     - 奖项线:简历有奖项 → 背景卡+纯过程追问;搜索通道不可用 → 不可考
     - 兜底线:以上全无 → 基础三维 + 部门技能题组
+
+    grade 是**元信息**(年级原文):只透传给调查子图调节出题深度,不参与
+    任何评分线;缺省空串即「年级缺失」,子图走安全默认。
     """
     provider = search_provider or NullSearchProvider()
     groups: list[dict[str, Any]] = []
@@ -125,6 +129,7 @@ async def run_bundle(
                 repo=pinned,
                 github_token=github_token,
                 candidate_login=github_key or "",
+                grade=grade,
             )
             groups.append(
                 {
