@@ -1228,3 +1228,21 @@ async def test_grade_band_reaches_material_but_grade_text_does_not(monkeypatch) 
     current["key"] = "大二"
     await ig.run_investigation(_CV_RESUME, grade="大二")
     assert "出题深度档:标准" in seen[-1].rsplit("技术栈清单:", 1)[-1]
+
+
+@pytest.mark.asyncio
+async def test_freshman_band_does_not_break_repo_path(monkeypatch) -> None:
+    """年级档**不得**套到仓路径上 —— 那会形成「prompt 要 3-5 层、校验只收
+    1-2 层」的死结:两次重试都不合规,整份候选人一题都拿不到。
+
+    触发条件是「大一 + 有可读仓」:年级在简历侧取到、档位传到子图,但这条
+    路由走的是仓深挖,它的 prompt 没有档位段、层数要求仍是 3-5。
+    """
+    _install_fake_gh_and_model(monkeypatch, _v2_payload())
+
+    qs = await ig.run_investigation(
+        "项目 https://github.com/me/demo", grade="大一"
+    )
+    assert qs["mode"] == "repo_deep_dive"
+    assert len(qs["group"]["chains"]) == 2
+    assert all(len(c["layers"]) == 3 for c in qs["group"]["chains"])

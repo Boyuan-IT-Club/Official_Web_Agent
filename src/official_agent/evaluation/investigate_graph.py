@@ -370,13 +370,18 @@ async def generate_node(state: InvestigationState) -> dict:
                 if deep or cv:
                     # 两条路径共用同一台校验机器;区别只在 no_repo:简历没有仓,
                     # 题面若带仓内路径,那必然是模型的臆造。
+                    # 年级档只作用于**简历路径**:仓路径的 prompt 没有档位段,
+                    # 层数要求仍是 3-5。把简历档套到仓路径上会形成「prompt 要
+                    # 3-5 层、校验只收 1-2 层」的死结,两次重试都不合规,整份
+                    # 候选人一题都拿不到。
+                    band = (state.get("grade_band") or "standard") if cv else "standard"
                     group = validate_qbank_v2_group(
                         group_payload,
                         dossier_text,
                         paths=list(state.get("paths", [])),
                         thin=thin,
                         no_repo=cv,
-                        grade_band=state.get("grade_band") or "standard",
+                        grade_band=band,
                     )
                 else:
                     group = _guided_group(group_payload, dossier_text)
