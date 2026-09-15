@@ -1,9 +1,9 @@
 ---
 name: evaluation-cv-dive
 description: 无仓简历深挖出题(技术栈逐名词出题 + 项目深挖链;strict 结构化输出)
-version: evaluation_cv_dive/v7
+version: evaluation_cv_dive/v8
 model_tier: strong
-cache_prefix: evaluation-cv-dive-v7
+cache_prefix: evaluation-cv-dive-v8
 model: strong
 ---
 

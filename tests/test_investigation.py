@@ -1080,9 +1080,10 @@ def test_question_text_may_use_terms_absent_from_resume() -> None:
 
 
 def test_chain_layer_count_out_of_range_rejected() -> None:
-    """链层数越界 → 拒绝。
+    """链层数越界 → 拒绝(不传档位即标准档)。
 
-    两层先被 schema 的最小长度拦下(3-5);这里断言「被拒」而非具体措辞。
+    层数下界由**深度档**决定(标准档 3-5),schema 只留形状上界;故这里
+    走的是默认档的判定路径,同时钉住「既有调用方不传档位时行为不变」。
     """
     from official_agent.evaluation.investigate_graph import validate_qbank_v2_group
 

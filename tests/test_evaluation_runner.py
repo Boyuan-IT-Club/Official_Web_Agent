@@ -659,32 +659,65 @@ def test_extract_grade_finds_key_then_label() -> None:
     ) == ""
 
 
-def test_grade_is_not_part_of_scoring_fields() -> None:
-    """年级**不进评分字段面** —— 它是元信息,只调出题深度。
+@respx.mock
+async def test_grade_stays_out_of_scoring_fields() -> None:
+    """年级**不进评分字段面**:它是元信息,只调出题深度。
 
-    这是硬约束:把 grade 混进 fields 会同时改掉评分输入,
-    而那正是票面禁止的。所以它走独立返回值,不进列表。
+    硬约束:把 grade 混进 fields 会同时改掉评分输入。故走独立返回值。
+    这里打的是**生产函数**而不是复刻它的过滤逻辑 —— 复刻品在真代码回归时
+    照样通过,等于没测。
     """
-    # 直接验取数面的过滤条件:只有 textarea 进 fields
-    simple = [
-        {"fieldKey": "grade", "fieldLabel": "年级", "fieldType": "select", "fieldValue": "大一"},
-        {"fieldKey": "intro", "fieldLabel": "自我介绍", "fieldType": "textarea", "fieldValue": "X"},
-    ]
-    from official_agent.evaluation.scoring import FieldText as _FT
-
-    fields = [
-        _FT(
-            field_key=str(f.get("fieldKey") or ""),
-            title=str(f.get("fieldLabel") or ""),
-            value=str(f.get("fieldValue") or ""),
-            placeholder="",
+    base = "http://backend.test"
+    respx.post(f"{base}/api/auth/login").mock(
+        return_value=httpx.Response(
+            200, json={"code": 200, "message": "ok", "data": {"token": "t", "user_id": 1}}
         )
-        for f in simple
-        if f.get("fieldType") == "textarea"
-    ]
-    assert [f.field_key for f in fields] == ["intro"]
-    # 年级仍取得到,只是不在评分面里
-    assert ev_runner._extract_grade(simple) == "大一"
+    )
+    respx.get(f"{base}/api/resumes/admin/7/3").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": 200,
+                "message": "ok",
+                "data": {
+                    "resumeId": 42,
+                    "simpleFields": [
+                        {
+                            "fieldKey": "grade",
+                            "fieldLabel": "年级",
+                            "fieldType": "select",
+                            "fieldValue": "大一",
+                        },
+                        {
+                            "fieldKey": "intro",
+                            "fieldLabel": "自我介绍",
+                            "fieldType": "textarea",
+                            "fieldValue": "正文",
+                        },
+                    ],
+                },
+            },
+        )
+    )
+    set_backend_client(
+        BackendClient(
+            http=httpx.AsyncClient(base_url=base),
+            settings=Settings(
+                _env_file=None,
+                backend_base_url=base,
+                backend_service_username="svc-agent",
+                backend_service_password="secret",
+            ),
+        )
+    )
+    try:
+        resume_id, fields, grade = await ev_runner.fetch_scoring_fields(7, 3)
+    finally:
+        set_backend_client(None)
+
+    assert resume_id == 42
+    assert grade == "大一"  # 元信息独立带出
+    assert [f.field_key for f in fields] == ["intro"]  # 评分面里没有年级
 
 
 def test_extract_grade_ignores_non_grade_fields() -> None:
