@@ -31,10 +31,19 @@ uv run python evals/run_evals.py --write-baseline evals/baselines.json # 落新�
 | Suite | 面 | kind | 环境要求 |
 |---|---|---|---|
 | `cases/tool_selection.yaml` | cases | `tool_selection` | LLM_* 配置 |
+| `cases/injection_probes.yaml` | cases | `injection_probes` | 无(确定性) |
 | `datasets/kb_probes.yaml` | datasets | `kb_probes` | kb.store 可导入 + EMBED_* + 语料入库 |
+| `datasets/qbank_probes.yaml` | datasets | `qbank_probes` | 无(确定性) |
+| `datasets/qbank_judge.yaml` | datasets | `qbank_judge` | LLM_* 配置 |
+| `datasets/cv_dive_report.yaml` | datasets | `cv_dive_report` | LLM_* 配置 + `real_resumes/` 有样本 |
 
 ## 专项数据集与纪律
 
+- `datasets/cv_dive_report.yaml`(人工审批):真实简历跑真实**出题图**,产出
+  题目全文供人评判。题目「问得好不好」是主观判断,故**不设阈值/门禁**,
+  文件级恒 PASS;报告落在被 gitignore 的 `evals/reports/`,落盘前过
+  `mask_pii_deep`(题面逐字引用原文,不掩码会带出 PII)。改出题 prompt /
+  换模型后跑一次读报告,是这条链路唯一的验收手段。
 - `datasets/resumes/`(gitignore,含 PII 不入库):20~50 份脱敏真实简历 +
   人工标注评分区间,改 prompt / 换模型必跑(OBS-04,#158)。
 - 注入攻击样本:简历中的操纵性内容必须被批判节点识别(SEC-04),常备回归。

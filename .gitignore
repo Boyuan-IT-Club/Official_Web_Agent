@@ -25,6 +25,11 @@ last_qbank_judge_report.json
 !evals/datasets/kb_probes.yaml
 !evals/datasets/qbank_probes.yaml
 !evals/datasets/qbank_judge.yaml
+!evals/datasets/cv_dive_report.yaml
+# CV 深挖报告逐字引用简历原文(防编造设计使然),与样本同级敏感:整体忽略,
+# 防误 add 把 PII 带进仓库。
+evals/reports/cv_dive_report.md
+evals/reports/cv_dive_report.json
 # 真实简历样本(含 PII,永不入库):脱敏后的人工标注集放本地,只回流为
 # 回归用例,原始文本不进仓库。此处按目录名整体忽略,防误 add。
 evals/real_resumes/

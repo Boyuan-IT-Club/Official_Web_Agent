@@ -1,0 +1,14 @@
+# CV 深挖出题报告:真实简历跑真实出题图,产出供**人工审批**的题目全文。
+#
+# 为什么没有阈值/门禁:题目「问得好不好」是主观判断,把主观标准写成自动断言
+# 会把人引到错误的优化目标上。本套件只提供可观测口径(路由/技术栈数/题数)
+# 与题目全文,供人阅读。文件级恒 PASS。
+#
+# 数据集不在本文件里:样本是**真实简历**(含 PII,gitignore),由套件扫描
+# evals/real_resumes/ 取得。没有样本或没有 LLM 配置时走 SKIP,不静默变绿。
+#
+# 跑法:
+#   uv run python evals/run_evals.py --suite cv_dive_report
+#   → 报告落在 evals/reports/cv_dive_report.md(同样含简历原文片段,已 gitignore)
+
+runner: cv_dive_report
