@@ -684,37 +684,41 @@ _CV_RESUME = (
 )
 
 
-def _cv_chain(category: str, theme: str, question: str) -> dict:
-    """链的文本须含 dossier 里出现过的拉丁词元(链源真实性校验)。"""
+def _cv_chain(category: str, theme: str) -> dict:
+    """技术链:theme = 技术名词原文(校验依据),每层带三档参考答案。"""
     return {
         "category": category,
         "theme": theme,
         "layers": [
-            {"question": q, "expected_signal": "答到什么算过"}
+            {
+                "question": q,
+                "expected_signal": "答到什么算过",
+                "answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},
+            }
             for q in (
-                f"{question} 是什么?",
-                f"{question} 在项目里怎么用的?",
-                f"{question} 有什么坑?",
+                f"{theme} 是什么?",
+                f"{theme} 在项目里怎么用的?",
+                f"{theme} 有什么坑?",
             )
         ],
     }
 
 
 def _cv_payload() -> str:
-    """CV 出题形状:入口 + 两条带链的技术栈题,证据锚是简历原文句。"""
+    """CV 出题形状:入口 + 两条技术链(theme=技术名词原文)+ 三档答案。"""
     return json.dumps(
         {
             "repo_summary": "无仓简历:技术栈 Python/PyTorch/ResNet",
             "entry": {
-                "category": "C2_技术选型与权衡",
-                "question": "你的技术栈里为什么选 PyTorch?",
+                "category": "C1_背景与动机",
+                "question": "你的技术栈里最想聊哪个?",
                 "answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},
                 "evidence": {"path": "", "note": "技术栈栏:Python、PyTorch、ResNet"},
                 "time_minutes": 3,
             },
             "chains": [
-                _cv_chain("C2_技术选型与权衡", "技术栈栏的 PyTorch", "PyTorch"),
-                _cv_chain("C4_实现细节拷打", "项目里的 ResNet", "ResNet"),
+                _cv_chain("C2_技术选型与权衡", "PyTorch"),
+                _cv_chain("C4_实现细节拷打", "ResNet"),
             ],
             "reserves": [],
         },
@@ -722,8 +726,31 @@ def _cv_payload() -> str:
     )
 
 
-def _install_fake_cv_model(monkeypatch, payload: str) -> None:
-    """简历路径:只有出题段调模型(技术栈抽取在路由前已由项目栏有料短路)。"""
+def _install_fake_cv_model(monkeypatch, payload: str, *, tech: list[dict] | None = None) -> None:
+    """简历路径替身:技术栈抽取与出题都走模型,分别打桩。"""
+    from official_agent.evaluation.tech_stack import TechStackItem
+
+    items = [
+        TechStackItem(
+            name=str(t["name"]),
+            raw_text=str(t.get("raw_text", t["name"])),
+            claimed_level=t.get("claimed_level", "listed"),
+            used_in=tuple(t.get("used_in", ())),
+        )
+        for t in (
+            tech
+            if tech is not None
+            else [
+                {"name": "PyTorch", "raw_text": "Python、PyTorch、ResNet"},
+                {"name": "ResNet", "raw_text": "用 PyTorch 复现了 ResNet 分类"},
+            ]
+        )
+    ]
+
+    async def _fake_extract(text: str):
+        return items
+
+    monkeypatch.setattr(ig, "extract_tech_stack", _fake_extract)
 
     class _Msg:
         content = payload
@@ -818,3 +845,115 @@ async def test_placeholder_resume_degrades_to_guided(monkeypatch) -> None:
     qs = await ig.run_investigation("目前没有做过什么项目。")
     assert qs["mode"] == "guided"
     assert qs["group"]["chains"] == []
+
+
+# ── CV 出题(技术栈题组 + 三档答案 + 防编造)──────────────
+
+
+def _multi_tech_payload(names: list[str]) -> str:
+    """每个技术名词一条链(每层带三档答案)—— AC 要求的形状。"""
+    return json.dumps(
+        {
+            "repo_summary": "无仓简历",
+            "entry": {
+                "category": "C1_背景与动机",
+                "question": "最想聊哪项技术?",
+                "answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},
+                "evidence": {"path": "", "note": "技术栈栏"},
+                "time_minutes": 3,
+            },
+            "chains": [_cv_chain("C2_技术选型与权衡", n) for n in names],
+            "reserves": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_strong_claim_techs_get_chains_weak_ones_do_not(monkeypatch) -> None:
+    """技术栈按声称强度分配题量:强的开链深挖,弱的只出概念题。
+
+    这不是偷懒:总量硬顶 15 题,每个技术都开 3 层链必然越界。把深度给
+    声称最强的技术,也正是「提问深度与声称强度匹配」的落法。
+    """
+    names = ["Python", "PyTorch", "ResNet"]
+    resume = f"技术栈:\n{'、'.join(names)}\n项目经验:\n用 PyTorch 复现了 ResNet 分类"
+    tech = [{"name": n, "raw_text": f"技术栈:{'、'.join(names)}"} for n in names]
+    _install_fake_cv_model(monkeypatch, _multi_tech_payload(names), tech=tech)
+    qs = await ig.run_investigation("用 PyTorch 复现了 ResNet 分类", resume_text=resume)
+    themes = [c["theme"] for c in qs["group"]["chains"]]
+    assert themes == names  # 三个强声称技术各一条链
+    assert qs["group"]["chains"][0]["layers"][0]["answer_reference"]["acceptable"]
+    assert ig.validate_qbank_v2_group  # 走的是同一台校验机器
+
+
+@pytest.mark.asyncio
+async def test_all_techs_as_chains_over_budget_rejected(monkeypatch) -> None:
+    """每个技术都开 3 层链会撞总量硬顶 15 —— 超了就该被拒,不是硬塞。"""
+    names = ["Python", "PyTorch", "ResNet", "CNN", "YOLO"]
+    resume = f"技术栈:\n{'、'.join(names)}\n项目经验:\n用 PyTorch 做了检测"
+    tech = [{"name": n, "raw_text": f"技术栈:{'、'.join(names)}"} for n in names]
+    _install_fake_cv_model(monkeypatch, _multi_tech_payload(names), tech=tech)
+    with pytest.raises(RuntimeError, match="题量超硬顶"):
+        await ig.run_investigation("用 PyTorch 做了检测", resume_text=resume)
+
+
+@pytest.mark.asyncio
+async def test_tech_chain_layers_carry_three_tier_answers(monkeypatch) -> None:
+    """每道技术栈题都带三档参考答案(面试官不熟悉该技术时的判断依据)。"""
+    _install_fake_cv_model(monkeypatch, _cv_payload())
+    qs = await ig.run_investigation(_CV_RESUME)
+    for chain in qs["group"]["chains"]:
+        for layer in chain["layers"]:
+            ref = layer["answer_reference"]
+            assert set(ref) == {"strong", "acceptable", "weak"}
+
+def test_fabricated_tech_theme_rejected() -> None:
+    """引用了简历中不存在的技术 → 拒绝(AC:防编造)。
+
+    两道防线都会拦下它:链源真实性(不在材料里)与主题比对(疑似编造)。
+    这里断言「被拒」这一外部行为,不锁死是哪一道先触发。
+    """
+    from official_agent.evaluation.investigate_graph import validate_qbank_v2_group
+
+    payload = json.loads(_multi_tech_payload(["Python", "Kubernetes"]))
+    payload["entry"]["evidence"]["path"] = ""
+    with pytest.raises(ValueError, match="Kubernetes"):
+        validate_qbank_v2_group(payload, "技术栈:Python、PyTorch", paths=[], no_repo=True)
+
+
+def test_chain_layer_count_out_of_range_rejected() -> None:
+    """链层数越界 → 拒绝(AC:链层数越界被拒)。
+
+    两层先被 schema 的最小长度拦下(3-5);这里断言「被拒」而非具体措辞。
+    """
+    from official_agent.evaluation.investigate_graph import validate_qbank_v2_group
+
+    payload = json.loads(_multi_tech_payload(["Python", "PyTorch"]))
+    payload["chains"][0]["layers"] = payload["chains"][0]["layers"][:2]
+    payload["entry"]["evidence"]["path"] = ""
+    with pytest.raises(ValueError):
+        validate_qbank_v2_group(payload, "技术栈:Python、PyTorch", paths=[], no_repo=True)
+
+
+def test_more_than_six_chains_rejected() -> None:
+    """技术名词上限 5-6:第七个被信封容量挡住(AC:受上限约束)。"""
+    from official_agent.evaluation.schema import QuestionGroupV2
+
+    payload = json.loads(_multi_tech_payload([f"T{i}" for i in range(7)]))
+    with pytest.raises(ValueError):
+        QuestionGroupV2.model_validate(
+            {"entry": payload["entry"], "chains": payload["chains"], "reserves": []}
+        )
+
+
+def test_deep_dive_chain_layer_still_optional_answer_reference() -> None:
+    """仓深挖的链层不强制三档答案 —— 不回归既有 deep_dive 出题形状。"""
+    from official_agent.evaluation.investigate_graph import validate_qbank_v2_group
+
+    payload = json.loads(_v2_payload())  # 链层只有 question+expected_signal
+    validate_qbank_v2_group(
+        payload,
+        "README.md src/app.py tests/test_app.py",
+        paths=["src/app.py", "README.md", "tests/test_app.py"],
+    )

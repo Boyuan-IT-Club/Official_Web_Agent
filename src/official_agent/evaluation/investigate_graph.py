@@ -28,11 +28,7 @@ from official_agent.evaluation.dossier import dossier_from_resume
 from official_agent.evaluation.explore import run_explore
 from official_agent.evaluation.github_client import GitHubClient, GitHubUnavailable
 from official_agent.evaluation.graph import _extract_json
-from official_agent.evaluation.investigate import (
-    extract_repo,
-    has_substantive,
-    route_project,
-)
+from official_agent.evaluation.investigate import extract_repo, route_project
 from official_agent.evaluation.schema import (
     ExploreMeta,
     QbankV2,
@@ -42,6 +38,14 @@ from official_agent.evaluation.schema import (
 from official_agent.evaluation.tech_stack import extract_tech_stack
 from official_agent.graphs.assistant import build_model
 from official_agent.prompt_loader import load_prompt, load_prompt_meta
+
+#: 简历深挖的出题 prompt(与仓深挖的 grilling 分开:材料性质、出题主线都不同)
+CV_PROMPT_FILE = "evaluation/cv_dive.md"
+#: 技术栈材料块的表头:告诉模型这是防编造的可用名词清单
+TECH_STACK_HEADER = (
+    "技术栈清单(已从简历原文校验出处;**链的 theme 必须用这里的原样写法**,"
+    "不得编造清单外的技术):\n"
+)
 
 PROMPT_FILE = "evaluation/grilling.md"
 SCORING_TEMPERATURE = 0.2
@@ -68,25 +72,38 @@ class InvestigationState(TypedDict, total=False):
     dossier_degrade_reason: str
     dossier_turns: int
     explore_usage: dict
+    tech_items: list[dict]
     attribution: dict
     paths: list[str]
     paths_truncated: bool
     question_set: dict[str, Any]
     error: str | None
 
-async def _norepo_route(state: InvestigationState) -> dict:
-    """无仓位置时的路由:先看项目栏有没有料,没料才付一次技术栈抽取。
 
-    项目栏已有实质内容时技术栈不影响结论(cv_dive 已是答案),那次模型调用
-    可以省掉;只有项目栏空或全是占位表述时,技术栈才是决定 cv_dive 还是
-    兜底的那一票。
+def _render_tech(state: InvestigationState) -> str:
+    """技术栈清单 → 出题材料的文本块(名词 + 自述档位 + 项目归属)。
+
+    档位进材料是让模型按声称强度定深度(熟练才深挖);项目归属进材料是让
+    模型把技术追问落到具体项目上(「这个技术你在 X 里怎么用的」)。
+    """
+    items = state.get("tech_items") or []
+    if not items:
+        return "(未抽出技术栈;只依据上面的项目经验出题)"
+    lines = []
+    for it in items:
+        used = "、".join(it.get("used_in") or []) or "简历未指明项目"
+        lines.append(f"- {it.get('name')}(自述档位:{it.get('claimed_level')};出现在:{used})")
+    return "\n".join(lines)
+
+async def _norepo_route(state: InvestigationState) -> dict:
+    """无仓位置时的路由:抽技术栈,连同项目栏内容一起定路径。
+
+    无仓时技术栈抽两次都没有意义,且**出题段本来就依赖它**(每名词一条
+    技术链),所以这里只抽一次、结果全程复用,不再按「项目栏有没有料」省调用。
     """
     text = state["project_text"]
-    if has_substantive(text):
-        return {"route": route_project(text, None)}
-    # 项目栏没料时才付一次技术栈抽取:它决定 cv_dive 还是兜底
     items = await _extract_tech(state)
-    return {"route": route_project(text, None, tech_count=len(items))}
+    return {"route": route_project(text, None, tech_count=len(items)), "tech_items": items}
 
 
 async def _extract_tech(state: InvestigationState) -> list[dict]:
@@ -293,14 +310,16 @@ async def generate_node(state: InvestigationState) -> dict:
         settings = get_effective_settings()
         model = build_model(settings, temperature=SCORING_TEMPERATURE)
         # ADR-0004:代码零 prompt 字符串——体量标记是数据,规则文本全在
-        # prompts/evaluation/ 下的出题 prompt(敷衍/充足两套规则文件内已有)
+        # prompts/evaluation/ 下的出题 prompt。简历路径与仓路径是两套 prompt
+        # (材料性质与出题主线都不同),故按路径选文件。
+        prompt_file = CV_PROMPT_FILE if cv else PROMPT_FILE
         material_note = f"材料体量={'贫乏' if thin else '充足'}。"
         prompt_text = (
-            load_prompt(PROMPT_FILE)
+            load_prompt(prompt_file)
             + "\n\n---\n\n候选人自述:\n"
             + state["project_text"]
-            + "\n\ndossier 材料:\n"
-            + dossier_text
+            + "\n\n"
+            + (TECH_STACK_HEADER + _render_tech(state) if cv else "dossier 材料:\n" + dossier_text)
             + "\n\n"
             + material_note
         )
@@ -467,7 +486,10 @@ def validate_qbank_v2_group(
     """题组 v2 全量校验(探针与 generate 共用;六探针的判定机器)。
 
     - 对抗前提黑名单/路径白名单/链源真实性(_validate_group_v2);
-    - 结构:入口 1 + 链 2-4×3-5 层 + 总量硬顶 15 + 敷衍 dossier ≤3。
+    - 结构:入口 1 + 链 2-6×3-5 层 + 总量硬顶 15 + 敷衍 dossier ≤3;
+    - 简历路径(no_repo)额外两条:
+      ① 链主题必须能在材料里找到(防编造技术/项目名);
+      ② 链的每一层都要有三档参考答案(面试官不熟悉该技术,没有答案可依)。
     """
     _validate_group_v2(group_payload, dossier_text, paths, no_repo=no_repo)
     group = QuestionGroupV2.model_validate(
@@ -478,15 +500,29 @@ def validate_qbank_v2_group(
     if group.total_questions > 15:
         raise ValueError(f"题量超硬顶:{group.total_questions} > 15")
     if group.entry is None:
-        raise ValueError("deep_dive 缺入口题(入口必须 1 道)")
+        raise ValueError("题组缺入口题(入口必须 1 道)")
     if not group.entry.evidence.path and not group.entry.evidence.note:
-        raise ValueError("deep_dive 题空路径须有 evidence.note")
+        raise ValueError("题空路径须有 evidence.note")
     if len(group.chains) < 2:
-        raise ValueError(f"追问链不足:要求 2-4,模型给 {len(group.chains)}")
+        raise ValueError(f"追问链不足:要求 2-6,模型给 {len(group.chains)}")
+    material = _normalize_text(dossier_text)
     for chain in group.chains:
         if not 3 <= len(chain.layers) <= 5:
             raise ValueError(f"链层数越界({chain.theme[:16]!r}):{len(chain.layers)}")
+        if no_repo:
+            if _normalize_text(chain.theme) not in material:
+                raise ValueError(f"链主题不在简历材料里(疑似编造):{chain.theme[:30]!r}")
+            missing = [
+                i + 1 for i, layer in enumerate(chain.layers) if layer.answer_reference is None
+            ]
+            if missing:
+                raise ValueError(f"链层缺三档参考答案({chain.theme[:16]!r})第 {missing} 层")
     return group
+
+
+def _normalize_text(text: str) -> str:
+    """材料比对归一:忽略大小写与空白(与证据闸门同口径)。"""
+    return "".join((text or "").split()).casefold()
 
 
 def _attribution_level(level: Any) -> Any:

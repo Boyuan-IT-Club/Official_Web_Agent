@@ -110,23 +110,41 @@ CATEGORY = Literal[
 
 ATTRIBUTION_LEVEL = Literal["trusted-own", "trusted-contribution", "claimed", "unverified", "none"]
 
+#: 题组容量上限。链数按简历深挖的上界取(技术栈最多 6 个名词,每个名词
+#: 一条技术链);备选数是技术栈独立广度题的容器。硬顶仍是 15 题,见
+#: validate_qbank_v2_group——放宽容量不等于鼓励堆题。
+MAX_CHAINS = 6
+MAX_RESERVES = 6
+
 
 class ChainLayer(BaseModel):
-    """追问链的一层:问题 + expected_signal(答到什么算过;层间依赖)。"""
+    """追问链的一层:问题 + expected_signal(答到什么算过;层间依赖)。
+
+    answer_reference 可选:技术栈题要逐层给三档参考答案(面试官本人可能
+    不熟悉该技术,没有参考答案就无法判定答得好不好);仓深挖的链层沿用
+    既有形状(只有 expected_signal),故为可选而非必填。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     question: str = Field(min_length=1)
     expected_signal: str = Field(min_length=1)
+    answer_reference: AnswerReference | None = None
 
 
 class QuestionChain(BaseModel):
-    """追问链:层层依赖的连环问(下一问以上一问的回答为前提)。"""
+    """追问链:层层依赖的连环问(下一问以上一问的回答为前提)。
+
+    theme 对两种路径都必填,但含义不同:
+    - 仓深挖:须指明源自哪条 dossier 证据(仓内路径/组件);
+    - 简历深挖:填**该链对应的技术名词**,title 即技术名。
+      这样防编造校验(链源须出现在材料里)天然生效——编造的技术名过不了。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     category: CATEGORY
-    theme: str = Field(min_length=1, description="链主题,须指明源自哪条 dossier 证据")
+    theme: str = Field(min_length=1, description="链主题(仓路径:证据出处;简历路径:技术名词)")
     layers: list[ChainLayer] = Field(min_length=3, max_length=5)
 
 
@@ -143,7 +161,11 @@ class EntryQuestion(BaseModel):
 
 
 class ReserveQuestion(BaseModel):
-    """备选题:面试官按候选人回答灵活取用,不强制走完。"""
+    """备选题:面试官按候选人回答灵活取用,不强制走完。
+
+    简历深挖里它承载**技术栈的独立广度题**——与项目深挖链分开,面试官可按
+    现场挑着问。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -155,13 +177,19 @@ class ReserveQuestion(BaseModel):
 
 
 class QuestionGroupV2(BaseModel):
-    """一个仓的题组:入口 1 + 追问链 2-4 + 备选 2-3;guided 模式 chains/reserves 可空。"""
+    """一个题组:入口 1 + 追问链 + 备选;guided 模式 chains/reserves 可空。
+
+    容量按两条路径的上界取:仓深挖是「一个仓一组」(链 2-4、备选 2-3);
+    简历深挖要覆盖 5-6 个技术名词,每个名词一条技术链(含该名词的项目追问),
+    故 chains 放到 6。reserves 放到 6 供技术栈的独立广度题使用。
+    硬顶仍是 15 题(见校验机器),容量放宽不等于鼓励堆题。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     entry: EntryQuestion | None = None
-    chains: list[QuestionChain] = Field(default_factory=list, max_length=4)
-    reserves: list[ReserveQuestion] = Field(default_factory=list, max_length=3)
+    chains: list[QuestionChain] = Field(default_factory=list, max_length=MAX_CHAINS)
+    reserves: list[ReserveQuestion] = Field(default_factory=list, max_length=MAX_RESERVES)
 
     @property
     def total_questions(self) -> int:
