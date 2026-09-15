@@ -102,6 +102,17 @@ def _survey(envelope: dict[str, Any]) -> dict[str, int]:
     }
 
 
+def _render_reference(ref: dict[str, Any] | None, indent: str) -> list[str]:
+    """三档参考答案 → Markdown 行(面试官凭它判定答得好不好)。"""
+    if not ref:
+        return []
+    return [
+        f"{indent}- {tier}:{ref[tier]}"
+        for tier in ("strong", "acceptable", "weak")
+        if ref.get(tier)
+    ]
+
+
 def _render_group(group: dict[str, Any]) -> list[str]:
     """题组 → Markdown 行(题目全文,供人阅读)。"""
     lines: list[str] = []
@@ -109,10 +120,7 @@ def _render_group(group: dict[str, Any]) -> list[str]:
     if entry:
         lines.append(f"#### 入口 · {entry.get('category', '')}")
         lines.append(f"> {entry.get('question', '')}")
-        ref = entry.get("answer_reference") or {}
-        for tier in ("strong", "acceptable", "weak"):
-            if ref.get(tier):
-                lines.append(f"  - **{tier}**:{ref[tier]}")
+        lines += _render_reference(entry.get("answer_reference"), "  ")
         note = (entry.get("evidence") or {}).get("note", "")
         if note:
             lines.append(f"  - 出处:{note}")
@@ -123,20 +131,14 @@ def _render_group(group: dict[str, Any]) -> list[str]:
             lines.append(f"{li}. {layer.get('question', '')}")
             if layer.get("expected_signal"):
                 lines.append(f"   - 过关信号:{layer['expected_signal']}")
-            ref = layer.get("answer_reference") or {}
-            for tier in ("strong", "acceptable", "weak"):
-                if ref.get(tier):
-                    lines.append(f"   - {tier}:{ref[tier]}")
+            lines += _render_reference(layer.get("answer_reference"), "   ")
         lines.append("")
     reserves = group.get("reserves") or []
     if reserves:
         lines.append("#### 备选")
         for ri, r in enumerate(reserves, 1):
             lines.append(f"{ri}. [{r.get('category', '')}] {r.get('question', '')}")
-            ref = r.get("answer_reference") or {}
-            for tier in ("strong", "acceptable", "weak"):
-                if ref.get(tier):
-                    lines.append(f"   - {tier}:{ref[tier]}")
+            lines += _render_reference(r.get("answer_reference"), "   ")
         lines.append("")
     return lines
 
@@ -155,9 +157,11 @@ async def _one(path: Path, index: int) -> tuple[CaseResult, list[str]]:
         tech_items = await extract_tech_stack(body)
     except Exception as exc:  # noqa: BLE001 — 报告模式:抽取失败不应中止整轮
         tech_items = []
-        tech_note = f"技术栈抽取失败:{type(exc).__name__}"
+        tech_note = f"(技术栈抽取失败:{type(exc).__name__})"
     else:
         tech_note = ""
+
+    tech_line = f"- 抽出技术栈:**{len(tech_items)}** 项{tech_note}"
 
     try:
         envelope = await ig.run_investigation(body, resume_text=body)
@@ -175,8 +179,7 @@ async def _one(path: Path, index: int) -> tuple[CaseResult, list[str]]:
                 f"### {index}. `{path.name}`",
                 "",
                 "- 路由:**(未走到)**",
-                f"- 抽出技术栈:**{len(tech_items)}** 项"
-                + ("(" + tech_note + ")" if tech_note else ""),
+                tech_line,
                 "- 出题:**失败**",
                 "",
                 f"```\n{reason}\n```",
@@ -189,8 +192,7 @@ async def _one(path: Path, index: int) -> tuple[CaseResult, list[str]]:
         f"### {index}. `{path.name}`",
         "",
         f"- 路由:**{envelope.get('mode')}**",
-        f"- 抽出技术栈:**{len(tech_items)}** 项"
-        + ("(" + tech_note + ")" if tech_note else ""),
+        tech_line,
         f"- 出题:**{survey['total_questions']}** 道"
         f"(入口 {survey['entry']} · 链 {survey['chains']} 条/{survey['chain_layers']} 层"
         f" · 备选 {survey['reserves']})",
@@ -241,16 +243,22 @@ async def run_suite(path: Path, *, distribution: bool = False, **_: Any) -> Suit
     report_path = _REPORT_DIR / "cv_dive_report.md"
     await asyncio.to_thread(_write, report_path, "\n".join(header + body))
 
-    # 机读口径另落一份(汇总用;同样过掩码,虽然这里只有计数)
+    # 机读口径另落一份(汇总用)。同样必须过掩码:失败分支的 detail 会带上
+    # 校验异常原文,而异常原文里可能内嵌简历内容(如链主题/题面片段),
+    # 不能只在 markdown 那条路径上脱敏。
     summary_path = _REPORT_DIR / "cv_dive_report.json"
     await asyncio.to_thread(
         _write,
         summary_path,
         json.dumps(
-            {
-                "samples": len(resumes),
-                "cases": [{"id": c.id, "passed": c.passed, "detail": c.detail} for c in cases],
-            },
+            _mask(
+                {
+                    "samples": len(resumes),
+                    "cases": [
+                        {"id": c.id, "passed": c.passed, "detail": c.detail} for c in cases
+                    ],
+                }
+            ),
             ensure_ascii=False,
             indent=2,
         ),

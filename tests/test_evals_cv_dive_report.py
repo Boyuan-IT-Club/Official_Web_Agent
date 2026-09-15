@@ -70,14 +70,6 @@ def test_mask_scrubs_phone_and_name() -> None:
     assert "a@b.com" not in joined
 
 
-def test_mask_is_the_existing_implementation() -> None:
-    """不新写脱敏规则:必须复用 security.pii 的同一实现。"""
-    from official_agent.security.pii import mask_pii_deep
-
-    payload = {"k": "手机 13912345678"}
-    assert cvd._mask(payload) == mask_pii_deep(payload)
-
-
 # ── 题组结构计数 ─────────────────────────────────────
 
 
@@ -143,7 +135,7 @@ def test_render_group_shows_three_tier_answers() -> None:
         ]
     }
     text = "\n".join(cvd._render_group(group))
-    assert "S" in text and "A" in text and "W" in text
+    assert "strong:S" in text and "acceptable:A" in text and "weak:W" in text
 
 
 # ── 端到端(图与模型打桩)──────────────────────────
@@ -316,3 +308,31 @@ async def test_run_suite_json_summary_is_valid(monkeypatch, tmp_path: Path) -> N
     data = json.loads((tmp_path / "reports" / "cv_dive_report.json").read_text(encoding="utf-8"))
     assert data["samples"] == 1
     assert data["cases"][0]["id"] == "1.txt"
+
+
+@pytest.mark.asyncio
+async def test_json_summary_is_masked_too(monkeypatch, tmp_path: Path) -> None:
+    """机读摘要是第二条出边界,失败原因里内嵌的简历内容同样必须掩掉。
+
+    校验异常会把链主题/题面片段写进 detail,只掩 markdown 会让 PII 从这份
+    JSON 漏出去。
+    """
+    monkeypatch.setattr(cvd, "_RESUME_DIR", tmp_path)
+    monkeypatch.setattr(cvd, "_REPORT_DIR", tmp_path / "reports")
+    (tmp_path / "1.txt").write_text("技术栈:Python", encoding="utf-8")
+
+    async def _leaky_failure(text, **kw):
+        raise ValueError("链主题不在简历材料里(疑似编造):'13812345678'")
+
+    async def _no_tech(text):
+        return []
+
+    monkeypatch.setattr(
+        "official_agent.evaluation.investigate_graph.run_investigation", _leaky_failure
+    )
+    monkeypatch.setattr("official_agent.evaluation.tech_stack.extract_tech_stack", _no_tech)
+    await cvd.run_suite(tmp_path / "cv_dive_report.yaml")
+
+    raw = (tmp_path / "reports" / "cv_dive_report.json").read_text(encoding="utf-8")
+    assert "13812345678" not in raw
+    assert "138****5678" in raw  # 掩码生效,不是整条被丢

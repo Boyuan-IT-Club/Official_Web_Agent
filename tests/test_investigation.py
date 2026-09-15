@@ -954,14 +954,20 @@ def test_cv_prompt_chain_budget_matches_capacity() -> None:
 
 
 def test_cv_prompt_budget_counts_reserves() -> None:
-    """预算说明必须把备选算进去 —— 总题量硬顶是链层与备选**共享**的池子。
+    """题量预算必须给出**含备选**的等式,而不是只算链。
 
-    只按「4 条链 × 3 层 + 入口」算预算会漏掉备选:4×5+1+备选必然爆 15。
+    总题量硬顶是「入口 + 链层 + 备选」共享的池子;只按「4 条链 × 3 层 + 入口」
+    算预算会漏掉备选,链写满 5 层时必然爆顶(实测过 18 > 15 的整组被拒)。
     """
+    import re
+
     from official_agent.prompt_loader import load_prompt
 
     text = load_prompt(ig.CV_PROMPT_FILE)
-    assert "备选" in text.split("总题量预算先算好", 1)[1][:400], "预算说明未把备选计入总题量"
+    # 预算等式须同时出现三个加项,把「共享池子」这件事说清
+    assert re.search(r"入口\s*1\s*\+[^\n]*链[^\n]*\+[^\n]*备选[^\n]*≤\s*15", text), (
+        "prompt 的题量预算等式未把备选计入(链与备选共享 15 题硬顶)"
+    )
 
 
 @pytest.mark.asyncio
