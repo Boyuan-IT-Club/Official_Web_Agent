@@ -29,8 +29,10 @@ from official_agent.evaluation.explore import run_explore
 from official_agent.evaluation.github_client import GitHubClient, GitHubUnavailable
 from official_agent.evaluation.graph import _extract_json
 from official_agent.evaluation.investigate import (
+    DEFAULT_GRADE_BAND,
     GRADE_BAND_LABELS,
     LAYER_BOUNDS,
+    GradeBand,
     extract_repo,
     grade_band,
     route_project,
@@ -83,8 +85,8 @@ class InvestigationState(TypedDict, total=False):
     explore_usage: dict
     tech_items: list[dict]
     attribution: dict
-    #: 出题深度档(freshman/standard),由年级派生;元信息,不进评分
-    grade_band: str
+    #: 出题深度档,由年级派生;元信息,不进评分
+    grade_band: GradeBand
     paths: list[str]
     paths_truncated: bool
     question_set: dict[str, Any]
@@ -331,7 +333,7 @@ async def generate_node(state: InvestigationState) -> dict:
             material += "\n\n" + TECH_STACK_HEADER + _render_tech(state)
             # 年级**原文不进材料**(那一栏并不干净,后端记录过里面存着姓名);
             # 只给派生的档位标签,让 prompt 据此定链长与深度。
-            band = state.get("grade_band") or "standard"
+            band = state.get("grade_band") or DEFAULT_GRADE_BAND
             material += f"\n\n出题深度档:{GRADE_BAND_LABELS.get(band, band)}。"
         prompt_text = (
             load_prompt(prompt_file)
@@ -374,7 +376,9 @@ async def generate_node(state: InvestigationState) -> dict:
                     # 层数要求仍是 3-5。把简历档套到仓路径上会形成「prompt 要
                     # 3-5 层、校验只收 1-2 层」的死结,两次重试都不合规,整份
                     # 候选人一题都拿不到。
-                    band = (state.get("grade_band") or "standard") if cv else "standard"
+                    band = (
+                        state.get("grade_band") or DEFAULT_GRADE_BAND
+                    ) if cv else DEFAULT_GRADE_BAND
                     group = validate_qbank_v2_group(
                         group_payload,
                         dossier_text,
@@ -499,7 +503,7 @@ def validate_qbank_v2_group(
     paths: list[str],
     thin: bool = False,
     no_repo: bool = False,
-    grade_band: str = "standard",
+    grade_band: GradeBand = DEFAULT_GRADE_BAND,
 ) -> QuestionGroupV2:
     """题组 v2 全量校验(探针与 generate 共用;六探针的判定机器)。
 
@@ -528,7 +532,7 @@ def validate_qbank_v2_group(
         raise ValueError(f"追问链不足:要求 2-{MAX_CHAINS},模型给 {len(group.chains)}")
     material = _normalize(dossier_text)
     for chain in group.chains:
-        low, high = LAYER_BOUNDS.get(grade_band, LAYER_BOUNDS["standard"])
+        low, high = LAYER_BOUNDS.get(grade_band, LAYER_BOUNDS[DEFAULT_GRADE_BAND])
         if not low <= len(chain.layers) <= high:
             raise ValueError(
                 f"链层数越界({chain.theme[:16]!r}):{len(chain.layers)} 不在 {low}-{high}"

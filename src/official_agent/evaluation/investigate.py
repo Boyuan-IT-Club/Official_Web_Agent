@@ -143,20 +143,28 @@ def route_project(
     return "guided"
 
 
+#: 出题深度档。两档就够:分界就是既有的用户规则(大一很基础,大二基础+稍深入),
+#: 再细分没有依据。``GradeBand`` 是这一路取值的单一事实源,避免裸字面量散落。
+GradeBand = Literal["freshman", "standard"]
+
+#: 缺年级 / 认不出 / 大二以上 → 这一档。也是引入档位之前的既有行为,
+#: 故不涉及年级的调用方行为不变。
+DEFAULT_GRADE_BAND: GradeBand = "standard"
+
 #: 大一档的识别标记。周期配置里年级是 select(取值形如「大一」),但学制写法
-#: 五花八门,英文/带空格的写法一并收——识别不到会静默退回标准档,那是更深的
-#: 一档,对大一候选人偏难。
+#: 五花八门,英文/带空格的写法一并收——识别不到会退回标准档,那是更深的一档,
+#: 对大一候选人偏难。
 _FRESHMAN_MARKERS = ("大一", "freshman", "year1", "1styear")
 
 #: 链层数区间按档位:**大一短链只问基础层**,标准档沿用既有的 3-5。
-#: 卷面上/下限的最终判定在 validate_qbank_v2_group(schema 只留形状上界)。
+#: 上/下限的最终判定在 validate_qbank_v2_group(schema 只留形状上界)。
 LAYER_BOUNDS: dict[str, tuple[int, int]] = {"freshman": (1, 2), "standard": (3, 5)}
 
 #: 档位 → 材料里给模型看的话(进 prompt 的**只有档位**,不带年级原文)
 GRADE_BAND_LABELS: dict[str, str] = {"freshman": "大一", "standard": "标准"}
 
 
-def grade_band(grade: str) -> Literal["freshman", "standard"]:
+def grade_band(grade: str) -> GradeBand:
     """年级 → 出题深度档。缺失 / 无法识别 / 大二以上 → ``standard``。
 
     只分两档是刻意的:用户规则的分界就是「大一很基础,大二基础+稍深入」,
@@ -167,4 +175,4 @@ def grade_band(grade: str) -> Literal["freshman", "standard"]:
     也不落日志(后端记录过「年级」栏里存着姓名,这一栏并不干净)。
     """
     compact = "".join((grade or "").split()).casefold()
-    return "freshman" if any(m in compact for m in _FRESHMAN_MARKERS) else "standard"
+    return "freshman" if any(m in compact for m in _FRESHMAN_MARKERS) else DEFAULT_GRADE_BAND

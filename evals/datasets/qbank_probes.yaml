@@ -59,10 +59,11 @@ cases:
           evidence: { path: "src/app.py", note: "" }
           time_minutes: 3
 
-  # ② 链层数下界(3 层)
+  # ② 链层数下界(2 层 → 拒):探针不传档位即标准档(3-5),故下界仍拦住它。
+  # 下界判定已从 schema 挪到语义校验(层数随出题深度档变),文案不再来自 pydantic。
   - id: probe-chain-layers-min-rejected
     validate: reject
-    match: ""  # schema min_length 拒绝,文案来自 pydantic
+    match: ""
     group:
       entry: *entry
       chains:
