@@ -921,6 +921,49 @@ async def test_cv_prompt_version_reflects_cv_prompt(monkeypatch) -> None:
     assert "cv_dive" in qs["prompt_version"]
 
 
+
+def test_cv_prompt_chain_budget_matches_capacity() -> None:
+    """prompt 的链条数约束必须与信封容量一致,且技术链/项目链受**共同**上限约束。
+
+    出题是**整组原子**的:链条数超了校验直接拒整组,候选人一道题都拿不到。
+    曾经 prompt 开头写「链最多 4 条」,而 A 段许可技术链 1-3 条、B 段许可
+    项目链最多 2 个 —— 分段照做能到 5 条,模型如实执行就被拒;再叠加一句
+    「出题宁多勿少」,等于主动往坑里推。真实简历上实测约 1/4 的简历因此
+    零题产出。
+
+    钉两件事:①prompt 明示的 chains 上限 = schema 的 MAX_CHAINS;
+    ②存在一句把 A/B 绑在一起的共同上限(只说分头上限是不够的)。
+    """
+    import re
+
+    from official_agent.evaluation.schema import MAX_CHAINS
+    from official_agent.prompt_loader import load_prompt
+
+    text = load_prompt(ig.CV_PROMPT_FILE)
+
+    # ① 明示的 chains 上限须与信封容量同值(写错值等于照错值出题)
+    assert re.search(rf"chains\s*2-{MAX_CHAINS}\s*条", text), "prompt 未明示 chains 上限"
+
+    # ② 分头上限之和可以超过总上限(这是事实),故必须有共同上限兜住
+    assert re.search(rf"条数之和\s*≤\s*{MAX_CHAINS}", text), (
+        f"prompt 缺少技术链与项目链的共同上限(≤ {MAX_CHAINS})"
+    )
+
+    # ③ 不得再出现鼓励堆题的措辞(它正是超生成的直接推手)
+    assert "宁多勿少" not in text, "prompt 仍含鼓励堆题的措辞"
+
+
+def test_cv_prompt_budget_counts_reserves() -> None:
+    """预算说明必须把备选算进去 —— 总题量硬顶是链层与备选**共享**的池子。
+
+    只按「4 条链 × 3 层 + 入口」算预算会漏掉备选:4×5+1+备选必然爆 15。
+    """
+    from official_agent.prompt_loader import load_prompt
+
+    text = load_prompt(ig.CV_PROMPT_FILE)
+    assert "备选" in text.split("总题量预算先算好", 1)[1][:400], "预算说明未把备选计入总题量"
+
+
 @pytest.mark.asyncio
 async def test_cv_material_keeps_resume_dossier(monkeypatch) -> None:
     """技术栈清单是**追加**到档案上的,不能把简历材料挤掉。
