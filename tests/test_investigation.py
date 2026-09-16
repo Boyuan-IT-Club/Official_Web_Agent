@@ -1246,3 +1246,34 @@ async def test_freshman_band_does_not_break_repo_path(monkeypatch) -> None:
     assert qs["mode"] == "repo_deep_dive"
     assert len(qs["group"]["chains"]) == 2
     assert all(len(c["layers"]) == 3 for c in qs["group"]["chains"])
+
+
+def test_chain_layer_rejects_invented_evidence_field() -> None:
+    """链层多写一个键(如模型把出处塞进 `evidence_note`)→ 整组被拒。
+
+    真实简历上实测过:prompt 只在「铁律」里说「用 evidence.note 写这句题的
+    出处」,没说它**只属于 entry 与 reserves**;模型于是给链层也加了出处字段,
+    而链层是 extra="forbid"。两次重试都撞同一处,整份候选人零题产出。
+
+    这里钉住「链层是严格三键」这一契约:多一个键就不该被接受 —— 靠 prompt
+    写清楚来避免,而不是放宽 schema。
+    """
+    payload = json.loads(_multi_tech_payload(["Python", "PyTorch"]))
+    payload["chains"][0]["layers"][0]["evidence_note"] = "技术栈栏:Python"
+    payload["entry"]["evidence"]["path"] = ""
+    with pytest.raises(ValueError, match="evidence_note"):
+        ig.validate_qbank_v2_group(
+            payload, "技术栈:Python、PyTorch", paths=[], no_repo=True
+        )
+
+
+def test_cv_prompt_scopes_evidence_to_entry_and_reserves() -> None:
+    """prompt 必须写明 evidence 的归属,并点出链层没有这个字段。
+
+    这是上一个缺陷的成因:规则没写范围,模型就把它套到链层上。
+    """
+    from official_agent.prompt_loader import load_prompt
+
+    text = load_prompt(ig.CV_PROMPT_FILE)
+    assert "evidence` 只属于 entry 与 reserves" in text
+    assert "链层没有这个字段" in text

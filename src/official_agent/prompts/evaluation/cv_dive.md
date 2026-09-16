@@ -1,9 +1,9 @@
 ---
 name: evaluation-cv-dive
 description: 无仓简历深挖出题(技术栈逐名词出题 + 项目深挖链;strict 结构化输出)
-version: evaluation_cv_dive/v8
+version: evaluation_cv_dive/v9
 model_tier: strong
-cache_prefix: evaluation-cv-dive-v8
+cache_prefix: evaluation-cv-dive-v9
 model: strong
 ---
 
@@ -45,6 +45,7 @@ model: strong
   → 链里**没有** `question` / `answer_reference` 这些顶层字段,它们属于层。
 - `reserves[]` 每项 = **一道独立题**:`{category, question, answer_reference, evidence, time_minutes}`。
   → 备选题**没有** `theme` / `layers`。
+  → **链层没有 `evidence`**:出处由链的 `theme` 承担,写进层会被系统拒绝。
 
 
 材料里会给你一份**技术栈清单**(已校验出自简历原文)。`theme` 必须用清单里的
@@ -124,9 +125,13 @@ model: strong
   问"为什么这么选/怎么做的",不质问对错。
 - **不编造候选人没说过的事**:凡「你做过 X」都必须能在简历里找到出处;
   找不到就换个问法,或写「简历未体现,请现场确认」。
-- **evidence.path 一律留空**(没有仓库,没有仓内路径可指),用
-  `evidence.note` 写这句题的出处(如「技术栈栏:PyTorch」或「项目经验栏:钢材缺陷检测」)。
+- **`evidence` 只属于 entry 与 reserves,链层没有这个字段**(链的出处由
+  `theme` 承担)。没有仓库,`evidence.path` 一律留空,出处写进
+  `evidence.note`(如「技术栈栏:PyTorch」或「项目经验栏:钢材缺陷检测」)。
 - `time_minutes` 单题 2-5 分钟;概念题 2-3,深挖题 3-5。
+
+**链层只允许 `question` / `expected_signal` / `answer_reference` 三个键**。
+多写任何一个键(哪怕内容有用)整份题组都会被系统拒绝。
 
 ## 输出格式
 
