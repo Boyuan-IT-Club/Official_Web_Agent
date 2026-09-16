@@ -35,11 +35,26 @@ def _fake_model(payload: str):
     return _M()
 
 
+def _traits_json(
+    *, met_traits: tuple[str, ...] | None = None, reason: str = "做过两个 Web 项目"
+) -> str:
+    """按清单生成 traits 数组;met_traits 里的判达成,其余判未达成。
+
+    缺省全达成 —— 需要特定达成集的用例自己传。
+    """
+    from official_agent.evaluation.schema import TRAITS
+
+    met_traits = TRAITS if met_traits is None else met_traits
+    items = ",".join(
+        f'{{"trait": "{name}", "met": {str(name in met_traits).lower()}, "reason": "{reason}"}}'
+        for name in TRAITS
+    )
+    return f'{{"traits": [{items}], "summary": "强在项目,弱在开源", '
+
+
 _GOOD_JSON = (
-    '{"dimensions": ['
-    '{"field_key": "intro", "score": 80, "rationale": "具体", "evidence": "做过两个 Web 项目"},'
-    '{"field_key": "reason", "score": 40, "rationale": "偏短", "evidence": "认同社团氛围"}],'
-    '"attitude": {"verdict": "sincere", "reason": "认真"}}'
+    _traits_json()
+    + '"attitude": {"verdict": "sincere", "reason": "认真"}}'
 )
 
 
@@ -67,9 +82,9 @@ async def test_hard_zero_short_circuits_without_model() -> None:
     assert card["hard_zero"] is True
     assert card["total"] == 0.0
     assert card["attitude"]["verdict"] == "bad_faith"
-    assert all(d["score"] == 0 for d in card["dimensions"])
+    assert all(tv["met"] is False for tv in card["traits"])
     assert "单字符重复" in json_of_reasons(card)
-    assert card["versions"]["prompt"] == "evaluation_scoring/v4"
+    assert card["versions"]["prompt"] == "evaluation_scoring/v5"
 
 
 def json_of_reasons(card: dict) -> str:
@@ -84,9 +99,10 @@ async def test_normal_path_scores_and_weights_total() -> None:
     ):
         card = await ev.run_evaluation(_FIELDS, resume_id=2, cycle_id=2026, weights=_WEIGHTS)
     assert card["hard_zero"] is False
-    assert card["total"] == 70.0  # (80×3 + 40×1) / 4
     assert card["attitude"]["verdict"] == "sincere"
-    assert card["dimensions"][0]["evidence"] == "做过两个 Web 项目"
+    assert card["met_count"] == 12  # 清单全部达成
+    assert card["total"] >= 90.0  # 全部达成落 90-100 段
+    assert card["traits"][0]["reason"] == "做过两个 Web 项目"
     assert card["schema"] == "evaluation_scorecard/v1"
 
 
@@ -111,11 +127,9 @@ async def test_temperature_low_on_scorer() -> None:
 
     def _fake_build(settings, model=None, stream_usage=False, temperature=None):
         captured["temperature"] = temperature
-        return _fake_model(
-            '{"dimensions": [{"field_key": "intro", "score": 50, '
-            '"rationale": "r", "evidence": "e"}],'
-            '"attitude": {"verdict": "sincere", "reason": "r"}}'
-        )
+        payload = _traits_json(reason="e")
+        payload += '"attitude": {"verdict": "sincere", "reason": "r"}}'
+        return _fake_model(payload)
 
     with (
         patch.object(ev, "build_model", _fake_build),
@@ -135,33 +149,39 @@ def test_extract_json_tolerates_fences_and_noise() -> None:
         ev._extract_json("模型打摆了,没有 JSON")
 
 
-def test_dimension_incompleteness_raises() -> None:
-    """模型漏维 → error 态,绝不落'看起来完整'的卡。"""
+def test_trait_incompleteness_raises() -> None:
+    """模型漏项 → error 态,绝不落'看起来完整'的卡(漏项会拉低达成数、冤判)。"""
     bad = (
-        '{"dimensions": [{"field_key": "intro", "score": 80, '
-        '"rationale": "r", "evidence": "做过两个 Web 项目"}],'
-        '"attitude": {"verdict": "sincere", "reason": "r"}}'
+        '{"traits": [{"trait": "经验丰富", "met": true, "reason": "做过两个 Web 项目"}],'
+        '"summary": "x", "attitude": {"verdict": "sincere", "reason": "r"}}'
     )
     with (
         patch.object(ev, "build_model", lambda *a, **k: _fake_model(bad)),
         patch.object(ev, "get_effective_settings", _settings),
-        pytest.raises(RuntimeError, match="维度集不符"),
+        pytest.raises(RuntimeError, match="特质集不符"),
     ):
         asyncio.run(ev.run_evaluation(_FIELDS, resume_id=5, cycle_id=2026))
 
 
 def test_fabricated_evidence_raises() -> None:
-    """证据非原文 → error 态(编造证据不得落卡)。"""
-    bad = (
-        '{"dimensions": ['
-        '{"field_key": "intro", "score": 80, "rationale": "r", "evidence": "我获得过图灵奖"},'
-        '{"field_key": "reason", "score": 40, "rationale": "r", "evidence": "认同社团氛围"}],'
-        '"attitude": {"verdict": "sincere", "reason": "r"}}'
+    """达成项依据非原文 → error 态(凭空断言不得落卡)。"""
+    from official_agent.evaluation.schema import TRAITS
+
+    items = ",".join(
+        '{{"trait": "{n}", "met": {met}, "reason": "{why}"}}'.format(
+            n=n,
+            met=str(n == "经验丰富").lower(),
+            why="我获得过图灵奖" if n == "经验丰富" else "无",
+        )
+        for n in TRAITS
     )
+    bad = '{"traits": [' + items + '], "summary": "x", '
+    bad += '"attitude": {"verdict": "sincere", "reason": "r"}}'
+
     with (
         patch.object(ev, "build_model", lambda *a, **k: _fake_model(bad)),
         patch.object(ev, "get_effective_settings", _settings),
-        pytest.raises(RuntimeError, match="证据非原文"),
+        pytest.raises(RuntimeError, match="依据非原文"),
     ):
         asyncio.run(ev.run_evaluation(_FIELDS, resume_id=6, cycle_id=2026))
 
@@ -195,14 +215,10 @@ async def test_placeholder_flows_into_hard_zero() -> None:
 async def test_all_zero_llm_card_marks_hard_zero() -> None:
     """AI 全 0 分卡也要落 hard_zero(0 分队列靠它捞)。"""
     payload = (
-        '{"dimensions": ['
-        '{"field_key": "intro", "score": 0, "rationale": "r",'
-        ' "evidence": "我是张三,做过两个 Web 项目。"},'
-        '{"field_key": "reason", "score": 0, "rationale": "r",'
-        ' "evidence": "认同社团氛围,想参与招新开发。"}],'
-        '"attitude": {"verdict": "bad_faith",'
-        ' "reason": "reason 维整份无实质内容,原文引述:(空白)"}}'
-    )
+        _traits_json(met_traits=(), reason="整份无实质内容")
+        + '"atmm": "x", "attitude": {"verdict": "bad_faith",'
+        ' "reason": "整份敷衍,原文引述:我是张三,做过两个 Web 项目。"}}'
+    ).replace('"atmm": "x", ', '"summary": "整份无实质内容,不建议进入面试。", ')
     with (
         patch.object(ev, "build_model", lambda *a, **k: _fake_model(payload)),
         patch.object(ev, "get_effective_settings", _settings),
@@ -300,10 +316,8 @@ def test_evidence_near_quote_passes() -> None:
 async def test_extra_key_triggers_corrective_retry() -> None:
     """attitude 多塞键 → 第一次被 extra=forbid 拒,纠正重试后修正并落卡。"""
     bad = (
-        '{"dimensions": ['
-        '{"field_key": "intro", "score": 80, "rationale": "具体", "evidence": "做过两个 Web 项目"},'
-        '{"field_key": "reason", "score": 40, "rationale": "偏短", "evidence": "认同社团氛围"}],'
-        '"attitude": {"verdict": "sincere", "reason": "认真", "reason_note": ""}}'
+        _traits_json()
+        + '"attitude": {"verdict": "sincere", "reason": "认真", "reason_note": ""}}'
     )
     calls: list[str] = []
 
@@ -339,12 +353,12 @@ async def test_corrective_error_text_stays_inside_data_zone() -> None:
         },
         {"field_key": "reason", "title": "加入理由", "value": "认同社团氛围,想参与招新开发。"},
     ]
-    # 模型把 intro 的 payload 当成 reason 的证据(位置判错)→ 证据非原文
+    # 模型把 intro 的 payload 当成 reason 的依据(位置判错)→ 依据非原文
     bad = (
-        '{"dimensions": ['
-        '{"field_key": "intro", "score": 80, "rationale": "具体", "evidence": "做过两个 Web 项目"},'
-        f'{{"field_key": "reason", "score": 40, "rationale": "偏短", "evidence": "{payload}"}}],'
-        '"attitude": {"verdict": "sincere", "reason": "认真"}}'
+        '{"traits": ['
+        '{"trait": "经验丰富", "met": true, "reason": "做过两个 Web 项目"},'
+        f'{{"trait": "技术能力", "met": true, "reason": "{payload}"}}],'
+        '"summary": "x", "attitude": {"verdict": "sincere", "reason": "认真"}}'
     )
     calls: list[str] = []
 
@@ -368,19 +382,18 @@ async def test_corrective_error_text_stays_inside_data_zone() -> None:
     assert card["attitude"]["verdict"] == "sincere"
 
 
-def test_duplicate_field_key_reports_which_key() -> None:
-    """重复 field_key 的报错必须点名具体键。
+def test_duplicate_trait_reports_which_one() -> None:
+    """重复特质的报错必须点名具体项。
 
     回归:旧实现用 set 差算 missing/extra,而判定用 list 比较——模型重复
-    输出同一 field_key 时 list 不等但两个 set 差都为空,于是报「缺 [],多 []」,
-    既无从排查,回灌给模型的纠正诊断也形同空文(实测约 30% 失败里的一类)。
+    输出同一项时 list 不等但两个 set 差都为空,于是报「缺 [],多 []」,
+    既无从排查,回灌给模型的纠正诊断也形同空文。
     """
     dup = (
-        '{"dimensions": ['
-        '{"field_key": "intro", "score": 80, "rationale": "r", "evidence": "做过两个 Web 项目"},'
-        '{"field_key": "intro", "score": 70, "rationale": "r", "evidence": "做过两个 Web 项目"},'
-        '{"field_key": "reason", "score": 40, "rationale": "r", "evidence": "认同社团氛围"}],'
-        '"attitude": {"verdict": "sincere", "reason": "r"}}'
+        '{"traits": ['
+        '{"trait": "经验丰富", "met": true, "reason": "做过两个 Web 项目"},'
+        '{"trait": "经验丰富", "met": false, "reason": "做过两个 Web 项目"}],'
+        '"summary": "x", "attitude": {"verdict": "sincere", "reason": "r"}}'
     )
     with (
         patch.object(ev, "build_model", lambda *a, **k: _fake_model(dup)),
@@ -389,4 +402,4 @@ def test_duplicate_field_key_reports_which_key() -> None:
     ):
         asyncio.run(ev.run_evaluation(_FIELDS, resume_id=15, cycle_id=2026))
     msg = str(ei.value)
-    assert "重复" in msg and "intro" in msg, f"报错未点出重复键:{msg}"
+    assert "重复" in msg and "经验丰富" in msg, f"报错未点出重复项:{msg}"

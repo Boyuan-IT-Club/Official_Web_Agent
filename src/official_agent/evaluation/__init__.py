@@ -10,9 +10,10 @@
 """
 
 from official_agent.evaluation.schema import (
+    TRAITS,
     AttitudeVerdict,
-    DimensionScore,
     ScorecardOutput,
+    TraitVerdict,
 )
 
-__all__ = ["AttitudeVerdict", "DimensionScore", "ScorecardOutput"]
+__all__ = ["TRAITS", "AttitudeVerdict", "ScorecardOutput", "TraitVerdict"]

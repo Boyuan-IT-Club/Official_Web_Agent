@@ -5,31 +5,51 @@ strict 语义:extra="forbid" + 字段约束。输出轨为提示词 JSON + 本 s
 与强制 tool_choice 都被 400 拒)——schema 即提示词的一部分,字段名/枚举值
 改一个字模型行为就变,所以本文件是 prompt 级资产。
 
-维度分 0-100(内部锚),总分是派生值(代码加权),不由模型给。
+**一份简历一个总分**,不再逐栏打分:逐栏平均会把「哪一栏长」当成「人好不好」,
+一句话的候选人只要那一句写得顺就能追平有开源项目的人。改为按**特质清单**
+逐项判定达成与否,达成项数决定分数段——总分对应的是「这个人具备几项我们
+看重的品质」,而不是「他的字写得好不好」。
 """
 
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+#: 招新看重的特质清单。**顺序即权重递减**,也是 prompt 里逐项判定的顺序。
+#: 收项原则:能凭简历原文**判定达成与否**的才收(「真诚」「有热情」这类无法
+#: 从文字证伪的,归到最后一项「内容详实」里一并体现)。
+TRAITS: tuple[str, ...] = (
+    "经验丰富",  # 有可讲的真实项目/实习/竞赛经历
+    "技术能力",  # 会写代码:coding / vibe-coding / 工程工具链
+    "自学能力",  # 主动学过课外的技术,有路径有产出
+    "开源精神",  # 公开作品、提交记录、文档沉淀
+    "一技之长",  # 技术之外的手艺:运营/剪辑/设计/洽谈/统筹
+    "对技术的热情",  # 主动钻研的痕迹(读源码、打 CTF、造轮子)
+    "对社团的热情",  # 想清楚为什么来这个社团、能带来什么
+    "责任心",  # 有始有终、带过人、担过责
+    "学业表现",  # 绩点/奖学金/学业类奖项
+    "内容详实",  # 每栏都写、有细节有数字,不是一两句敷衍
+    "真诚",  # 不套话不夸大,写自己的真实水平与动机
+    "表达与结构",  # 条理清楚,读得下去
+)
 
-class DimensionScore(BaseModel):
-    """单维评分:分 + 依据 + 原文证据句。
 
-    evidence 必须是该维 textarea 的原文片段(句级)——评审复核的锚,
-    模型编造证据时评委可直接对照简历打回。
+class TraitVerdict(BaseModel):
+    """一项特质的判定结果。
+
+    met=false 时 reason 写**缺什么**(「简历未提及任何开源产出」),不许空着——
+    这一栏是候选人复盘、也是面试官复核的依据。
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    field_key: str = Field(min_length=1, description="简历字段键(周期配置驱动)")
-    score: int = Field(ge=0, le=100)
-    rationale: str = Field(min_length=1, description="为什么给这个分")
-    evidence: str = Field(min_length=1, max_length=120, description="该维原文句,逐字引用")
+    trait: str = Field(min_length=1, description=f"特质名,取值:{' / '.join(TRAITS)}")
+    met: bool
+    reason: str = Field(min_length=1, description="达成/未达成的原文依据")
 
 
 class AttitudeVerdict(BaseModel):
-    """态度结论:端正(sincere)/敷衍(perfunctory,各维压低)/不端(bad_faith,整份 0)。"""
+    """态度结论:端正(sincere)/敷衍(perfunctory,总分压低)/不端(bad_faith,整份 0)。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -38,11 +58,16 @@ class AttitudeVerdict(BaseModel):
 
 
 class ScorecardOutput(BaseModel):
-    """模型结构化输出整体;与确定性规则合并后落 evaluation_scorecard 卡。"""
+    """模型结构化输出整体;与确定性规则合并后落 evaluation_scorecard 卡。
+
+    分数由**达成项数**派生(代码算,不让模型直接给分):模型只负责逐项判定
+    达成与否,把「给几分」这种容易漂移的判断换成可核对的清单。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    dimensions: list[DimensionScore] = Field(min_length=1)
+    traits: list[TraitVerdict] = Field(min_length=1)
+    summary: str = Field(min_length=1, description="2-4 句整体评价,给面试官看的理由")
     attitude: AttitudeVerdict
 
 

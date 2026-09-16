@@ -85,8 +85,58 @@ def _reason_of(value: str, title: str, placeholder: str = "") -> str:
     return "命中绝对卡规则"
 
 
+#: 达成项数 → 分数段的边界。自高而低,命中第一个不高于达成数的下限即为该段。
+#: 分段而非线性(12 项 × 固定分):**顶部要挤、底部要宽**。招新真正想捞的是
+#: 「广度都够」的人,所以 11 项以上才进 90 档;而 5 项以下是明显没写东西的
+#: 区间,粗分即可。
+_BAND_STEPS: tuple[tuple[int, int, int], ...] = (
+    # (最低达成数, 分数下限, 分数上限)
+    (11, 90, 100),
+    (9, 75, 89),
+    (7, 60, 74),
+    (5, 45, 59),
+    (3, 30, 44),
+    (1, 15, 29),
+    (0, 0, 14),
+)
+
+
+def trait_score(met: dict[str, bool]) -> float:
+    """特质达成情况 → 0-100 分(派生,不由模型给分)。
+
+    模型只做逐项判定(达成/未达成 + 依据),分数在这里算:同一份简历重跑,
+    只要判定一致分数就一致,不会因为模型这次「心情」不同而漂移。
+
+    met 的键是**特质名**(不是位置):模型偶尔会打乱输出顺序,按位置加权
+    会把权重加到错的项上 —— 于是同一个判定集换个顺序就换了分数。
+    段内按达成比例微调,同段内也有区分度;前段特质达成得多的落在段内偏高。
+    """
+    if not met:
+        return 0.0
+    # 只统计清单内的项:多余键(模型改名)不计入,避免虚增达成数
+    from official_agent.evaluation.schema import TRAITS
+
+    flags = [bool(met.get(name, False)) for name in TRAITS]
+    n = len(flags)
+    # 权重按**清单顺序**递减(第一项最重):靠前的特质是招新更看重的
+    weights = [n - i for i in range(n)]
+    met_count = sum(1 for m in flags if m)
+    weighted = sum(w for w, m in zip(weights, flags, strict=True) if m)
+    weighted_max = sum(weights)
+
+    for min_met, low, high in _BAND_STEPS:
+        if met_count >= min_met:
+            ratio = weighted / weighted_max if weighted_max else 0.0
+            return round(low + (high - low) * ratio, 1)
+    return 0.0
+
+
 def weighted_total(scores: dict[str, int], weights: dict[str, float]) -> float:
-    """加权总分(派生,非模型输出):Σ 分×权 / Σ 权;权重缺省 1.0。"""
+    """加权总分(派生,非模型输出):Σ 分×权 / Σ 权;权重缺省 1.0。
+
+    保留给仍按维度给分的调用方(周期级维度配置);简历初筛已改用
+    `trait_score` 的清单分段。
+    """
     num = 0.0
     den = 0.0
     for key, score in scores.items():

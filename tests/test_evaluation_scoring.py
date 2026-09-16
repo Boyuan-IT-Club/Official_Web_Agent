@@ -65,3 +65,65 @@ def test_exact_placeholder_match_is_hard_zero() -> None:
     assert is_hard_zero_value(ph, placeholder=ph)
     # 真认真写了(比 placeholder 长且不同)→ 不卡
     assert not is_hard_zero_value("我做过社团官网重构,负责报名页。", placeholder=ph)
+
+
+# ── 特质清单分段(总分由达成项数派生)────────────────────
+
+
+def test_trait_score_bands_by_achievement_count() -> None:
+    """达成项数决定分数段;段内按加权达成比例微调。
+
+    分数只由判定结果派生:模型不给分,同一份判定重算必然同分。
+    """
+    from official_agent.evaluation.schema import TRAITS
+    from official_agent.evaluation.scoring import trait_score
+
+    def flags(k: int) -> dict[str, bool]:
+        return {name: i < k for i, name in enumerate(TRAITS)}
+
+    assert trait_score(flags(0)) == 0.0
+    # 全达成落顶段
+    assert trait_score(flags(len(TRAITS))) == 100.0
+    # 每段的下限:达成数跨过阈值就进该段
+    assert 90 <= trait_score(flags(11)) <= 100
+    assert 75 <= trait_score(flags(9)) < 90
+    assert 60 <= trait_score(flags(7)) < 75
+    assert 45 <= trait_score(flags(5)) < 60
+    assert 30 <= trait_score(flags(3)) < 45
+    assert 15 <= trait_score(flags(1)) < 30
+
+
+def test_trait_score_is_order_independent() -> None:
+    """判定集相同就同分,与模型输出顺序无关。
+
+    回归:先前按**列表位置**加权,而校验只比对集合——模型打乱输出顺序会
+    把权重加到错的项上,同一个判定集换个顺序就换了分数。
+    """
+    from official_agent.evaluation.schema import TRAITS
+    from official_agent.evaluation.scoring import trait_score
+
+    core = {name: i < 9 for i, name in enumerate(TRAITS)}
+    shuffled = dict(reversed(list(core.items())))
+    assert trait_score(core) == trait_score(shuffled)
+
+
+def test_trait_score_weights_leading_traits_higher() -> None:
+    """同样达成 9 项,达成**靠前**特质的得分高于只达成靠后的。
+
+    靠前的特质是招新更看重的(经验/技术/自学/开源),同数量下应当更高。
+    """
+    from official_agent.evaluation.schema import TRAITS
+    from official_agent.evaluation.scoring import trait_score
+
+    lead = {name: i < 9 for i, name in enumerate(TRAITS)}
+    tail = {name: i >= 3 for i, name in enumerate(TRAITS)}
+    assert sum(lead.values()) == sum(tail.values()) == 9
+    assert trait_score(lead) > trait_score(tail)
+
+
+def test_trait_score_ignores_unknown_traits() -> None:
+    """清单外的键不计入 —— 模型自造项名不能虚增达成数。"""
+    from official_agent.evaluation.schema import TRAITS
+    from official_agent.evaluation.scoring import trait_score
+
+    assert trait_score({**{n: False for n in TRAITS}, "自造特质": True}) == 0.0
