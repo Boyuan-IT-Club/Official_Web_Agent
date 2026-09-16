@@ -135,9 +135,20 @@ async def finalize_hard(state: EvaluationState) -> dict:
 
 
 def _evidence_in(evidence: str, source: str) -> bool:
-    """证据逐字性:归一空白后 evidence 是原文子串,或与原文的匹配块覆盖
-    ≥85%(实测:模型忠实引述时偶有一字压缩——「大一起接触」→「大一接触」
-    ——近似引述放行;编造证据的公共块极短,仍拒绝)。"""
+    """证据是否落在原文:整句近似引述,或**由多段原文片段拼成**。
+
+    两种正当形态都要放行:
+    1. 整句忠实引述(允许一字压缩:「大一起接触」→「大一接触」);
+    2. 拼装引述——模型把若干处原文片段用标点/连接词串起来说「依据在哪几处」,
+       这在给**整体判定**写依据时是常态(「『做过一年数据分析助理』;
+       『给学院做过一份招新转化率分析…』」)。
+
+    只认整句会把这些全判成编造:实测 3/4 份真实简历因此整份无分。
+    判法:按标点切开逐段核对,每段都得在原文里落得到(短段放宽为包含即可),
+    且**拼装出来的内容不能全靠噪音凑数**——所以要求各段长度之和占原证据的
+    ≥80%。整句形态仍走原来的近似匹配。
+    """
+    import re
     from difflib import SequenceMatcher
 
     def norm(s: str) -> str:
@@ -148,11 +159,24 @@ def _evidence_in(evidence: str, source: str) -> bool:
         return False
     if ev in src:
         return True
-    # 串中掉一字会把「最长公共块」劈成两半,改用匹配块总覆盖:
-    # 证据字符 ≥85% 能按序在原文中找到(含掉字/标点差异)即算忠实引述
-    matcher = SequenceMatcher(None, ev, src, autojunk=False)
-    covered = sum(b.size for b in matcher.get_matching_blocks())
-    return covered >= max(8, int(len(ev) * 0.85))
+
+    def _fuzzy(segment: str) -> bool:
+        if not segment:
+            return False
+        if segment in src:
+            return True
+        matcher = SequenceMatcher(None, segment, src, autojunk=False)
+        covered = sum(b.size for b in matcher.get_matching_blocks())
+        return covered >= max(8, int(len(segment) * 0.85))
+
+    if _fuzzy(ev):
+        return True
+    # 拼装形态:按标点/引号切成片段,逐段核对
+    pieces = [p for p in re.split(r"[;；,、。!?…—\-—「」『』\"'()()【】\[\]:]", ev) if len(p) >= 6]
+    if len(pieces) < 2:
+        return False
+    hit = sum(len(p) for p in pieces if _fuzzy(p))
+    return hit >= int(len(ev) * 0.8)
 
 
 async def llm_score(state: EvaluationState, config: RunnableConfig | None = None) -> dict:

@@ -312,6 +312,23 @@ def test_evidence_near_quote_passes() -> None:
     assert ev._evidence_in("我获得过三段 ACM 区域赛金牌", source) is False
 
 
+def test_evidence_accepts_pieces_assembled_from_source() -> None:
+    """依据由**多段原文片段拼成**时放行 —— 整体判定写依据的常态形态。
+
+    实测过:只认「整句近似匹配」会把 3/4 份真实简历的达成项判成编造,
+    整份卡因此生不出来。模型的写法是「『片段一』;『片段二』」,把依据
+    落在哪几处说清,不是编造。
+    """
+    source = (
+        "技术栈:\nPython/pandas/sklearn 基础,用过 Tableau 做可视化。\n"
+        "个人简介:\n人工智能专业,做过一年数据分析助理,帮社团整理过招新数据。"
+    )
+    assembled = "『做过一年数据分析助理』;『人工智能专业』"
+    assert ev._evidence_in(assembled, source) is True
+    # 拼装也要各段落得到:全编造的拼装仍拒
+    assert ev._evidence_in("『我拿过图灵奖』;『我发过顶会论文』", source) is False
+
+
 @pytest.mark.asyncio
 async def test_extra_key_triggers_corrective_retry() -> None:
     """attitude 多塞键 → 第一次被 extra=forbid 拒,纠正重试后修正并落卡。"""
