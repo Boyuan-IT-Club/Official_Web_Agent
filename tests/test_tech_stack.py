@@ -113,6 +113,35 @@ def test_normalize_level(text: str, expected: str) -> None:
     assert ts.normalize_level(text) == expected
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # 中文简历的高频同义措辞:只认「精通/熟练/掌握/了解」会让这些落进 listed,
+        # 面试官会以为候选人什么都没声明,其实他写了「熟悉」。
+        ("熟悉 Python 与 FastAPI", "了解"),
+        ("Python/pandas/sklearn 基础", "了解"),
+        ("有扎实的 Java 基础", "了解"),
+        ("会用 Docker 部署", "了解"),
+        ("Excel 很熟", "了解"),
+        # 弱化措辞仍然优先压到初学
+        ("在学 SQL 和 Python", "初学"),
+        ("刚刚入门前端", "初学"),
+        # 「熟练掌握」含「熟练」,按更高档取(取高不取低——候选人确实这么写了);
+        # 而单独的「掌握」原样保留
+        ("熟练掌握 Redis", "熟练"),
+        ("掌握 Redis", "掌握"),
+    ],
+)
+def test_normalize_level_covers_common_synonyms(text: str, expected: str) -> None:
+    """同义措辞有确定档位 —— 不给模型自由发挥的空间。
+
+    收词面窄时模型只能自己猜,同一句「熟悉 Python」两次跑能出不同档位;
+    而档位是面试官拿捏深度的标尺,漂移会让同一份简历问出不同难度的问题。
+    同义措辞一律**就低**取(「熟悉」取了解不取熟练),与「档位只降不升」一致。
+    """
+    assert ts.normalize_level(text) == expected
+
+
 def test_normalize_level_negation_is_not_a_claim() -> None:
     """否定措辞不是把该技术列为技能;否定词不限于紧邻的「不」。
 

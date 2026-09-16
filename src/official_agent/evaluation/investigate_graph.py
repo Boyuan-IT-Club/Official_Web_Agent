@@ -94,10 +94,15 @@ class InvestigationState(TypedDict, total=False):
 
 
 def _render_tech(state: InvestigationState) -> str:
-    """技术栈清单 → 出题材料的文本块(名词 + 自述档位 + 项目归属)。
+    """技术栈清单 → 出题材料的文本块(名词 + 系统判定的档位 + 项目归属)。
 
-    档位进材料是让模型按声称强度定深度(熟练才深挖);项目归属进材料是让
+    档位进材料是让模型据**声称强度**定深度(熟练才深挖);项目归属进材料是让
     模型把技术追问落到具体项目上(「这个技术你在 X 里怎么用的」)。
+
+    措辞上刻意写「系统判定」而不是「自述」:档位是抽取器从简历措辞**推断**
+    出来的,不是候选人的原话。写成「自述」会让模型把推断结果当成引语写进题面
+    (「你写了『掌握 Python』」)——候选人从没写过那个词,面试官据此发问就是
+    在问一件没发生的事。题面只能引用**简历原文**;档位仅供模型自己定深度。
     """
     items = state.get("tech_items") or []
     if not items:
@@ -105,7 +110,13 @@ def _render_tech(state: InvestigationState) -> str:
     lines = []
     for it in items:
         used = "、".join(it.get("used_in") or []) or "简历未指明项目"
-        lines.append(f"- {it.get('name')}(自述档位:{it.get('claimed_level')};出现在:{used})")
+        lines.append(
+            f"- {it.get('name')}(系统判定程度:{it.get('claimed_level')};出现在:{used})"
+        )
+    lines.append(
+        "注:程度是系统从简历措辞推断的,不是候选人的原话——题面不要把它当引语,"
+        "也不要写「你写了/你自述了『掌握 X』」这类话。"
+    )
     return "\n".join(lines)
 
 async def _norepo_route(state: InvestigationState) -> dict:
