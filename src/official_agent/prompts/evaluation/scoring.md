@@ -1,9 +1,9 @@
 ---
 name: evaluation-scoring
 description: B 简历初筛打分 prompt v5(特质清单逐项判定 + 整体理由 + 态度三要素;strict 结构化输出)
-version: evaluation_scoring/v5
+version: evaluation_scoring/v6
 model_tier: strong
-cache_prefix: evaluation-scoring-v5
+cache_prefix: evaluation-scoring-v6
 model: strong
 ---
 
@@ -34,10 +34,12 @@ model: strong
 
 **判定纪律**:
 - **拿不准就判 false**。误判达成会让不够格的人进面试,比漏掉一个更贵;
-- 判 true 的 `reason` 必须**引用原文里的具体事实**(「写了用 pandas 清洗两千条数据」
-  这种);抄不出原文的「依据」不算依据;
-- 判 false 的 `reason` 写**缺什么**(「简历未提及任何公开项目」),不许空着、不许
-  只写「无」;
+- 判 true 时**必填 `quote`**:从简历里**逐字照抄**一段作为依据(如
+  `"用 pandas 清洗两千条数据"`)。**照抄,不要改写、不要拼接多处**——
+  程序会拿它去原文里核对,改写过或拼起来的引文会被打回;
+- `reason` 用你自己的话解释这个判定(判 false 时写**缺什么**,如
+  「简历未提及任何公开项目」),不许空着、不许只写「无」。`reason` 是给人看的
+  总结,**不需要**等于原文;
 - **态度与达成数要对得上**:`perfunctory`(整体敷衍)至多达成 3 项;
   `bad_faith`(骂人/故意应付)一项都不该达成。
 
@@ -62,8 +64,10 @@ model: strong
 只输出一个 JSON 对象(无代码围栏、无解释文字):
 
 {"traits": [{"trait": "经验丰富", "met": true,
-             "reason": "写了智慧停车小程序(第一负责人)与 RSS READER,均有具体职责描述"},
-            {"trait": "开源精神", "met": false, "reason": "简历未提及任何公开项目或提交记录"}],
+             "quote": "主导完成了智慧停车管理系统小程序(第一负责人)",
+             "reason": "写了具体项目与自己在其中的职责,不是只列项目名"},
+            {"trait": "开源精神", "met": false, "quote": "",
+             "reason": "简历未提及任何公开项目或提交记录"}],
  "summary": "<2-4 句:强在哪(带原文事实)、弱在哪、建议怎么面>",
  "attitude": {"verdict": "sincere", "reason": "<点名栏位 + 判据 + 引述原文>"}}
 

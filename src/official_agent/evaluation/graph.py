@@ -255,10 +255,15 @@ async def llm_score(state: EvaluationState, config: RunnableConfig | None = None
                     )
                 # 判定依据须能在简历原文里找到落点:允许模型概括,但抄不出原文
                 # 的「依据」等于凭空断言,复核时无从对照。
+                # 只校验 quote(专用逐字字段):编造的原文在简历里找不到。
+                # reason 是自然语言总结,**不**做逐字校验 —— 总结本来就不等于
+                # 原文,拿引文判据去卡它会把整份卡误杀(实测四轮都栽在这)。
                 for tv in result.traits:
-                    if tv.met and not _evidence_in(tv.reason, " ".join(sources)):
+                    if tv.met and not tv.quote.strip():
+                        raise ValueError(f"达成项缺原文引文(trait={tv.trait})")
+                    if tv.quote.strip() and not _evidence_in(tv.quote, " ".join(sources)):
                         raise ValueError(
-                            f"达成项依据非原文(trait={tv.trait}):{tv.reason[:40]!r}"
+                            f"引文非原文(trait={tv.trait}):{tv.quote[:40]!r}"
                         )
                 # 硬校验:态度与判定数的契约,违例同样回灌重试
                 met = sum(1 for tv in result.traits if tv.met)
@@ -283,7 +288,9 @@ async def llm_score(state: EvaluationState, config: RunnableConfig | None = None
                     + "\n请重新输出完整 JSON,只包含 schema 声明的字段:\n"
                     "- attitude 由 verdict 与 reason 两个键组成;\n"
                     "- traits 必须逐项覆盖清单里的每一个特质(名字一字不差),各出现一次;\n"
-                    "- 每项给 met(true/false)与 reason;判 true 的依据要在简历原文里找得到。"
+                    "- 每项给 met(true/false)、quote 与 reason;\n"
+                    "- quote 是**原文逐字片段**(判 true 必填),照抄简历里的一段;\n"
+                    "- reason 用自己的话解释,不用等于原文。"
                 )
             else:
                 last_err = None

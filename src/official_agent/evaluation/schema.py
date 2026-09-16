@@ -37,15 +37,24 @@ TRAITS: tuple[str, ...] = (
 class TraitVerdict(BaseModel):
     """一项特质的判定结果。
 
-    met=false 时 reason 写**缺什么**(「简历未提及任何开源产出」),不许空着——
-    这一栏是候选人复盘、也是面试官复核的依据。
+    两个字段分工明确,**不要混**:
+    - `reason`:自然语言依据,写给人看(判 false 时写**缺什么**,不许空着)。
+      它是总结,不是引文,机器不逐字校验——总结本来就不该等于原文。
+    - `quote`:判定所依据的**原文逐字片段**,判 true 时必填。机器只校验这一项:
+      编造的原文在简历里找不到。分开之后,「防编造」与「用自然语言解释」
+      各走各的字段,不会因为要求人话说得像原文而互相打架。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     trait: str = Field(min_length=1, description=f"特质名,取值:{' / '.join(TRAITS)}")
     met: bool
-    reason: str = Field(min_length=1, description="达成/未达成的原文依据")
+    quote: str = Field(
+        default="",
+        max_length=200,
+        description="判定依据的原文逐字片段(判 true 必填);不要改写、不要拼接多处",
+    )
+    reason: str = Field(min_length=1, description="自然语言依据;判 false 时写缺什么")
 
 
 class AttitudeVerdict(BaseModel):

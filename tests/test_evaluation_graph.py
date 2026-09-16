@@ -46,7 +46,12 @@ def _traits_json(
 
     met_traits = TRAITS if met_traits is None else met_traits
     items = ",".join(
-        f'{{"trait": "{name}", "met": {str(name in met_traits).lower()}, "reason": "{reason}"}}'
+        '{{"trait": "{n}", "met": {m}, "quote": "{q}", "reason": "{r}"}}'.format(
+            n=name,
+            m=str(name in met_traits).lower(),
+            q=reason if name in met_traits else "",
+            r=reason,
+        )
         for name in TRAITS
     )
     return f'{{"traits": [{items}], "summary": "强在项目,弱在开源", '
@@ -84,7 +89,7 @@ async def test_hard_zero_short_circuits_without_model() -> None:
     assert card["attitude"]["verdict"] == "bad_faith"
     assert all(tv["met"] is False for tv in card["traits"])
     assert "单字符重复" in json_of_reasons(card)
-    assert card["versions"]["prompt"] == "evaluation_scoring/v5"
+    assert card["versions"]["prompt"] == "evaluation_scoring/v6"
 
 
 def json_of_reasons(card: dict) -> str:
@@ -168,9 +173,10 @@ def test_fabricated_evidence_raises() -> None:
     from official_agent.evaluation.schema import TRAITS
 
     items = ",".join(
-        '{{"trait": "{n}", "met": {met}, "reason": "{why}"}}'.format(
+        '{{"trait": "{n}", "met": {met}, "quote": "{q}", "reason": "{why}"}}'.format(
             n=n,
             met=str(n == "经验丰富").lower(),
+            q="我获得过图灵奖" if n == "经验丰富" else "",
             why="我获得过图灵奖" if n == "经验丰富" else "无",
         )
         for n in TRAITS
@@ -181,7 +187,7 @@ def test_fabricated_evidence_raises() -> None:
     with (
         patch.object(ev, "build_model", lambda *a, **k: _fake_model(bad)),
         patch.object(ev, "get_effective_settings", _settings),
-        pytest.raises(RuntimeError, match="依据非原文"),
+        pytest.raises(RuntimeError, match="引文非原文"),
     ):
         asyncio.run(ev.run_evaluation(_FIELDS, resume_id=6, cycle_id=2026))
 
@@ -388,8 +394,8 @@ async def test_corrective_error_text_stays_inside_data_zone() -> None:
     # 模型把 intro 的 payload 当成 reason 的依据(位置判错)→ 依据非原文
     bad = (
         '{"traits": ['
-        '{"trait": "经验丰富", "met": true, "reason": "做过两个 Web 项目"},'
-        f'{{"trait": "技术能力", "met": true, "reason": "{payload}"}}],'
+        '{"trait": "经验丰富", "met": true, "quote": "做过两个 Web 项目", "reason": "r"},'
+        f'{{"trait": "技术能力", "met": true, "quote": "{payload}", "reason": "r"}}],'
         '"summary": "x", "attitude": {"verdict": "sincere", "reason": "认真"}}'
     )
     calls: list[str] = []
