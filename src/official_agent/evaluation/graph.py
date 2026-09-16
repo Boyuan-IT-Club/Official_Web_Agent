@@ -134,19 +134,26 @@ async def finalize_hard(state: EvaluationState) -> dict:
     return {"card": card, "error": None, "llm_usage": {}}
 
 
+#: 引号包裹的片段:模型常把原文放进引号,引号外是自己的交代。成对的中英引号都收。
+_QUOTED_RE = re.compile(
+    "[\u201c\u0022\u300c\u300e]([^\u201d\u0022\u300d\u300f]+)[\u201d\u0022\u300d\u300f]"
+)
+
+
 def _evidence_in(evidence: str, source: str) -> bool:
-    """证据是否落在原文:整句近似引述,或**由多段原文片段拼成**。
+    """依据是否落在原文:直接引述、近似引述,或**带叙述的引述**。
 
-    两种正当形态都要放行:
-    1. 整句忠实引述(允许一字压缩:「大一起接触」→「大一接触」);
-    2. 拼装引述——模型把若干处原文片段用标点/连接词串起来说「依据在哪几处」,
-       这在给**整体判定**写依据时是常态(「『做过一年数据分析助理』;
-       『给学院做过一份招新转化率分析…』」)。
+    模型写依据的形态有三种,都要放行:
+    1. 裸引述:整句是原文(允许一字压缩:「大一起接触」→「大一接触」);
+    2. 拼装引述:若干原文片段用标点串起来(「『片段一』;『片段二』」);
+    3. **带叙述的引述**:模型用自己的话交代出处,把原文放在引号里
+       (「项目经验栏写“运营过 2w 粉账号…”」)——引号外是模型的话,
+       引号内才是它声称的证据。
 
-    只认整句会把这些全判成编造:实测 3/4 份真实简历因此整份无分。
-    判法:按标点切开逐段核对,每段都得在原文里落得到(短段放宽为包含即可),
-    且**拼装出来的内容不能全靠噪音凑数**——所以要求各段长度之和占原证据的
-    ≥80%。整句形态仍走原来的近似匹配。
+    只认第 1 种会误杀后两种:实测真实简历上 3/4 份整份无分。但也不能松到
+    「随便挑一句像原文的就放行」——那等于取消这道闸门,编造照样能过。
+    故判据是:**凡是引号里的内容,必须逐段落得到原文**;引号外的叙述不计。
+    没有引号时,退化为整句近似匹配 + 标点切段。
     """
     import re
     from difflib import SequenceMatcher
@@ -161,22 +168,29 @@ def _evidence_in(evidence: str, source: str) -> bool:
         return True
 
     def _fuzzy(segment: str) -> bool:
+        """一段文本是否忠实出自原文(允许掉字/标点差异)。"""
         if not segment:
             return False
         if segment in src:
             return True
         matcher = SequenceMatcher(None, segment, src, autojunk=False)
         covered = sum(b.size for b in matcher.get_matching_blocks())
-        return covered >= max(8, int(len(segment) * 0.85))
+        return covered >= max(6, int(len(segment) * 0.7))
 
-    if _fuzzy(ev):
-        return True
-    # 拼装形态:按标点/引号切成片段,逐段核对
-    pieces = [p for p in re.split(r"[;；,、。!?…—\-—「」『』\"'()()【】\[\]:]", ev) if len(p) >= 6]
-    if len(pieces) < 2:
-        return False
-    hit = sum(len(p) for p in pieces if _fuzzy(p))
-    return hit >= int(len(ev) * 0.8)
+    # 形态 3:有引号 → 引号内的每一段都必须是原文(这是模型声称的证据本体)
+    quoted = [norm(q) for q in _QUOTED_RE.findall(evidence or "")]
+    quoted = [q for q in quoted if len(q) >= 4]
+    if quoted:
+        return all(_fuzzy(q) for q in quoted)
+
+    # 形态 2:无引号的拼装 —— 按标点切段,各段落得到原文且覆盖率够高
+    pieces = [p for p in re.split(r"[;；,、。!?…—\-—()()【】\[\]:]", ev) if len(p) >= 6]
+    if len(pieces) >= 2:
+        hit = sum(len(p) for p in pieces if _fuzzy(p))
+        return hit >= int(len(ev) * 0.8)
+
+    # 形态 1:整句近似引述
+    return _fuzzy(ev)
 
 
 async def llm_score(state: EvaluationState, config: RunnableConfig | None = None) -> dict:

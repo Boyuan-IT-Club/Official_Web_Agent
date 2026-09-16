@@ -329,6 +329,21 @@ def test_evidence_accepts_pieces_assembled_from_source() -> None:
     assert ev._evidence_in("『我拿过图灵奖』;『我发过顶会论文』", source) is False
 
 
+def test_evidence_accepts_quote_with_narrative_wrapper() -> None:
+    """带叙述的引述放行:引号外是模型的交代,引号内才是它声称的依据。
+
+    这是真实模型最常写的形态(「项目经验栏写“运营过 2w 粉账号…”」)。
+    只认裸引述会让大部分达成项被判成编造,整份卡生不出来。
+    但**引号内的内容**必须逐段落得到原文 —— 否则等于取消了闸门。
+    """
+    source = "项目经验:\n运营过 2w 粉账号,策划过三场线上活动,最高单场参与两千人。"
+
+    wrapped = '项目经验栏写“运营过 2w 粉账号,策划过三场线上活动,最高单场参与两千人”,有具体战绩'
+    assert ev._evidence_in(wrapped, source) is True
+    # 引号内编造 → 仍拒(叙述不构成豁免)
+    assert ev._evidence_in('项目经验栏写“我拿过图灵奖”', source) is False
+
+
 @pytest.mark.asyncio
 async def test_extra_key_triggers_corrective_retry() -> None:
     """attitude 多塞键 → 第一次被 extra=forbid 拒,纠正重试后修正并落卡。"""
