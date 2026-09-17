@@ -127,3 +127,40 @@ def test_trait_score_ignores_unknown_traits() -> None:
     from official_agent.evaluation.scoring import trait_score
 
     assert trait_score({**{n: False for n in TRAITS}, "自造特质": True}) == 0.0
+
+
+# ── 可选栏留空不算敷衍 ───────────────────────────────
+
+
+def test_optional_blank_is_not_hard_zero() -> None:
+    """可选栏没填是正常的 —— 不能据此把整份判成敷衍。
+
+    「获奖经历」这类字段 is_required=0,候选人没有奖项就空着。旧实现把
+    任何空值都当绝对卡,一份其他栏都认真的简历会因此整份硬 0(初筛不过)。
+    """
+    assert is_hard_zero_value("", required=False) is False
+    assert is_hard_zero_value("   ", required=False) is False
+    # 必填留空仍然卡
+    assert is_hard_zero_value("", required=True) is True
+    assert is_hard_zero_value("") is True  # 缺省保守
+
+
+def test_optional_blank_still_catches_filler() -> None:
+    """可选**不代表免检**:填了敷衍内容一样卡(不填和乱填是两回事)。"""
+    assert is_hard_zero_value("无", required=False) is True
+    assert is_hard_zero_value("暂无", required=False) is True
+    assert is_hard_zero_value("a", required=False) is True
+    assert is_hard_zero_value("111", required=False) is True
+    assert is_hard_zero_value("请填写获奖经历", required=False) is True
+
+
+def test_detect_hard_zero_ignores_optional_blanks() -> None:
+    """端到端:只有可选栏空着时,整份不判硬 0。"""
+    fields = [
+        FieldText(field_key="profile", title="个人简介", value="我是张三,做过两个 Web 项目。"),
+        FieldText(field_key="awards", title="获奖经历", value="", required=False),
+    ]
+    assert detect_hard_zero(fields) == {}
+    # 必填栏空着仍要卡
+    fields.append(FieldText(field_key="projects", title="项目经验", value="", required=True))
+    assert set(detect_hard_zero(fields)) == {"projects"}

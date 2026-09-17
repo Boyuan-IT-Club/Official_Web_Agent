@@ -162,6 +162,9 @@ async def fetch_scoring_fields(
             title=str(f.get("fieldLabel") or ""),
             value=str(f.get("fieldValue") or ""),
             placeholder=str(f.get("placeholder") or ""),
+            # 必填性决定「留空算不算敷衍」:可选栏没填是正常的。
+            # 后端字段缺失时按必填处理(保守方向)。
+            required=f.get("isRequired") is not False,
         )
         for f in simple_fields
         if f.get("fieldType") == "textarea"
@@ -223,6 +226,7 @@ def _mask_fields_for_model(fields: list[FieldText], *, resume_id: int) -> list[F
                 title=str(mask_pii_deep(f.title)),
                 value=str(masked_value),
                 placeholder=str(masked_ph),
+                required=f.required,  # 脱敏不改必填性
             )
         )
     if hits:
@@ -376,6 +380,7 @@ class EvaluationRunner:
                             "title": f.title,
                             "value": f.value,
                             "placeholder": f.placeholder,
+                            "required": f.required,
                         }
                         for f in fields
                     ],

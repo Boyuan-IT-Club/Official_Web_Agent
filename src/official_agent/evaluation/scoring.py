@@ -29,28 +29,41 @@ class FieldText:
 
     placeholder 来自周期字段配置;有精确 placeholder 时
     「与 placeholder 同文」按全等判,比前缀启发式更准。
+
+    required 来自周期字段配置(缺省 True = 保守):**留空是否算问题取决于
+    这个字段该不该填**。必填栏留空是候选人没写;可选栏留空只是他没有这一项
+    (如「获奖经历」没写奖项),不该据此把整份判成敷衍。
     """
 
     field_key: str
     title: str
     value: str
     placeholder: str = ""
+    required: bool = True
 
 
-def is_hard_zero_value(value: str, *, title: str = "", placeholder: str = "") -> bool:
-    """单值绝对卡判定。规则序:空 → 单字 → 单字符重复 → 纯数字 → placeholder。"""
+def is_hard_zero_value(
+    value: str, *, title: str = "", placeholder: str = "", required: bool = True
+) -> bool:
+    """单值绝对卡判定。规则序:空 → 单字 → 单字符重复 → 纯数字 → placeholder。
+
+    `required=False` 时,**留空不算绝对卡**:可选栏没填是正常的(没有获奖经历
+    就空着),拿它判「敷衍」会把一份认真的简历整份判零 —— 实测过这个后果。
+    其余规则(抄 placeholder、纯数字、单字)照旧适用:可选栏若填了敷衍内容,
+    一样该卡。
+    """
     v = (value or "").strip()
     ph = (placeholder or "").strip()
     return bool(
-        not v
-        or len(v) <= 1
+        (not v and required)
+        or (bool(v) and len(v) <= 1)
         or len(set(v)) == 1  # 111、。。。、aaa
-        or bool(_PURE_DIGIT.fullmatch(v))
-        or v in _PLACEHOLDER_EXACT
+        or bool(v and _PURE_DIGIT.fullmatch(v))
+        or (bool(v) and v in _PLACEHOLDER_EXACT)
         or bool(ph and v == ph)  # 与配置的 placeholder 全等(最准)
         # 前缀启发式仅在没有配置 placeholder 时兜底(先抄题再作答
         # 会被误卡,有配置时全等判已覆盖)
-        or (not ph and v.startswith(_PLACEHOLDER_PREFIX))
+        or bool(v and not ph and v.startswith(_PLACEHOLDER_PREFIX))
         or bool(title and v == title.strip())  # 抄字段名本身
     )
 
@@ -59,7 +72,9 @@ def detect_hard_zero(fields: list[FieldText]) -> dict[str, str]:
     """扫描全部打分维,返回 {field_key: 命中原因};空 dict = 无绝对卡。"""
     reasons: dict[str, str] = {}
     for f in fields:
-        if is_hard_zero_value(f.value, title=f.title, placeholder=f.placeholder):
+        if is_hard_zero_value(
+            f.value, title=f.title, placeholder=f.placeholder, required=f.required
+        ):
             reasons[f.field_key] = _reason_of(f.value, f.title, placeholder=f.placeholder)
     return reasons
 

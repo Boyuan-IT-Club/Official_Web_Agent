@@ -44,7 +44,7 @@ class EvaluationState(TypedDict, total=False):
 
     resume_id: int
     cycle_id: int
-    fields: list[dict[str, str]]
+    fields: list[dict[str, Any]]
     weights: dict[str, float]
     hard_zero: bool
     hard_zero_reasons: dict[str, str]
@@ -53,13 +53,15 @@ class EvaluationState(TypedDict, total=False):
     llm_usage: dict[str, int | None]  # 评分模型调用的 token 用量(job 观测面)
 
 
-def _as_field_texts(fields: list[dict[str, str]]) -> list[FieldText]:
+def _as_field_texts(fields: list[dict[str, Any]]) -> list[FieldText]:
     return [
         FieldText(
             field_key=str(f["field_key"]),
             title=str(f.get("title", "")),
             value=str(f.get("value", "")),
             placeholder=str(f.get("placeholder", "")),
+            # 缺省 True = 保守:拿不到必填性时按必填处理(宁可卡,不漏卡)
+            required=bool(f.get("required", True)),
         )
         for f in fields
     ]
@@ -352,7 +354,7 @@ def build_evaluation_subgraph() -> Any:
 
 
 async def run_evaluation(
-    fields: list[dict[str, str]],
+    fields: list[dict[str, Any]],
     *,
     resume_id: int,
     cycle_id: int,
