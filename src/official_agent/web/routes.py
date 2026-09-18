@@ -24,7 +24,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
-from langchain_core.messages import AIMessageChunk, HumanMessage, RemoveMessage
+from langchain_core.messages import AIMessageChunk, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from official_agent.graphs.assistant import (
@@ -488,6 +488,10 @@ async def _stream_turn(
         # 流式 delta 逐块过 PII 掩码器(尾部缓冲抗跨块)
         pii_masker = None if toolless else ReplyPiiMasker()
         error_code: str | None = None
+        # 本轮 KB 引用锚——search_knowledge 结果按序去重,
+        # 轮末随 delta.sources 下发(前端 [n] → source_id+title 映射)
+        sources: list[dict[str, str]] = []
+        _seen_sources: set[str] = set()
         usage_acc: dict[str, int | None] = {  # 跨 model 步累计(ReAct 多步求和)
             "input_tokens": 0,
             "output_tokens": 0,
@@ -580,6 +584,12 @@ async def _stream_turn(
                                                             "name": tc.get("name"),
                                                         }
                                                     )
+                                            # R4:search_knowledge 的结果收集为引用锚
+                                            if (
+                                                isinstance(m, ToolMessage)
+                                                and getattr(m, "name", "") == "search_knowledge"
+                                            ):
+                                                _collect_sources(m, sources, _seen_sources)
             except asyncio.CancelledError:
                 # 客户端断连(CancelledError 非 Exception):中止轮次也要留痕
                 # (partial reply/已调工具不丢失),error_code 记断连中止。
@@ -674,6 +684,17 @@ async def _stream_turn(
             compress_event=compress_event,
         )
         if error_code is None:
+            if sources:
+                # R4 契约:delta 上新增可选 sources,不改消息 type 枚举——
+                # 旧消费者收到空 content 追加无感;新前端做 [n] → 来源映射
+                yield sse(
+                    {
+                        "type": "delta",
+                        "role": "assistant",
+                        "content": "",
+                        "sources": sources,
+                    }
+                )
             yield sse({"type": "done", "session_id": session.session_id})
         elif error_code != _ERR_DISCONNECTED:
             # 错误事件统一走稳定文案 + trace_id(原始异常只留服务端日志);
@@ -767,6 +788,25 @@ def prefix_hash(system_prompt: str, tool_names: list[str]) -> str:
 
     return _impl(system_prompt, tool_names)
 
+
+def _collect_sources(tool_msg: ToolMessage, sources: list, seen: set) -> None:
+    """search_knowledge 的 ToolMessage → 轮级引用锚([n]→条目,保序去重)。
+
+    内容是工具返回的 JSON;解析失败只丢引用,不影响主回复(#120 降级纪律)。
+    """
+    try:
+        data = (
+            json.loads(tool_msg.content)
+            if isinstance(tool_msg.content, str)
+            else tool_msg.content
+        )
+        for r in (data or {}).get("results") or []:
+            sid = r.get("source_id")
+            if sid and sid not in seen:
+                seen.add(sid)
+                sources.append({"source_id": sid, "title": r.get("title", "")})
+    except Exception:  # noqa: BLE001 — 引用属增强面,失败不拖垮对话
+        logger.warning("search_knowledge sources 收集失败(已忽略)", exc_info=True)
 
 # ── 管理 API:配置热生效 ────────────────────────────────────────
 

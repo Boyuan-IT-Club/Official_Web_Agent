@@ -139,8 +139,10 @@ def create_app() -> FastAPI:
     )
 
     from official_agent.web import routes
+    from official_agent.web.kb_admin import router as kb_admin_router
 
     app.include_router(routes.router, prefix="/api/agent")
+    app.include_router(kb_admin_router, prefix="/api/agent")
 
     from official_agent.web.evaluation_admin import router as evaluation_admin_router
 
