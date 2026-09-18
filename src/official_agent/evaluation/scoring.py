@@ -146,6 +146,35 @@ def trait_score(met: dict[str, bool]) -> float:
     return 0.0
 
 
+#: 简历实质篇幅 → 分数上限。分数由**达成项数**派生,而达成项数是模型判的:
+#: 一句话的简历照样会被判出「真诚」「表达与结构」这类不吃篇幅的项,于是拿到
+#: 中等分。篇幅是确定性的,用它封顶,保证材料不到两三行的简历进不了「内容
+#: 完整」的高分档。
+#:
+#: 边界按本地样本校准(实质字符数):一段话级别 94-104、两三行 143-269、
+#: 完整 429-662。
+#:
+#: 只在**极短**时封顶,不是「越长分越高」:材料长但言之无物的简历照样是低分
+#: (实测 259 字的长而空简历判 0 达成、0 分)。篇幅是必要条件,不是充分条件。
+_VOLUME_CEILINGS: tuple[tuple[int, float], ...] = (
+    (130, 29.0),  # 一段话:封顶在「1-2 项达成」档内
+    (280, 59.0),  # 两三行:封顶在「5-6 项达成」档内,够不到 60 以上的完整档
+)
+
+
+def volume_ceiling(fields: list[FieldText]) -> float | None:
+    """简历篇幅 → 分数上限;None = 不封顶。纯函数,零 IO。
+
+    只量**实质字符数**(原始长度,不做占位剔除):占位与敷衍内容由绝对卡在
+    进模型前就拦掉了,这里再剔一遍只会把「短但具体」的简历误伤。
+    """
+    total = sum(len((f.value or "").strip()) for f in fields)
+    for limit, ceiling in _VOLUME_CEILINGS:
+        if total < limit:
+            return ceiling
+    return None
+
+
 def weighted_total(scores: dict[str, int], weights: dict[str, float]) -> float:
     """加权总分(派生,非模型输出):Σ 分×权 / Σ 权;权重缺省 1.0。
 

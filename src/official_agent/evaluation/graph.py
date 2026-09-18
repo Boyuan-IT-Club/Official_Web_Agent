@@ -24,6 +24,7 @@ from official_agent.evaluation.scoring import (
     FieldText,
     detect_hard_zero,
     trait_score,
+    volume_ceiling,
 )
 from official_agent.graphs.assistant import build_model
 from official_agent.prompt_loader import load_prompt, load_prompt_meta
@@ -301,6 +302,12 @@ async def llm_score(state: EvaluationState, config: RunnableConfig | None = None
             raise ValueError(f"两次输出均不合规:{last_err}")
         met_by_trait = {tv.trait: tv.met for tv in result.traits}
         total = trait_score(met_by_trait)
+        # 篇幅封顶:达成项数是模型判的,一句话的简历也会被判出「真诚」这类不吃
+        # 篇幅的项而拿到中等分。篇幅是确定性的,用它封顶,保证材料不到两三行的
+        # 简历进不了「内容完整」的高分档。
+        ceiling = volume_ceiling(_as_field_texts(state["fields"]))
+        if ceiling is not None:
+            total = min(total, ceiling)
         card = {
             "schema": CARD_SCHEMA_VERSION,
             "resume_id": state["resume_id"],
@@ -310,6 +317,8 @@ async def llm_score(state: EvaluationState, config: RunnableConfig | None = None
             "attitude": result.attitude.model_dump(),
             "total": total,
             "met_count": sum(1 for m in met_by_trait.values() if m),
+            # 封顶生效时留下依据:复核时能看出「分数比达成项数对应的低」是篇幅所致
+            "volume_ceiling": ceiling,
             # AI 全项未达成 = 初筛不过,同样落 hard_zero(0 分队列靠它捞)
             "hard_zero": total <= 0 or result.attitude.verdict == "bad_faith",
             "hard_zero_reasons": (

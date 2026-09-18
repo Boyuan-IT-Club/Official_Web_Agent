@@ -12,6 +12,21 @@ _FIELDS = [
     {"field_key": "reason", "title": "加入理由", "value": "认同社团氛围,想参与招新开发。"},
 ]
 
+#: 篇幅足够的简历(远超封顶线)。断言「达成数 → 分数段」的用例要用它:
+#: `_FIELDS` 只有 29 字,属「一句话」级别,分数会被篇幅封顶盖住,测不到分段本身。
+_FIELDS_FULL = [
+    {
+        "field_key": "intro",
+        "title": "自我介绍",
+        "value": "我是张三,软件工程大二。" + "做过两个 Web 项目,负责前端与接口。" * 10,
+    },
+    {
+        "field_key": "reason",
+        "title": "加入理由",
+        "value": "认同社团氛围,想参与招新开发。" * 10,
+    },
+]
+
 _WEIGHTS = {"intro": 3.0, "reason": 1.0}
 
 
@@ -102,13 +117,47 @@ async def test_normal_path_scores_and_weights_total() -> None:
         patch.object(ev, "build_model", lambda *a, **k: _fake_model(_GOOD_JSON)),
         patch.object(ev, "get_effective_settings", _settings),
     ):
-        card = await ev.run_evaluation(_FIELDS, resume_id=2, cycle_id=2026, weights=_WEIGHTS)
+        card = await ev.run_evaluation(_FIELDS_FULL, resume_id=2, cycle_id=2026, weights=_WEIGHTS)
     assert card["hard_zero"] is False
     assert card["attitude"]["verdict"] == "sincere"
     assert card["met_count"] == 12  # 清单全部达成
     assert card["total"] >= 90.0  # 全部达成落 90-100 段
+    assert card["volume_ceiling"] is None  # 篇幅够,不封顶
     assert card["traits"][0]["reason"] == "做过两个 Web 项目"
     assert card["schema"] == "evaluation_scorecard/v1"
+
+
+def test_volume_ceiling_bands() -> None:
+    """篇幅封顶:一段话 29、两三行 59、够长不封顶。"""
+
+    def _text(n: int) -> str:
+        return "字" * n
+
+    def _one(n: int):
+        return [{"field_key": "intro", "title": "自我介绍", "value": _text(n)}]
+
+    assert ev.volume_ceiling(ev._as_field_texts(_one(80))) == 29.0  # 一句话
+    assert ev.volume_ceiling(ev._as_field_texts(_one(200))) == 59.0  # 两三行
+    assert ev.volume_ceiling(ev._as_field_texts(_one(400))) is None  # 够长
+    assert ev.volume_ceiling([]) == 29.0  # 空简历也封顶(硬 0 轮不到它,兜底)
+
+
+@pytest.mark.asyncio
+async def test_short_resume_is_capped_by_volume() -> None:
+    """一句话的简历即便模型把 12 项全判达成,也进不了 60 分以上的档。
+
+    达成项数是模型判的:一句话照样能被判出「真诚」「表达与结构」这类不吃篇幅
+    的项。篇幅是确定性的,用它封顶——这是「一句话不该压过两三行」的保证。
+    """
+    with (
+        patch.object(ev, "build_model", lambda *a, **k: _fake_model(_GOOD_JSON)),
+        patch.object(ev, "get_effective_settings", _settings),
+    ):
+        card = await ev.run_evaluation(_FIELDS, resume_id=5, cycle_id=2026, weights=_WEIGHTS)
+    assert card["met_count"] == 12
+    assert card["total"] == 29.0  # 未被封顶时是 90+
+    assert card["volume_ceiling"] == 29.0
+    assert card["hard_zero"] is False  # 封顶不等于淘汰
 
 
 @pytest.mark.asyncio
