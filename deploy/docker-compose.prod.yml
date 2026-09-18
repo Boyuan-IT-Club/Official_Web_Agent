@@ -41,8 +41,15 @@ services:
       POSTGRES_URL: postgresql://postgres:${AGENT_PG_PASSWORD}@agent-pg:5432/official_agent
       CREDENTIALS_DIR: /app
       LANGFUSE_HOST: ${LANGFUSE_HOST:-}   # 自托管 langfuse 已有则填,观测 fail-open
+    # 接入 Backend 栈的网络:Backend 经它按服务名访问本服务。
+    # 不接的话 Backend 只剩默认值(容器自身的回环)可用,而 agent 的宿主侧发布
+    # 只绑 127.0.0.1 —— 容器走 host.docker.internal 也够不到(那条路实测失败过),
+    # 于是所有经 Backend 代理的 Agent 管理/知识库/评估接口全线不可达。
+    # 网络由 Backend 栈创建,须先于本服务存在。
+    networks:
+      - backend
     ports:
-      - "127.0.0.1:8001:8001"       # 只绑本机回环:宿主机 nginx 反代到此
+      - "127.0.0.1:8001:8001"       # 宿主 nginx 反代与本机排障用;容器间不经它
     volumes:
       - ./logs:/app/logs            # RotatingFileHandler 落盘,运维直接查文件
     healthcheck:
@@ -56,3 +63,12 @@ services:
 
 volumes:
   agent_pg_data:
+
+networks:
+  # Backend 栈已有的网络(名字可在 .env.prod 用 BACKEND_NETWORK 覆盖)。
+  # external: compose 不创建它,只接入——它归 Backend 栈管,两栈因此能按服务名
+  # 互访。agent 侧固定叫 backend 这个别名,Backend 的 AGENT_BASE_URL 写
+  # http://agent:8001/api/agent 即可。
+  backend:
+    external: true
+    name: ${BACKEND_NETWORK:-official-network}
