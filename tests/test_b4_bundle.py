@@ -167,9 +167,29 @@ async def test_bundle_fallback_for_no_evidence(monkeypatch) -> None:
     assert fake_model.calls == 1  # 兜底线只调一次 LLM(技能题组)
 
 
+class _ReadableGH:
+    """可读仓替身:预探只问「读不读得到」,返回什么不影响分线。"""
+
+    def __init__(self, base_url: str = "", token: str = "") -> None:
+        pass
+
+    async def repo(self, owner, repo):
+        return {"default_branch": "main"}
+
+
+class _UnreadableGH:
+    """读不到的仓(私有/已删/占位)。"""
+
+    def __init__(self, base_url: str = "", token: str = "") -> None:
+        pass
+
+    async def repo(self, owner, repo):
+        raise bd.GitHubUnavailable("GitHub 404")
+
+
 @pytest.mark.asyncio
 async def test_bundle_multi_repo_investigates_each(monkeypatch) -> None:
-    """项目字段含两个 GitHub 仓 → 每个各深挖一次,不丢第二个。"""
+    """项目字段含两个 GitHub 仓(都可读)→ 每个各深挖一次,不丢第二个。"""
     fields = [
         FieldText(
             field_key="project",
@@ -187,6 +207,7 @@ async def test_bundle_multi_repo_investigates_each(monkeypatch) -> None:
         return None
 
     fake_model = _FakeModel()
+    monkeypatch.setattr(bd, "GitHubClient", _ReadableGH)
     monkeypatch.setattr(bd.ig, "run_investigation", _record)
     monkeypatch.setattr(
         "official_agent.evaluation.autograding.fetch_latest_submission",
@@ -199,6 +220,41 @@ async def test_bundle_multi_repo_investigates_each(monkeypatch) -> None:
     assert called == [("me", "web"), ("me", "api")]
     repo_groups = [g for g in envelope["groups"] if g["group"] == "repo"]
     assert [g["repo"] for g in repo_groups] == ["me/web", "me/api"]
+
+
+@pytest.mark.asyncio
+async def test_bundle_unreadable_repos_share_one_resume_line(monkeypatch) -> None:
+    """仓都读不到时只跑一条线(简历自述只有一份),不是每个仓各跑一次。
+
+    读不到仓的线在子图内回退到简历深挖;若按仓逐个跑,拿到的是同一份自述,
+    只会产出几套一模一样的题。
+    """
+    fields = [
+        FieldText(
+            field_key="project",
+            title="项目经历",
+            value="前端 github.com/me/web 与后端 github.com/me/api,都做过",
+        ),
+    ]
+    called: list = []
+
+    async def _record(text, **kw):
+        called.append(kw.get("repo"))
+        return {"mode": "cv_dive", "repo_summary": "", "questions": []}
+
+    async def _no_submission(github_key):
+        return None
+
+    monkeypatch.setattr(bd, "GitHubClient", _UnreadableGH)
+    monkeypatch.setattr(bd.ig, "run_investigation", _record)
+    monkeypatch.setattr(
+        "official_agent.evaluation.autograding.fetch_latest_submission",
+        _no_submission,
+    )
+    monkeypatch.setattr(bd, "build_model", lambda *a, **k: _FakeModel())
+
+    await bd.run_bundle(fields, resume_id=11, cycle_id=2026, github_key="usergithub")
+    assert called == [("me", "web")]  # 两个仓只出一条简历线
 
 
 @pytest.mark.asyncio
@@ -246,6 +302,7 @@ async def test_bundle_repo_v2_envelope_end_to_end(monkeypatch) -> None:
             "prompt_version": "evaluation_grilling/v2",
         }
 
+    monkeypatch.setattr(bd, "GitHubClient", _ReadableGH)
     monkeypatch.setattr(bd.ig, "run_investigation", _deep_investigation)
 
     envelope = await bd.run_bundle(fields, resume_id=9, cycle_id=2026)
@@ -300,6 +357,7 @@ async def test_bundle_aggregates_explore_usage(monkeypatch) -> None:
             "prompt_version": "evaluation_grilling/v2",
         }
 
+    monkeypatch.setattr(bd, "GitHubClient", _ReadableGH)
     monkeypatch.setattr(bd.ig, "run_investigation", _deep)
     envelope = await bd.run_bundle(
         [

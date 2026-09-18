@@ -19,6 +19,7 @@ from official_agent.evaluation.awards import (
     extract_awards,
     suggest_plan,
 )
+from official_agent.evaluation.github_client import GitHubClient, GitHubUnavailable
 from official_agent.evaluation.graph import _extract_json
 from official_agent.evaluation.investigate import extract_repos
 from official_agent.evaluation.schema import QuestionSet
@@ -54,14 +55,13 @@ def _resume_text(fields: list) -> str:
     return "\n\n".join(parts)
 
 
-def _group_kind(envelope: dict[str, Any], pinned: tuple[str, str] | None) -> str:
-    """组标识:带仓恒为 repo;无仓且走了简历深挖则为 cv_dive。
+def _group_kind(envelope: dict[str, Any]) -> str:
+    """组标识:走了简历深挖为 cv_dive,其余(含带仓深挖)为 repo。
 
-    只为新路径新增一个标识,其余(guided/skipped)沿用既有 repo——
-    改它们的取值会波及前端标签映射与 qbank.source 语义,不在本票范围。
+    按信封的 mode 判而不是「有没有钉仓」:仓读不到时会回退到简历深挖,那时
+    虽然钉着仓号,内容其实是简历线。guided/skipped 沿用既有 repo——改它们的
+    取值会波及前端标签映射与 qbank.source 语义,不在本票范围。
     """
-    if pinned:
-        return "repo"
     return "cv_dive" if envelope.get("mode") == "cv_dive" else "repo"
 
 
@@ -100,7 +100,8 @@ async def run_bundle(
 ) -> dict[str, Any]:
     """跑全部证据线,返回 qbank 信封(groups 分线+15 分钟建议组合)。
 
-    - 仓线:调查子图(deep/guided/skip 内部自决)
+    - 仓线:调查子图(deep/cv/guided/skip 内部自决);仓读不到时回退简历深挖,
+      而简历深挖全局只出一条线
     - 评测线:有评测记录且非满分 → 失败 test 错因追问
     - 奖项线:简历有奖项 → 背景卡+纯过程追问;搜索通道不可用 → 不可考
     - 兜底线:以上全无 → 基础三维 + 部门技能题组
@@ -116,12 +117,35 @@ async def run_bundle(
     # 仓线。多仓:项目文本里每个 GitHub 仓各深挖一次,产出独立
     # repo group(带 owner/repo 标识),不再只挖第一个。单线失败降级为空错误组,
     # 不炸整条 bundle。
+    #
+    # 可读性在这里一次探清,而不是让每个仓各跑一遍子图、各自发现读不到:
+    # 仓读不到时材料只剩简历自述,而自述只有一份——逐个仓跑只会得到一堆
+    # 一模一样的简历题。所以先分两类,可读的仓各一条深挖线,读不到的仓合起来
+    # 只出一条简历线(把其中第一个钉给它:子图发现读不到,自然回退到简历深挖)。
+    # 无仓/有项目文本但无仓 URL → 仍跑一次,让子图内部按简历内容路由。
     repo_candidates = extract_repos(project_text)
-    # 无仓/有项目文本但无仓 URL → 仍跑一次,让子图内部按简历内容路由
-    if not repo_candidates:
-        repo_candidates = [(None, None)]  # type: ignore[list-item]
-    for owner, name in repo_candidates:
-        pinned = (owner, name) if owner and name else None
+    lines: list[tuple[str, str] | None]
+    if repo_candidates:
+        probe = GitHubClient(token=github_token)
+        readable: list[tuple[str, str]] = []
+        unreadable: list[tuple[str, str]] = []
+        for owner, name in repo_candidates:
+            try:
+                await probe.repo(owner, name)
+            except GitHubUnavailable:
+                unreadable.append((owner, name))
+            else:
+                readable.append((owner, name))
+        lines = [*readable, *unreadable[:1]]
+    else:
+        lines = [None]
+
+    # 简历深挖全局只出一条线,由上面的分线保证;这个标记是兜底:可读的仓若在
+    # 子图内探测时恰好也读不到(限流等瞬时故障),它会回退到简历深挖,而那时
+    # 简历线不该再挖第二遍。
+    cv_dive_done = False
+    for pinned in lines:
+        owner, name = pinned if pinned else ("", "")
         try:
             repo_envelope = await ig.run_investigation(
                 project_text,
@@ -130,11 +154,13 @@ async def run_bundle(
                 github_token=github_token,
                 candidate_login=github_key or "",
                 grade=grade,
+                cv_dive_done=cv_dive_done,
             )
+            cv_dive_done = cv_dive_done or repo_envelope.get("mode") == "cv_dive"
             groups.append(
                 {
-                    "group": _group_kind(repo_envelope, pinned),
-                    "owner": owner or "",
+                    "group": _group_kind(repo_envelope),
+                    "owner": owner,
                     "repo": f"{owner}/{name}" if pinned else "",
                     # v2 信封整体嵌套(qbank_v2),不展开——QbankV2 自带
                     # group 键(dict),展开会覆盖 kind 字符串并污染 pick log
@@ -145,7 +171,7 @@ async def run_bundle(
             groups.append(
                 {
                     "group": "repo",
-                    "owner": owner or "",
+                    "owner": owner,
                     "repo": f"{owner}/{name}" if pinned else "",
                     "mode": "error",
                     "repo_summary": "",

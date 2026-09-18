@@ -33,11 +33,23 @@ def test_extract_repos_returns_all_and_dedupes() -> None:
     assert inv.extract_repo(text) == ("me", "web")
 
 
-def test_route_has_repo_paths_unchanged() -> None:
-    """有仓两条路径行为不变(不回归)。"""
+def test_route_readable_repo_is_deep_dive() -> None:
+    """有仓可读 → 深挖,不受简历长短影响。"""
     long_text = "我做了社团官网重构,负责报名页与后端接口。" * 3
-    assert inv.route_project(long_text, True) == "deep_dive"  # 有仓可读
-    assert inv.route_project("太短", False) == "guided"  # 有仓但不可读→引导
+    assert inv.route_project(long_text, True) == "deep_dive"
+    assert inv.route_project("太短", True) == "deep_dive"
+
+
+def test_route_unreadable_repo_shares_no_repo_judgement() -> None:
+    """仓读不到与「没有仓」同判:两者都只剩简历自述可作材料。
+
+    读不到仓曾一律降成通用引导题,那会把整个项目维压成一道题;私有仓在真实
+    简历里很常见,而自述撑得起追问链。
+    """
+    assert inv.route_project("我做了电商后端,用了 Redis", False) == "cv_dive"
+    assert inv.route_project("太短", False) == "cv_dive"
+    assert inv.route_project("", False) == "skip"  # 自述也没有 → 交兜底组
+    assert inv.route_project("暂无", False) == "guided"  # 只有占位表述
 
 
 def test_route_no_repo_with_tech_stack_is_cv_dive() -> None:
@@ -288,39 +300,41 @@ async def test_deep_dive_happy_path(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_probe_failure_degrades_to_guided(monkeypatch) -> None:
-    """仓探测失败 → guided 降级,题不带仓路径(私有/不可达注明)。"""
+async def test_unreadable_repo_falls_back_to_resume_dive(monkeypatch) -> None:
+    """仓读不到(私有/已删/占位)→ 回退简历深挖,不再是 entry-only 引导题。"""
 
-    class _PrivateGH(_FakeGH):
+    class _UnreadableGH(_FakeGH):
         async def repo(self, owner, repo):
             raise GitHubUnavailable("GitHub 404")
 
-    monkeypatch.setattr(ig, "GitHubClient", _PrivateGH)
+    _install_fake_cv_model(monkeypatch, _repo_fallback_payload())
+    monkeypatch.setattr(ig, "GitHubClient", _UnreadableGH)
 
-    class _Msg:
-        content = (
-            '{"repo_summary": "",'
-            '"questions": [{"anchor": "guided", "question": "项目里你承担了什么?",'
-            '"sub_prompts": [],'
-            '"answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},'
-            '"evidence": {"path": "", "note": "仓不可读,通用引导"},'
-            '"time_minutes": 3}]}'
-        )
+    qs = await ig.run_investigation(_REPO_RESUME)
+    assert qs["mode"] == "cv_dive"
+    assert len(qs["group"]["chains"]) == 2
+    assert qs["group"]["entry"]["evidence"]["path"] == ""  # 材料来自自述,不带仓路径
 
-    class _M:
-        async def ainvoke(self, messages):
-            return _Msg()
 
-    class _S:
-        model_strong = "test-strong"
+@pytest.mark.asyncio
+async def test_unreadable_repo_skips_when_resume_line_already_exists(monkeypatch) -> None:
+    """本份简历已有一条简历线在挖自述 → 后续读不到的仓出空组,不重复挖一遍。"""
 
-    monkeypatch.setattr(ig, "build_model", lambda *a, **k: _M())
-    monkeypatch.setattr(ig, "get_effective_settings", _S)
+    class _UnreadableGH(_FakeGH):
+        async def repo(self, owner, repo):
+            raise GitHubUnavailable("GitHub 404")
 
-    qs = await ig.run_investigation("我做了 github.com/me/private 电商后端,用了 Redis")
-    assert qs["mode"] == "guided"
-    assert qs["group"]["entry"]["evidence"]["path"] == ""
-    assert qs["group"]["chains"] == []
+    def _boom(*a, **k):
+        raise AssertionError("已有简历线时不得再抽技术栈/调模型")
+
+    _install_fake_cv_model(monkeypatch, _repo_fallback_payload())
+    monkeypatch.setattr(ig, "GitHubClient", _UnreadableGH)
+    monkeypatch.setattr(ig, "extract_tech_stack", _boom)
+    monkeypatch.setattr(ig, "build_model", _boom)
+
+    qs = await ig.run_investigation(_REPO_RESUME, cv_dive_done=True)
+    assert qs["mode"] == "skipped"
+    assert qs["group"]["entry"] is None and qs["group"]["chains"] == []
 
 
 @pytest.mark.asyncio
@@ -354,7 +368,9 @@ def test_repo_regex_boundaries() -> None:
 
 @pytest.mark.asyncio
 async def test_empty_dossier_degrades_to_guided(monkeypatch) -> None:
-    """探索零材料 → guided 降级(GitHub 不可达/探索全败,替代旧 worthiness=none)。"""
+    """探索零材料 → guided 降级(仓读得到,但探索段拿不到材料)。"""
+
+    monkeypatch.setattr(ig, "GitHubClient", _FakeGH)  # 探测要过,才走得到探索段
 
     def _fake_run_explore(project_text, **kw):
         async def _impl():
@@ -397,6 +413,8 @@ async def test_empty_dossier_degrades_to_guided(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_explore_midway_failure_degrades_to_guided(monkeypatch) -> None:
     """route 探测通过但探索段全败 → 降级 guided + 注明。"""
+
+    monkeypatch.setattr(ig, "GitHubClient", _FakeGH)  # 探测要过,才走得到探索段
 
     def _fake_run_explore(project_text, **kw):
         async def _impl():
@@ -662,6 +680,7 @@ async def test_generation_usage_into_envelope(monkeypatch) -> None:
             )
 
     _install_fake_explore(monkeypatch)
+    monkeypatch.setattr(ig, "GitHubClient", _FakeGH)  # 探测要过,才走得到出题段
     monkeypatch.setattr(ig, "build_model", lambda *a, **k: _RawUsageModel())
 
     class _S:
@@ -719,6 +738,35 @@ def _cv_payload() -> str:
             "chains": [
                 _cv_chain("C2_技术选型与权衡", "PyTorch"),
                 _cv_chain("C4_实现细节拷打", "ResNet"),
+            ],
+            "reserves": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+#: 带仓 URL 的简历:仓读不到时,这份自述就是唯一可用的材料。
+_REPO_RESUME = (
+    "技术栈:\nPython、Redis\n"
+    "项目经验:\n电商后端重构(github.com/me/private-svc),用 Redis 做缓存\n"
+)
+
+
+def _repo_fallback_payload() -> str:
+    """仓读不到后按简历出题:两条技术链,theme 是自述里逐字出现的技术名。"""
+    return json.dumps(
+        {
+            "repo_summary": "仓不可读,按简历自述出题",
+            "entry": {
+                "category": "C1_背景与动机",
+                "question": "你的技术栈里最想聊哪个?",
+                "answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},
+                "evidence": {"path": "", "note": "技术栈栏:Python、Redis"},
+                "time_minutes": 3,
+            },
+            "chains": [
+                _cv_chain("C2_技术选型与权衡", "Python"),
+                _cv_chain("C4_实现细节拷打", "Redis"),
             ],
             "reserves": [],
         },

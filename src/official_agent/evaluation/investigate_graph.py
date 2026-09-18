@@ -74,6 +74,10 @@ class InvestigationState(TypedDict, total=False):
     github_base: str
     github_token: str
     candidate_login: str
+    #: 本份简历是否已有一条线走过简历深挖。多仓候选是一个仓跑一次子图,而简历
+    #: 自述只有一份——仓读不到时那份自述就是全部材料,第一条线挖过之后,后面的
+    #: 仓再挖只会得到一套一模一样的题。由调用方在**上一次结果**上读出来回填。
+    cv_dive_done: bool
     route: str
     repo_owner: str
     repo_name: str
@@ -198,10 +202,21 @@ async def route_node(state: InvestigationState) -> dict:
         meta = await client.repo(*repo)
         branch = meta.get("default_branch") or "main"
     except GitHubUnavailable:
+        # 仓读不到(私有/已删/占位):仓里取不到任何材料,剩下的只有简历自述。
+        if state.get("cv_dive_done"):
+            # 自述只有一份,本份简历已经有线在挖它了。这里再挖一遍只会得到一套
+            # 一模一样的题,交给那条线即可 —— 不是事后再去重,而是压根不出。
+            return {"route": "skip", "repo_owner": repo[0], "repo_name": repo[1]}
+        # 否则按「无仓」重新定路径:此时自述就是全部材料,该走简历深挖(有链
+        # 有备选),而不是只给一道通用引导题 —— 私有仓是常见情形,不能因为读
+        # 不到仓就把候选人的项目维压成一道题。技术栈抽取同「无仓」路径(出题
+        # 段每名词一条技术链,依赖它)。
+        items = await _extract_tech(state)
         degraded: dict = {
-            "route": route_project(text, False),
+            "route": route_project(text, False, tech_count=len(items)),
             "repo_owner": repo[0],
             "repo_name": repo[1],
+            "tech_items": items,
         }
         if found is not None:
             degraded["attribution"] = {
@@ -215,8 +230,7 @@ async def route_node(state: InvestigationState) -> dict:
     if found is None:
         # 钉住/URL 直配的仓:简历自述来源 → source=url(归属内部自查 commits/PR)
         found = await attribute(repo[0], repo[1], login=login, source="url", client=client)
-    readable = True
-    route = route_project(text, readable)
+    route = route_project(text, True)
     if not found.deep_dive_allowed:
         # unverified:仓存在也不深挖,仅 guided(ADR-0008)
         route = "guided"
@@ -651,6 +665,7 @@ async def run_investigation(
     github_token: str = "",
     candidate_login: str = "",
     grade: str = "",
+    cv_dive_done: bool = False,
 ) -> dict:
     """便捷入口:返回题集 dict(questions 可为空=skip/降级);LLM 失败抛 RuntimeError。
 
@@ -660,6 +675,9 @@ async def run_investigation(
     看不见它);缺省退化为 project_text,单栏调用方行为不变。
     grade 传年级原文(元信息):只用来派生**出题深度档**,不进评分;缺省即
     「年级缺失」,分档走标准档(与加档位之前的行为一致)。
+    cv_dive_done 传「本份简历此前是否已有线走过简历深挖」:多仓循环里的调用方
+    在上一次返回的信封上读 mode 回填。为 True 时,读不到的仓不再重复挖同一份
+    自述,直接出空组。
     """
     graph = build_investigation_subgraph()
     init: InvestigationState = {
@@ -669,6 +687,7 @@ async def run_investigation(
         "github_token": github_token,
         "candidate_login": candidate_login,
         "grade_band": grade_band(grade),
+        "cv_dive_done": cv_dive_done,
     }
     if repo:
         init["repo_owner"], init["repo_name"] = repo

@@ -1,7 +1,7 @@
 """调查子图路由:纯函数决策层。
 
-- 路由四出口:有仓可读→deep_dive;无仓但简历有料(技术栈或项目内容)
-  →cv_dive;无仓且项目栏为空→skip;其余→guided(通用引导题兜底)
+- 路由四出口:有仓可读→deep_dive;仓读不到或没有仓但简历有料(技术栈或项目
+  内容)→cv_dive;项目栏为空→skip;项目栏只有占位表述→guided(通用引导题兜底)
 - 全部零 IO(IO 在 github_client/LLM 节点),决策可单测
 """
 
@@ -120,22 +120,25 @@ def _is_placeholder_only(text: str) -> bool:
 def route_project(
     project_text: str, repo_readable: bool | None, *, tech_count: int = 0
 ) -> Literal["deep_dive", "cv_dive", "skip", "guided"]:
-    """路由判据。repo_readable:None=无仓位置;True/False=有仓且探测结果。
+    """路由判据。repo_readable:None=没有仓位置;True=有仓且可读;False=有仓但读不到。
 
-    有仓时行为不变:
-    - 有仓 + 可读 → deep_dive
-    - 有仓 + 不可读 → guided
+    有仓可读 → deep_dive(从仓里取材,题面锚仓内证据)。
 
-    无仓时看简历本身有没有料(tech_count 由调用方用技术栈抽取器算出并注入,
+    其余两种(**读不到仓**与**没有仓**)在路由上等价:材料都只剩简历自述。
+    此时看简历本身有没有料(tech_count 由调用方用技术栈抽取器算出并注入,
     本函数保持纯函数、零 IO):
     - 有技术栈 或 项目经验有实质内容 → cv_dive(简历深挖,产出带追问链的题组)
     - 项目经验整栏为空 → skip(此维不浪费题,交给兜底组)
     - 项目经验有字但全是占位表述 → guided(通用引导题,不硬凑)
 
+    读不到仓在过去一律降成通用引导题,但私有仓/公司内仓在真实简历里很常见,
+    那样等于把整个项目维压成一道题——而自述本身撑得起追问链,故与无仓同判。
+    注意「读完发现仓是空的」(探索段拿不到材料)是另一回事,仍走降级引导。
+
     刻意不用字数阈值:那会误杀「短但具体」的简历。
     """
-    if repo_readable is not None:
-        return "deep_dive" if repo_readable else "guided"
+    if repo_readable:
+        return "deep_dive"
     if tech_count > 0 or has_substantive(project_text):
         return "cv_dive"
     if not (project_text or "").strip():
