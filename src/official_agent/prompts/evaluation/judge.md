@@ -1,6 +1,6 @@
 ---
 name: evaluation-judge
-description: 出题质量 LLM-as-judge(#62/#155):dossier+题组 → 四维 1-5 分+理由;首版只报告不阻塞
+description: 出题质量 LLM-as-judge:dossier+题组 → 四维 1-5 分+理由;首版只报告不阻塞
 version: evaluation_judge/v1
 model_tier: strong
 cache_prefix: evaluation-judge-v1

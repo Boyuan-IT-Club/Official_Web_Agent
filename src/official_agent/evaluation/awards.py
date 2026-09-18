@@ -27,7 +27,7 @@ class NullSearchProvider:
 
 
 class DuckDuckGoProvider:
-    """DDG 搜索(web_search 实现①,检查点⑤:#131 奖项现查)。
+    """DDG 搜索(web_search 实现①,检查点⑤:奖项现查)。
 
     - `ddgs` 是**可选依赖**(不在 pyproject):未安装即降级「不可考」,
       不让奖项线成为新的启动/部署阻塞点

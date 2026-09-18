@@ -16,4 +16,4 @@ jobs:
       - run: uv sync --all-groups
       - run: uv run ruff check .
       - run: uv run pytest
-      # TODO(zewang): eval 门禁 —— 确定性断言层进 CI,低于基线阻断合入 - fork PR 拿不到 secrets 且标注集不入库,方案未定
+      # TODO: eval 门禁 —— 确定性断言层进 CI,低于基线阻断合入 - fork PR 拿不到 secrets 且标注集不入库,方案未定
