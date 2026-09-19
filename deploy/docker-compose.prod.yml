@@ -16,7 +16,10 @@ name: official-agent-prod
 
 services:
   agent-pg:
-    image: postgres:17
+    # 知识库的 kb_chunks.embedding 是 vector 列,建表前要 CREATE EXTENSION vector。
+    # 基础镜像 postgres:17 **不带**该扩展,KB 首次使用时会直接抛错(报错文案就是
+    # 让人换镜像)。pgvector 镜像与 postgres:17 同主版本,既有数据卷可直接沿用。
+    image: pgvector/pgvector:pg17
     restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${AGENT_PG_PASSWORD:?需在 .env.prod 设置}
