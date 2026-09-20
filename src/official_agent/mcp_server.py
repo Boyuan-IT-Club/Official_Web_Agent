@@ -1,9 +1,9 @@
-"""MCP Server(TOOL-02):工具层的纯对外暴露面(ADR-0003)。
+"""MCP Server:工具层的纯对外暴露面(ADR-0003)。
 
 仅供外部消费者(Claude Code 等)挂载:
 - stdio(默认,本地 Claude Code):`uv run python -m official_agent.mcp_server`
 - HTTP:`uv run python -m official_agent.mcp_server --http`(127.0.0.1:8000,/mcp)
-agent 进程内不走 MCP 回环——直接绑定 tools/ 下的 Python 函数(TOOL-07)。
+agent 进程内不走 MCP 回环——直接绑定 tools/ 下的 Python 函数。
 
 依赖 mcp SDK v2(FastMCP 已改名 MCPServer,transport 参数移至 run)。
 """
@@ -41,7 +41,7 @@ def _normalize_for_mcp(fn: Callable[..., Any]) -> Callable[..., Any]:
     - BackendError 是普通异常,SDK 会当 crash 包成 generic 的
       UnexpectedToolError——可行动文案被丢弃(ADR-0005「模型只见映射文案」
       在 MCP 面失效)。转成 ToolError 保住文案(anticipated failure 语义)。
-    仅作用于 MCP 对外面;agent 进程内直连(TOOL-07)保持原语义。
+    仅作用于 MCP 对外面;agent 进程内直连保持原语义。
     """
 
     @functools.wraps(fn)
@@ -59,11 +59,11 @@ def _normalize_for_mcp(fn: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
-# 只读工具注册。auth_status(SEC-09)也在此:模型可答「我是谁/token 还能用多久」,
+# 只读工具注册。auth_status 也在此:模型可答「我是谁/token 还能用多久」,
 # 输出不含凭证本身。有意不注册的:
 # - get_my_interview:需最终用户本人令牌,服务账号语义下无意义
-# - 写工具(tools/write.py):仅在 agent 进程内经 interrupt 确认流程装配
-#   (GRA-05),MCP 消费方无确认通道,暴露即越权
+# - 写工具(tools/write.py):仅在 agent 进程内经 interrupt 确认流程装配,
+#   MCP 消费方无确认通道,暴露即越权
 for fn in (
     credentials_tools.auth_status,
     readonly.get_open_cycle,
@@ -88,7 +88,7 @@ def main(argv: list[str] | None = None) -> None:
         if flag not in args:
             return default
         i = args.index(flag)
-        if i + 1 >= len(args):  # 缺值裸 IndexError 防护(#74 review nit)
+        if i + 1 >= len(args):  # 缺值裸 IndexError 防护
             raise SystemExit(f"{flag} 需要一个值,如: {flag} 0.0.0.0")
         return args[i + 1]
 

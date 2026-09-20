@@ -1,13 +1,13 @@
-"""M6 #114 会话压缩:超阈值后摘要回写,注入侧只喂「摘要 + 近几轮」。
+"""会话压缩:超阈值后摘要回写,注入侧只喂「摘要 + 近几轮」。
 
-策略(决策 #108,grill 定拍 2026-09-04):感知查询意图的批量摘要
+策略:感知查询意图的批量摘要
 (ContextAware + citations)+ tiktoken 强计数,摘要走 model_light、
 temperature 0(reasoning-safe:确定性输出,不引入创造性漂移)。
 
 回写与全量可回溯:压缩结果经 update_state 写成 checkpoint 新版本
 (先 REMOVE_ALL_MESSAGES 再加「摘要 + 近几轮」);PostgresSaver 不删
 旧版本行,全量历史仍可 get_state_history 回溯——checkpointer 始终是
-对话原文权威源(#102)。
+对话原文权威源。
 
 fail-open(ADR-0005):压缩任何一步失败由调用方吞掉,不影响当轮对话。
 """

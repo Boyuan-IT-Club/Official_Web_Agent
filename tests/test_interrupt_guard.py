@@ -1,4 +1,4 @@
-"""GRA-05 写操作 interrupt 全流程测试:挂起→批准/拒绝→恢复。
+"""写操作 interrupt 全流程测试:挂起→批准/拒绝→恢复。
 
 用真实 LangGraph 图 + fake 写工具验证:
 - 模型调用写工具 → 工具内 interrupt() 挂起(带操作摘要)

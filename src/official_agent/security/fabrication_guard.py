@@ -1,14 +1,14 @@
-"""编造守卫(GRA-04 → #161):tools=[] 轮次的虚假查询声明拦截改写。
+"""编造守卫:tools=[] 轮次的虚假查询声明拦截改写。
 
 生产复现:unknown 用户 tools=[],模型仍回复「查询结果:…」。三层防线:
 ①装配层——工具清单与禁令进首条用户消息(compose_first_message);
 ②本输出守卫——回复出口确定性兜底,命中查询声明话术即整段改写;
-③回归用例——等通用 runner(#148)落地后另票毕业(地图 Not yet specified)。
+③回归用例——待通用 runner 落地后补齐。
 
 适用面:本守卫只挂 tools=[] 的轮次(unknown 档);有工具轮次的失败话术
-约束在①里。守卫轻契约(#159/#163):guard_name=fabrication_empty_tools,
+约束在①里。守卫轻契约:guard_name=fabrication_empty_tools,
 verdict=clean|triggered:xxx——调用方(cli/routes 改写点)以结构化日志落
-guard_event,字段与 #163 injection_scan 同款。
+guard_event,字段与 injection_scan 同款。
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""INF-03 CLI 单测:CliRunner 全链路(fake model)+身份失败路径+历史累积。"""
+"""CLI 单测:CliRunner 全链路(fake model)+身份失败路径+历史累积。"""
 
 import asyncio
 import re
@@ -136,7 +136,7 @@ def test_chat_full_roundtrip_with_fake_model(monkeypatch: pytest.MonkeyPatch) ->
 
     assert result.exit_code == 0
     assert "身份=admin" in result.output
-    # SEC-07:session 显示为生成的 thread_id(cli:u{user}:{random8}),不是别名
+    # session 显示为生成的 thread_id(cli:u{user}:{random8}),不是别名
     assert re.search(r"session=cli:u7:[0-9a-f]{8}", result.output)
     assert "工具=" in result.output
     assert "招新助理" in result.output  # 终答流式打印
@@ -204,7 +204,7 @@ def test_chat_degraded_no_pg_keeps_multi_turn_history(monkeypatch: pytest.Monkey
 def test_chat_resume_existing_thread_no_duplicate_identity_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """H-1 回归:续接已有线程(aget_state 有历史)只发增量,不重复身份前缀。
+    """续接已有线程(aget_state 有历史)只发增量,不重复身份前缀。
 
     跨进程续接是本功能核心;进程局部 turn 计数会误判"首轮"给已有线程
     再注入身份前缀。fix 后判据改为持久化事实(aget_state)。
@@ -250,7 +250,7 @@ def test_chat_resume_existing_thread_no_duplicate_identity_prefix(
 def test_chat_first_round_failure_message_face_stays_user_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """H-2 + #166:首轮失败后第二轮正常;消息面始终只有用户原文(无身份前缀)。"""
+    """首轮失败后第二轮正常;消息面始终只有用户原文(无身份前缀)。"""
     respx.post(LOGIN).mock(side_effect=lambda _: _login_ok())
     _install_mock_backend()
 
@@ -349,7 +349,7 @@ def test_exit_words_and_eof() -> None:
 
 @respx.mock
 def test_chat_backend_unreachable_exits_gracefully(monkeypatch: pytest.MonkeyPatch) -> None:
-    """MAJOR-2 回归:后端不可达(ConnectError)也走人话,不裸栈。"""
+    """后端不可达(ConnectError)也走人话,不裸栈。"""
     respx.post(LOGIN).mock(side_effect=httpx.ConnectError("refused"))
     _install_mock_backend()
 
@@ -366,7 +366,7 @@ def test_chat_backend_unreachable_exits_gracefully(monkeypatch: pytest.MonkeyPat
 
 
 def test_run_turn_buffer_reply_guards_fabrication() -> None:
-    """GRA-04 #161:buffer_reply=True 时编造内容不直出,整段守卫改写。"""
+    """buffer_reply=True 时编造内容不直出,整段守卫改写。"""
     from io import StringIO
 
     import rich.console

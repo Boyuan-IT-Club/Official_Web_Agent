@@ -1,9 +1,9 @@
-# Langfuse v4 自托管(开发机)——OBS-01。
+# Langfuse v4 自托管(开发机)。
 # 基于官方 docker-compose.yml 模板裁剪,改动与理由:
 # - web 绑 127.0.0.1:3001:官方 3000 会撞前端 dev server
 # - redis/clickhouse 不暴露宿主端口:仅 compose 内网互通;宿主 6379 已被 official-redis 占用
 # - postgres 暴露 127.0.0.1:5432:ADR-0007「存储只有 Postgres」——agent 的
-#   checkpointer/审计(MEM-01/SEC-03)复用本实例,另建 database 即可,不再起第二个 PG
+#   checkpointer/审计复用本实例,另建 database 即可,不再起第二个 PG
 # - minio 9090 保留:web 的媒体上传经宿主地址回传
 # - LANGFUSE_INIT_*:首启自动建 org/project/账号与固定 key,agent 侧 .env 直接复用,
 #   免去手工在 UI 建 project 拿 key

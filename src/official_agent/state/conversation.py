@@ -1,12 +1,12 @@
-"""agent_conversation_log 业务表(M6 #110):每轮对话运营数据落库。
+"""agent_conversation_log 业务表:每轮对话运营数据落库。
 
-决策(#100/#109/#102):
+落库口径:
 - SSE 每轮结束落一行;存管理面所需字段,不依赖 Langfuse(现状未接)。
 - 正常对话存「用户问题原文 + 回复摘要(非全文)」;写入前强制 PII 过滤
-  (手机/QQ/学号确定性规则表脱敏;简单版先行,SEC-08 契约对齐后补)。
+  (手机/QQ/学号确定性规则表脱敏;简单版先行,待 PII 出口契约定稿后补全)。
 - 异常/错误行只存 error_code + 元数据,不存对话内容。
 - checkpointer(checkpoints 表)是对话原文权威源,本表不当原文查询面。
-- token/缓存率/压缩事件等列(#103/#108)后续票加,本表一次建全列。
+- token/缓存率/压缩事件等列后续追加,本表一次建全列。
 
 与 agent_audit_log / agent_threads 同库(agent 自有 PG),同 state/* 先例。
 """
@@ -23,7 +23,7 @@ from psycopg.types.json import Jsonb
 from official_agent.config import get_settings
 from official_agent.security.pii import mask_pii  # 共享规则表(security/pii.py;re-export 供既有引用)
 
-# PII 确定性规则表已上移 security/pii.py(#115 review P0-3:工具返回层共用)
+# PII 确定性规则表已上移 security/pii.py(工具返回层与对话写入层共用)
 
 
 @dataclass(frozen=True)
@@ -53,7 +53,7 @@ def _conn() -> psycopg.Connection[dict[str, Any]]:
 
 
 def ensure_conversation_table() -> None:
-    """幂等建 agent_conversation_log 表(#110;同 agent_audit_log L-1 自举)。"""
+    """幂等建 agent_conversation_log 表(DDL 进仓库,新环境可自举)。"""
     with _conn() as conn:
         conn.execute(
             """
@@ -80,8 +80,8 @@ def ensure_conversation_table() -> None:
                 ON agent_conversation_log (thread_id, created_at DESC);
             """
         )
-        # M6 #113/#114:prefix_hash、compress_event 为增量加列,老库幂等补齐
-        # (#110/#113 建的存量表缺 compress_event → INSERT 全失败且被
+        # prefix_hash、compress_event 为增量加列,老库幂等补齐
+        # (存量表缺 compress_event → INSERT 全失败且被
         # fail-open 吞掉 = 整表静默停写,必须随建表一起补)
         conn.execute("ALTER TABLE agent_conversation_log ADD COLUMN IF NOT EXISTS prefix_hash text")
         conn.execute(
@@ -90,7 +90,7 @@ def ensure_conversation_table() -> None:
 
 
 def prefix_hash(system_prompt: str, tool_names: list[str]) -> str:
-    """prefix 稳定性 hash(#113 命中证据):system prompt + 工具名的确定性指纹。
+    """prefix 稳定性 hash:system prompt + 工具名的确定性指纹。
 
     同输入同值;prompt/工具任一变化 hash 即变——配合响应 cache 字段,
     双证据判断缓存前缀是否真的稳定(命中率可信的前提)。
@@ -102,7 +102,7 @@ def prefix_hash(system_prompt: str, tool_names: list[str]) -> str:
 
 
 def extract_usage(usage_data: dict[str, Any] | None) -> dict[str, int | None]:
-    """从 LLM usage 数据提取 token 数(#113,DeepSeek/OpenAI-compatible)。
+    """从 LLM usage 数据提取 token 数(DeepSeek/OpenAI-compatible)。
 
     usage_data 接受两种形状(由调用方传原始响应 usage 或 usage_metadata):
     - 原始响应 token_usage(dict):DeepSeek 顶层
@@ -134,7 +134,7 @@ def extract_usage(usage_data: dict[str, Any] | None) -> dict[str, int | None]:
         if miss is None:
             miss = details.get("cache_creation", details.get("cache_write_tokens"))
 
-    # 兜底推导(#115 实测):DeepSeek 流式 usage_metadata 只报 cache_read,
+    # 兜底推导:DeepSeek 流式 usage_metadata 只报 cache_read,
     # 不报 miss(其 cache_creation 是 Anthropic 语义,恒缺)→ 未命中 =
     # prompt_tokens − 命中数。否则 hit>0/miss=0 会算出假 100% 缓存率。
     if miss is None and hit is not None and input_tokens is not None:
@@ -169,11 +169,11 @@ def write_conversation(
 
     PII 过滤:user_message / reply_summary 写入前强制 mask_pii。
     错误行(error_code 非空):只存 error_code + 元数据,user_message/reply_summary 置空。
-    tools 序列化为 jsonb;usage 列(#113)由调用方传 extract_usage 结果;
-    prefix_hash 为缓存前缀稳定性证据;compress_event(#114)为压缩事件留痕。
+    tools 序列化为 jsonb;usage 列由调用方传 extract_usage 结果;
+    prefix_hash 为缓存前缀稳定性证据;compress_event 为压缩事件留痕。
     """
     if error_code:
-        # 异常/错误行不存对话内容(决策 #102/#110)
+        # 异常/错误行不存对话内容
         user_message = ""
         reply_summary = ""
     else:
@@ -244,12 +244,12 @@ def list_conversations(
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
-    """运营列表投影(#112):id/thread/user/问题首字/错误码/时间,不含完整消息。
+    """运营列表投影:id/thread/user/问题首字/错误码/时间,不含完整消息。
 
     列表不返回 user_message/reply_summary 全文(轻量,要全文走详情)。
-    可按 user_id / thread_id(#115 详情页拉同会话轮次)过滤;
+    可按 user_id / thread_id(详情页拉同会话轮次)过滤;
     LIMIT/OFFSET 分页(调用方限上限)。
-    用量字段(#115 投影):token/缓存命中数据随行返回,看板级聚合归 #65。
+    用量字段:token/缓存命中数据随行返回,看板级聚合由上层服务另做。
     """
     limit = max(1, min(int(limit), 200))
     offset = max(0, int(offset))
@@ -277,7 +277,7 @@ def list_conversations(
 
 
 def get_conversation(conversation_id: int) -> dict[str, Any] | None:
-    """单行详情(#112):含完整 user_message/reply_summary/tools。
+    """单行详情:含完整 user_message/reply_summary/tools。
 
     错误行的 user_message/reply_summary 在写入时已剥离(为空),此处原样返回。
     """
@@ -301,7 +301,7 @@ def get_conversation(conversation_id: int) -> dict[str, Any] | None:
 
 
 def session_overview(thread_ids: list[str]) -> dict[str, dict[str, Any]]:
-    """会话级聚合(#115 会话管理):thread_id → {rounds, last_at, preview}。
+    """会话级聚合:thread_id → {rounds, last_at, preview}。
 
     preview 取该会话最近一轮的问题首 20 字;无任何落行的会话不出现在结果里
     (调用方以 agent_threads 记录为准,此处仅补充活跃度)。
@@ -340,7 +340,7 @@ def session_overview(thread_ids: list[str]) -> dict[str, dict[str, Any]]:
 
 
 def delete_thread_conversations(thread_id: str) -> int:
-    """物理删除某会话的全部对话日志行(#171 删除闭环;预览/摘要虽已脱敏,
+    """物理删除某会话的全部对话日志行(预览/摘要虽已脱敏,
     删除语义要求面面俱到)。返回删除行数。"""
     import psycopg
 

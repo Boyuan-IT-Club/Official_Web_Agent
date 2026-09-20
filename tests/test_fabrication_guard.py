@@ -1,4 +1,4 @@
-"""编造守卫测试(#161,GRA-04):话术族拦截/诚实话术放行/整段改写。"""
+"""编造守卫测试:话术族拦截/诚实话术放行/整段改写。"""
 
 from official_agent.security.fabrication_guard import (
     GUARD_NAME,
@@ -7,7 +7,7 @@ from official_agent.security.fabrication_guard import (
 
 
 def test_fabricated_claim_gets_rewritten() -> None:
-    """GRA-04 生产复现原案:tools=[] 却回复「查询结果:…」。"""
+    """生产复现原案:tools=[] 却回复「查询结果:…」。"""
     fabricated = "查询结果:您有 3 份简历待筛选。"
     final, verdict = guard_empty_tools_reply(fabricated)
     assert verdict.startswith("triggered:")
@@ -40,12 +40,12 @@ def test_empty_and_plain_text() -> None:
 
 
 def test_guard_name_constant() -> None:
-    """守卫轻契约(#159):guard_name 稳定,trace 字段在 #163 统一接线。"""
+    """守卫轻契约:guard_name 稳定,trace 字段统一接线。"""
     assert GUARD_NAME == "fabrication_empty_tools"
 
 
 def test_reddit_escape_variants_trigger() -> None:
-    """评审 P1 实锤的两组同族逃逸:查到了(无「如下」)/已经查询(非已查询)。"""
+    """两组同族逃逸:查到了(无「如下」)/已经查询(非已查询)。"""
     for text in ("为你查到了 3 份简历。", "我已经查询过了,数据如下:"):
         _, verdict = guard_empty_tools_reply(text)
         assert verdict.startswith("triggered:"), text
@@ -64,7 +64,7 @@ def test_negated_claims_are_honest_and_pass() -> None:
 
 
 def test_soothing_prefix_with_claim_triggers() -> None:
-    """「别」是安抚词不是否定:别担心+编造结论必须触发(复审 P1)。"""
+    """「别」是安抚词不是否定:别担心+编造结论必须触发。"""
     for text in (
         "别担心,查询到您有 3 份简历待筛选。",
         "别急,已查询到您的简历已进入下一轮。",

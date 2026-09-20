@@ -1,4 +1,4 @@
-"""TOOL-03 只读工具单测:参数映射、路径拼装、客户端过滤、聚合口径、令牌通道。"""
+"""只读工具单测:参数映射、路径拼装、客户端过滤、聚合口径、令牌通道。"""
 
 import httpx
 import pytest
@@ -231,7 +231,7 @@ async def test_get_backend_client_is_singleton(monkeypatch: pytest.MonkeyPatch) 
 async def test_get_my_interview_body_auth_code_maps_to_relogin_hint(
     mock_client: BackendClient,
 ) -> None:
-    """HARD-1 回归:body 业务码过期(1002)不得泄漏 _AuthExpired 内部信号。"""
+    """body 业务码过期(1002)不得泄漏 _AuthExpired 内部信号。"""
     respx.post(LOGIN).side_effect = login_ok()
     respx.get(f"{BASE}/api/interview/schedule/my").side_effect = httpx.Response(
         409, json={"code": 1002, "message": "token已过期"}
@@ -245,7 +245,7 @@ async def test_get_my_interview_body_auth_code_maps_to_relogin_hint(
 async def test_get_my_interview_timeout_maps_to_actionable_error(
     mock_client: BackendClient,
 ) -> None:
-    """HARD-2 回归:网络异常映射为可行动文案,不裸抛 httpx 异常。"""
+    """网络异常映射为可行动文案,不裸抛 httpx 异常。"""
     respx.post(LOGIN).side_effect = login_ok()
     respx.get(f"{BASE}/api/interview/schedule/my").side_effect = httpx.ReadTimeout("boom")
 
@@ -255,14 +255,14 @@ async def test_get_my_interview_timeout_maps_to_actionable_error(
 
 @respx.mock
 async def test_get_candidate_card_requires_on_behalf_of(mock_client: BackendClient) -> None:
-    """判断项回归:缺代理身份 fail-fast,把「为什么被拒、要传什么」说在前面。"""
+    """缺代理身份 fail-fast,把「为什么被拒、要传什么」说在前面。"""
     with pytest.raises(BackendError, match="on_behalf_of"):
         await get_candidate_card(cycle_id=1, schedule_id=1, on_behalf_of=None)  # type: ignore[arg-type]
 
 
 @respx.mock
 async def test_statistics_contract_drift_fails_loudly(mock_client: BackendClient) -> None:
-    """核实项回归:result/list 缺 total 字段=契约漂移,显式报错而非静默截断。"""
+    """result/list 缺 total 字段=契约漂移,显式报错而非静默截断。"""
     respx.post(LOGIN).side_effect = login_ok()
     respx.get(f"{BASE}/api/interview/result/list").side_effect = ok(
         {"interviewResults": [{"decision": 1}]}  # 没有 total
@@ -276,7 +276,7 @@ async def test_statistics_contract_drift_fails_loudly(mock_client: BackendClient
 async def test_asker_scope_sends_asker_jwt_not_service_account(
     mock_client: BackendClient,
 ) -> None:
-    """A·SEC-02:web turn(asker_scope 激活)内经 _read 的查询以本人 JWT 裸发,
+    """web turn(asker_scope 激活)内经 _read 的查询以本人 JWT 裸发,
     不带服务账号 token(绝不用服务账号代读)。"""
     search_route = respx.get(f"{BASE}/api/resumes/search").mock(
         return_value=ok({"content": [], "totalElements": 0})

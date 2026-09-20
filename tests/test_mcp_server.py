@@ -1,4 +1,4 @@
-"""TOOL-02 MCP Server 测试:注册面精确性 + 协议级调用 + 双 transport。
+"""MCP Server 测试:注册面精确性 + 协议级调用 + 双 transport。
 
 安全边界断言(ADR-0003):MCP 只暴露只读工具——
 写工具与 get_my_interview(需最终用户令牌)绝不出现,这是权限边界,不是约定。
@@ -226,7 +226,7 @@ async def test_backend_error_message_survives_to_model(mock_backend):
 
 
 def test_main_flag_without_value_fails_gracefully(capsys) -> None:
-    """#74 review nit 回归:--host 缺值不裸 IndexError。"""
+    """--host 缺值不裸 IndexError。"""
     from official_agent.mcp_server import main
 
     with pytest.raises(SystemExit, match="--host"):

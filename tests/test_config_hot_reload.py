@@ -1,4 +1,4 @@
-"""M6 #111 配置热生效测试:get_settings 去缓存 + DB 覆盖优先级。
+"""配置热生效测试:get_settings 去缓存 + DB 覆盖优先级。
 
 - get_effective_settings() 合并 DB 低敏覆盖(DB 优先于 env)
 - 白名单外键(高敏)不合并

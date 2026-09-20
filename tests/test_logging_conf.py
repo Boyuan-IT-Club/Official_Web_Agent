@@ -1,4 +1,4 @@
-"""M6 #113 日志配置测试:stdout + .log 落盘 + RotatingFileHandler 定量打包。
+"""日志配置测试:stdout + .log 落盘 + RotatingFileHandler 定量打包。
 
 setup_logging(log_dir, level) 用注入目录(测试不污染真实日志)。
 """

@@ -1,11 +1,11 @@
-"""MEM-01 真库验证:checkpointer 建表 + thread 建档 + 真实图两轮持久化。
+"""真库验证:checkpointer 建表 + thread 建档 + 真实图两轮持久化。
 
 用 LangGraph StateGraph(最小 echo 图)+ AsyncPostgresSaver,跑两轮:
 - 第一轮写入消息
 - 同一 thread_id,新连接(模拟重启)第二轮读回历史并追加
 证明跨连接持久化成立。
 
-同时覆盖 H-3(同 tid 二次建档幂等)与 L-1(ensure_agent_threads_table 自举)。
+同时覆盖同 tid 二次建档幂等与 ensure_agent_threads_table 自举。
 """
 
 import asyncio
@@ -35,7 +35,7 @@ class State(TypedDict):
 
 
 async def main() -> None:
-    # 0. 自举:幂等建 agent_threads 档案表(L-1,新环境可跑)
+    # 0. 自举:幂等建 agent_threads 档案表(新环境可跑)
     ensure_agent_threads_table()
     print("[0] ensure_agent_threads_table OK")
 
@@ -44,12 +44,12 @@ async def main() -> None:
         assert isinstance(saver, AsyncPostgresSaver)
         print("[1] get_checkpointer() OK")
 
-    # 2. 建档 + H-3 幂等:同 tid 二次建档不炸
+    # 2. 建档 + 幂等:同 tid 二次建档不炸
     rec = create_thread("cli", 7, subject="mem01-e2e-verify")
     print(f"[2] 建档 OK thread_id={rec.thread_id} subject={rec.subject}")
     rec2 = create_thread("cli", 7, thread_id=rec.thread_id)
     assert rec2.thread_id == rec.thread_id
-    print("[2b] H-3 同 tid 二次建档幂等 OK")
+    print("[2b] 同 tid 二次建档幂等 OK")
     assert get_thread(rec.thread_id) is not None
     print("[3] get_thread OK")
 
@@ -92,7 +92,7 @@ async def main() -> None:
     assert deleted is not None and deleted.status == "terminated" and deleted.deleted_at is not None
     print("[7] 软删除 OK")
 
-    print("\n=== MEM-01 真库验证全部通过 ===")
+    print("\n=== checkpointer 真库验证全部通过 ===")
 
 
 if __name__ == "__main__":

@@ -1,11 +1,11 @@
-# Agent 生产部署(#116/#104 决策:独立容器,与 Backend 同机,共享 agent PG)。
+# Agent 生产部署(独立容器,与 Backend 同机,共享 agent PG)。
 # 本 compose 只管 agent 自家两件套;MySQL/Redis/RabbitMQ/官网 nginx 由既有
 # Backend 栈与宿主机 nginx 提供 —— 不重复起、不纳管。
 #
 # 前置(一次性):
 #   1. 镜像:docker build -t ${DOCKERHUB_USERNAME}/official-agent:tag . 后推送
-#      (#104 拍板:镜像推 Docker Hub 同名 org);或在本机 build 留 :latest
-#   2. 密钥:cp .env.prod.example .env.prod 并填值(gitignore;SEC-01 真实凭证
+#      (镜像推 Docker Hub 同名 org);或在本机 build 留 :latest
+#   2. 密钥:cp .env.prod.example .env.prod 并填值(gitignore;真实凭证
 #      只进服务器 .env.prod,永不进镜像/仓库)
 #   3. 日志卷:mkdir -p deploy/logs(容器内 root 写入,同 Backend volumes 风格)
 #   4. nginx:把 deploy/nginx/agent.prod.conf.example 的 location 块并入现有
@@ -17,9 +17,10 @@ name: official-agent-prod
 services:
   agent-pg:
     # 知识库的 kb_chunks.embedding 是 vector 列,建表前要 CREATE EXTENSION vector。
-    # 基础镜像 postgres:17 **不带**该扩展。生产已手工换成本镜像 —— 仓库这里必须
-    # 同步,否则 CD 同步 deploy/ 时会把生产改回 postgres:17,下次 up 即丢扩展。
-    # pgvector 镜像与 postgres:17 同主版本,既有数据卷可直接沿用。
+    # 基础镜像 postgres:17 **不带**该扩展,KB 首次使用时会直接抛错(报错文案就是
+    # 让人换镜像)。CD 会同步 deploy/ 到生产,所以这里与生产必须一致 —— 写回
+    # postgres:17 会让下次 up 丢掉扩展。pgvector 镜像与 postgres:17 同主版本,
+    # 既有数据卷可直接沿用。
     image: pgvector/pgvector:pg17
     restart: unless-stopped
     environment:
@@ -37,7 +38,7 @@ services:
   agent:
     image: ${DOCKERHUB_USERNAME:-boyuanclub}/official-agent:${AGENT_VERSION:-latest}
     build: ..                       # 无网拉镜像时可本机构建兜底
-    restart: unless-stopped         # 健康检查失败自动重启(#116 AC)
+    restart: unless-stopped         # 健康检查失败自动重启
     env_file:
       - .env.prod
     environment:
@@ -45,8 +46,15 @@ services:
       POSTGRES_URL: postgresql://postgres:${AGENT_PG_PASSWORD}@agent-pg:5432/official_agent
       CREDENTIALS_DIR: /app
       LANGFUSE_HOST: ${LANGFUSE_HOST:-}   # 自托管 langfuse 已有则填,观测 fail-open
+    # 接入 Backend 栈的网络:Backend 经它按服务名访问本服务。
+    # 不接的话 Backend 只剩默认值(容器自身的回环)可用,而 agent 的宿主侧发布
+    # 只绑 127.0.0.1 —— 容器走 host.docker.internal 也够不到(那条路实测失败过),
+    # 于是所有经 Backend 代理的 Agent 管理/知识库/评估接口全线不可达。
+    # 网络由 Backend 栈创建,须先于本服务存在。
+    networks:
+      - backend
     ports:
-      - "127.0.0.1:8001:8001"       # 只绑本机回环:宿主机 nginx 反代到此
+      - "127.0.0.1:8001:8001"       # 宿主 nginx 反代与本机排障用;容器间不经它
     volumes:
       - ./logs:/app/logs            # RotatingFileHandler 落盘,运维直接查文件
     healthcheck:
@@ -55,8 +63,17 @@ services:
       timeout: 5s
       start_period: 30s
       retries: 3
-    # 单 worker 起步(#116);扩副本 = compose --scale agent=N(无状态,checkpointer 共享),
-    # 前提:会话表 _sessions 改外置(Ably 会话层,M3)后才能真多副本
+    # 单 worker 起步;扩副本 = compose --scale agent=N(无状态,checkpointer 共享),
+    # 前提:会话表 _sessions 改外置(Ably 会话层)后才能真多副本
 
 volumes:
   agent_pg_data:
+
+networks:
+  # Backend 栈已有的网络(名字可在 .env.prod 用 BACKEND_NETWORK 覆盖)。
+  # external: compose 不创建它,只接入——它归 Backend 栈管,两栈因此能按服务名
+  # 互访。agent 侧固定叫 backend 这个别名,Backend 的 AGENT_BASE_URL 写
+  # http://agent:8001/api/agent 即可。
+  backend:
+    external: true
+    name: ${BACKEND_NETWORK:-official-network}

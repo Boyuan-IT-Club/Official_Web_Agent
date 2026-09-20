@@ -1,12 +1,12 @@
-"""客服 Agent FastAPI 服务(INF-04):官网候选人只读问答通道。
+"""客服 Agent FastAPI 服务:官网候选人只读问答通道。
 
 分层:
 - 本模块:FastAPI app + lifespan(checkpointer 生命周期)+ 健康检查 + CORS
 - routes.py:业务路由(`/api/agent/chat` SSE)与会话管理
-- graphs/identity.resolve 的 kind=="web" 分支:官网 JWT → /auth/me 换身份(#89 A2,
-  已落地真实端点;解析失败由路由返回 401)
+- graphs/identity.resolve 的 kind=="web" 分支:官网 JWT → /auth/me 换身份
+  (已落地真实端点;解析失败由路由返回 401)
 
-与 CLI(INF-03)复用同一套装配:build_assistant_agent / langfuse_callbacks /
+与 CLI 复用同一套装配:build_assistant_agent / langfuse_callbacks /
 get_checkpointer / threads 建档 —— agent 进程内直连工具函数,不走 MCP 回环(ADR-0003)。
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -37,21 +38,45 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with get_checkpointer() as saver:
         app.state.checkpointer = saver
         try:
-            # L-1:幂等建 agent_threads + agent_conversation_log + agent_config 表
-            # (SEC-07 / M6 #110 / #111)。缺表时降级(fail-open,ADR-0005)。
+            # 幂等建 agent_threads + agent_conversation_log + agent_config 表。
+            # 缺表时降级(fail-open,ADR-0005)。
             ensure_agent_threads_table()
             conversation.ensure_conversation_table()
             config_store.ensure_config_table()
-            # #171 评审:纯 web 部署也要有审计面(管理员原文读取审计依赖)
+            # 纯 web 部署也要有审计面(管理员原文读取审计依赖)
             from official_agent.state.audit import ensure_audit_table
 
             ensure_audit_table()
+            # 评测三表(scorecard / qbank / job)的自举全在这里:建表 DDL
+            # 即使 no-op 也持表锁,留在数据路径上会把读写串行化
+            # (见 state/evaluation.py 顶部的自举注释)。job 表还要去重
+            # legacy 重复活跃行 + 建部分唯一索引,必须先于下面的启动恢复。
+            from official_agent.state.evaluation import (
+                ensure_evaluation_job_ready,
+                ensure_evaluation_scorecard_ready,
+            )
+            from official_agent.state.qbank import ensure_qbank_ready
+
+            ensure_evaluation_scorecard_ready()
+            ensure_qbank_ready()
+            ensure_evaluation_job_ready()
         except Exception:  # noqa: BLE001 — PG 未起/配置错 → 降级(fail-open,ADR-0005)
             app.state.checkpointer = None
+        # 启动自动恢复:进程重启后,PG 里残留的 pending/running job
+        # 由 lifespan 全量扫回并重派(超 10 分钟 + attempts 未满;达上限的
+        # 转 failed 交人工)。失败 fail-open——PG 未起时跳过,下次重启再恢复。
+        try:
+            from official_agent.evaluation.runner import get_runner
 
-        # #171:会话 TTL 清理 job——软删档案超保留期(连带 checkpoint/对话日志)
+            await get_runner().recover_stale_on_startup()
+        except Exception:  # noqa: BLE001 — 恢复失败不挡服务启动(ADR-0005 fail-open)
+            logging.getLogger(__name__).warning(
+                "启动自动恢复失败,残留 job 留待下次/手动重试", exc_info=True
+            )
+
+        # 会话 TTL 清理 job——软删档案超保留期(连带 checkpoint/对话日志)
         # 物理清理,每 6h 一轮,fail-open。thread_retention_days=0 时为 no-op:
-        # 保留天数是 #57 数据留存 ADR 的拍板项,ADR 落地前不启用。
+        # 保留天数由数据留存 ADR 决定,ADR 落地前不启用。
         ttl_stop = asyncio.Event()
 
         async def _session_ttl_loop() -> None:
@@ -76,7 +101,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     await asyncio.wait_for(ttl_stop.wait(), timeout=6 * 3600)
 
         ttl_task = asyncio.create_task(_session_ttl_loop())
-        # #164:挂起载荷 24h TTL 清理 job(每 6h 一轮,fail-open)
+
+        # 挂起载荷 24h TTL 清理 job(每 6h 一轮,fail-open)
         purge_stop = asyncio.Event()
 
         async def _purge_loop() -> None:
@@ -106,7 +132,7 @@ def create_app() -> FastAPI:
     """构建 FastAPI app。uvicorn 入口:``uvicorn official_agent.web.app:create_app``
     (factory 模式,便于测试注入)。"""
     settings = get_settings()
-    # M6 #113:日志 stdout + 落盘 RotatingFileHandler(幂等,测试安全)
+    # 日志 stdout + 落盘 RotatingFileHandler(幂等,测试安全)
     from official_agent.logging_conf import setup_logging
 
     setup_logging()
@@ -126,6 +152,10 @@ def create_app() -> FastAPI:
 
     app.include_router(routes.router, prefix="/api/agent")
     app.include_router(kb_admin_router, prefix="/api/agent")
+
+    from official_agent.web.evaluation_admin import router as evaluation_admin_router
+
+    app.include_router(evaluation_admin_router, prefix="/api/agent")
 
     @app.get("/health")
     async def health() -> dict[str, str]:

@@ -1,0 +1,262 @@
+# 出题探针数据集(runner kind=injection 同款确定性评测)。
+# 六探针:①十类覆盖 ②链 3-5 层 ③题量 ≤15/敷衍 ≤3 ④evidence.path 白名单
+#         ⑤对抗前提黑名单 ⑥链源真实性
+# 每条 case 喂 validate_qbank_v2_group(与 generate 主路径同一校验机器):
+#   expect: pass | reject;reject 时 match 为预期错误子串。
+# 标准 dossier fixture:含依赖清单(redis/flask)与仓路径白名单。
+
+runner: qbank_probes
+
+fixtures:
+  dossier: |
+    ### C1_背景与动机
+    社团管理系统:解决招新报名与简历筛选效率问题。
+    ### C2_技术选型与权衡
+    依赖清单:redis 客户端、flask 框架、sqlalchemy ORM;放弃了 django(过重)。
+    ### C3_架构与数据流
+    路径清单:README.md src/app.py src/models.py tests/test_app.py
+    ### C4_实现细节拷打
+    src/app.py 中报名接口带限流与参数校验,缓存报名计数,并对重复提交做了幂等处理。
+    src/models.py 定义了报名、场次与候选人三类模型,报名与场次是一对多关系。
+    tests/test_app.py 覆盖了报名成功、重复报名、字段缺失三类场景,跑通 CI。
+    部署采用 docker compose,数据库迁移用 alembic 管理,配置面留了环境变量注入点。
+    报名高峰(开放首日)出现过短时排队,后续把写入改成队列异步落库。
+  paths: ["README.md", "src/app.py", "src/models.py", "tests/test_app.py"]
+
+cases:
+  # ① 十类覆盖:合法组(类别可自由组合)
+  - id: probe-coverage-valid
+    validate: pass
+    group:
+      entry: &entry
+        category: C1_背景与动机
+        question: "为什么做这个系统?"
+        answer_reference: { strong: s, acceptable: a, weak: w }
+        evidence: { path: "README.md", note: "" }
+        time_minutes: 3
+      chains: &chains
+        - category: C4_实现细节拷打
+          theme: "src/app.py 的报名接口限流设计"
+          layers:
+            - { question: "限流阈值怎么定的?", expected_signal: "给出依据" }
+            - { question: "超限后用户体验如何?", expected_signal: "能描述降级" }
+            - { question: "分布式部署下怎么改?", expected_signal: "能外推" }
+        - category: C7_边界与失败模式
+          theme: "src/models.py 的并发写入边界"
+          layers:
+            - { question: "并发报名同一名额怎么处理?", expected_signal: "锁/队列" }
+            - { question: "数据库挂了报名页表现?", expected_signal: "降级路径" }
+            - { question: "恢复后数据一致性?", expected_signal: "对账思路" }
+      reserves: &reserves
+        - category: C6_难点与调试
+          question: "开发中最难的 bug 是什么,怎么排查的?"
+          answer_reference: { strong: s, acceptable: a, weak: w }
+          evidence: { path: "", note: "开放题" }
+          time_minutes: 3
+        - category: C9_变更条件
+          question: "流量 ×10 哪里先坏?"
+          answer_reference: { strong: s, acceptable: a, weak: w }
+          evidence: { path: "src/app.py", note: "" }
+          time_minutes: 3
+
+  # ② 链层数下界(2 层 → 拒):探针不传档位即标准档(3-5),故下界仍拦住它。
+  # 下界判定已从 schema 挪到语义校验(层数随出题深度档变),文案不再来自 pydantic。
+  - id: probe-chain-layers-min-rejected
+    validate: reject
+    match: ""
+    group:
+      entry: *entry
+      chains:
+        - category: C4_实现细节拷打
+          theme: "src/app.py 的报名接口限流设计"
+          layers:
+            - { question: "只有一层?", expected_signal: "s" }
+            - { question: "太浅了。", expected_signal: "s" }
+      reserves: *reserves
+
+  # ②' 链层数上界(6 层 → 拒)
+  - id: probe-chain-layers-max-rejected
+    validate: reject
+    match: ""  # schema max_length 拒绝,文案来自 pydantic
+    group:
+      entry: *entry
+      chains:
+        - category: C4_实现细节拷打
+          theme: "src/app.py 的报名接口限流设计"
+          layers:
+            - { question: "L1?", expected_signal: "s" }
+            - { question: "L2?", expected_signal: "s" }
+            - { question: "L3?", expected_signal: "s" }
+            - { question: "L4?", expected_signal: "s" }
+            - { question: "L5?", expected_signal: "s" }
+            - { question: "L6 超上界?", expected_signal: "s" }
+      reserves: *reserves
+
+  # ③ 题量硬顶 15(入口 + 4 链 × 5 层 + 2 备选 = 23)
+  - id: probe-total-cap-rejected
+    validate: reject
+    match: "题量超硬顶"
+    group:
+      entry: *entry
+      chains:
+        - category: C4_实现细节拷打
+          theme: "src/app.py 的报名接口限流设计"
+          layers: &five_layers
+            - { question: "L1?", expected_signal: "s" }
+            - { question: "L2?", expected_signal: "s" }
+            - { question: "L3?", expected_signal: "s" }
+            - { question: "L4?", expected_signal: "s" }
+            - { question: "L5?", expected_signal: "s" }
+        - category: C7_边界与失败模式
+          theme: "src/models.py 的并发写入边界"
+          layers: *five_layers
+        - category: C2_技术选型与权衡
+          theme: "redis 客户端的选型与权衡"
+          layers: *five_layers
+        - category: C6_难点与调试
+          theme: "flask 框架的调试经历"
+          layers: *five_layers
+      reserves: *reserves
+
+  # ③' 敷衍 dossier(dossier 体量不足)题量 ≤3
+  - id: probe-thin-dossier-cap-rejected
+    validate: reject
+    match: "敷衍 dossier 题量越界"
+    thin: true
+    group:
+      entry: *entry
+      chains:
+        - category: C4_实现细节拷打
+          theme: "src/app.py 的报名接口限流设计"
+          layers:
+            - { question: "L1?", expected_signal: "s" }
+            - { question: "L2?", expected_signal: "s" }
+            - { question: "L3?", expected_signal: "s" }
+      reserves: *reserves
+
+  # ④ evidence.path 白名单(编造路径)
+  - id: probe-fabricated-path-rejected
+    validate: reject
+    match: "不在仓内"
+    group:
+      entry: *entry
+      chains:
+        - category: C4_实现细节拷打
+          theme: "src/app.py 的报名接口限流设计"
+          layers:
+            - { question: "L1?", expected_signal: "s" }
+            - { question: "L2?", expected_signal: "s" }
+            - { question: "L3?", expected_signal: "s" }
+      reserves:
+        - category: C6_难点与调试
+          question: "最难 bug?"
+          answer_reference: { strong: s, acceptable: a, weak: w }
+          evidence: { path: "src/编造的模块.py", note: "" }
+          time_minutes: 3
+
+  # ⑤ 对抗前提黑名单
+  - id: probe-adversarial-rejected
+    validate: reject
+    match: "对抗前提"
+    group:
+      entry: *entry
+      chains:
+        - category: C4_实现细节拷打
+          theme: "src/app.py 的报名接口限流设计"
+          layers:
+            - { question: "L1?", expected_signal: "s" }
+            - { question: "L2?", expected_signal: "s" }
+            - { question: "L3?", expected_signal: "s" }
+      reserves:
+        - category: C8_真实性与贡献边界
+          question: "你自述主导重构,但仓库显示另有其人,解释矛盾。"
+          answer_reference: { strong: s, acceptable: a, weak: w }
+          evidence: { path: "", note: "" }
+          time_minutes: 3
+
+  # ⑥ 链源真实性(dossier 没有的组件不出链)
+  - id: probe-chain-source-not-in-dossier-rejected
+    validate: reject
+    match: "链源不在 dossier"
+    group:
+      entry: *entry
+      chains:
+        - category: C4_实现细节拷打
+          theme: "kafka 消息队列的削峰设计"
+          layers:
+            - { question: "L1?", expected_signal: "s" }
+            - { question: "L2?", expected_signal: "s" }
+            - { question: "L3?", expected_signal: "s" }
+      reserves: *reserves
+
+  # ①' 十类覆盖(十类枚举逐一可达):单组结构上限 7 槽
+  # (入口1+链3+备选3),故两组互补覆盖十类——每组各自通过
+  - id: probe-ten-categories-part1-pass
+    validate: pass
+    group:
+      entry:
+        category: C1_背景与动机
+        question: "为什么做这个系统?"
+        answer_reference: { strong: s, acceptable: a, weak: w }
+        evidence: { path: "README.md", note: "" }
+        time_minutes: 3
+      chains:
+        - category: C2_技术选型与权衡
+          theme: "redis 客户端的选型与权衡"
+          layers:
+            - { question: "为什么 redis 不 memcached?", expected_signal: "s" }
+            - { question: "放弃 django 的原因?", expected_signal: "s" }
+            - { question: "重选一次改什么?", expected_signal: "s" }
+        - category: C3_架构与数据流
+          theme: "src/models.py 到报名接口的数据流"
+          layers:
+            - { question: "数据从报名到落库怎么流?", expected_signal: "s" }
+            - { question: "哪层最脆弱?", expected_signal: "s" }
+            - { question: "L3?", expected_signal: "s" }
+        - category: C4_实现细节拷打
+          theme: "src/app.py 的限流实现"
+          layers:
+            - { question: "限流算法?", expected_signal: "s" }
+            - { question: "阈值依据?", expected_signal: "s" }
+            - { question: "分布式怎么改?", expected_signal: "s" }
+      reserves:
+        - category: C5_数字与规模
+          question: "你怎么知道它能扛?"
+          answer_reference: { strong: s, acceptable: a, weak: w }
+          evidence: { path: "README.md", note: "" }
+          time_minutes: 3
+
+  - id: probe-ten-categories-part2-pass
+    validate: pass
+    group:
+      entry:
+        category: C6_难点与调试
+        question: "最难的一次排查经历?"
+        answer_reference: { strong: s, acceptable: a, weak: w }
+        evidence: { path: "README.md", note: "" }
+        time_minutes: 3
+      chains:
+        - category: C7_边界与失败模式
+          theme: "src/models.py 的并发写入边界"
+          layers:
+            - { question: "并发报名怎么处理?", expected_signal: "s" }
+            - { question: "数据库挂了呢?", expected_signal: "s" }
+            - { question: "L3?", expected_signal: "s" }
+        - category: C8_真实性与贡献边界
+          theme: "src/app.py 的模块归属核对"
+          layers:
+            - { question: "哪些是你独立写的?", expected_signal: "s" }
+            - { question: "怎么证明?", expected_signal: "s" }
+            - { question: "分工边界?", expected_signal: "s" }
+        - category: C9_变更条件
+          theme: "README.md 的部署配置面"
+          layers:
+            - { question: "流量 ×10 哪先坏?", expected_signal: "s" }
+            - { question: "配置面怎么扩?", expected_signal: "s" }
+            - { question: "哪个依赖先到顶?", expected_signal: "s" }
+      reserves:
+        - category: C10_复盘与改进
+          question: "重做会改什么?"
+          answer_reference: { strong: s, acceptable: a, weak: w }
+          evidence: { path: "", note: "" }
+          time_minutes: 3

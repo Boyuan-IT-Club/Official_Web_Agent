@@ -1,4 +1,4 @@
-"""#171 用户输入隐私闭环测试:trace 脱敏 / 删除闭环 / TTL / 管理审计。
+"""用户输入隐私闭环测试:trace 脱敏 / 删除闭环 / TTL / 管理审计。
 
 同 test_web_routes 先例:TestClient + monkeypatch,不真连库;
 真 PG 段(档案硬删往返)在文件尾部,无 PG 自动 skip。
@@ -35,7 +35,8 @@ def _reset_registry():
 
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def client(monkeypatch: pytest.MonkeyPatch, web_no_real_pg: None) -> TestClient:
+    # web_no_real_pg(tests/conftest.py):lifespan 自举/启动恢复不落真 PG。
     monkeypatch.setattr("official_agent.state.pg.get_checkpointer", _fake_checkpointer)
     with TestClient(create_app()) as c:
         yield c
@@ -60,7 +61,7 @@ def _sse_events(resp) -> list[dict]:
 
 
 def test_masked_handler_masks_copies_not_originals() -> None:
-    """#171:handler 掩码的是**拷贝**,图状态里的原消息不被污染。"""
+    """handler 掩码的是**拷贝**,图状态里的原消息不被污染。"""
     from official_agent.observability import _PiiMaskedLangfuseHandler
 
     captured: dict = {}
@@ -103,7 +104,7 @@ def test_masked_handler_masks_llm_prompts() -> None:
 def test_delete_session_purges_all_store_faces(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#171:用户删除 → 档案硬删 + checkpoint 清理 + 对话日志清理,三面联动。"""
+    """用户删除 → 档案硬删 + checkpoint 清理 + 对话日志清理,三面联动。"""
     from official_agent.tools.client import BackendUnavailableError  # noqa: F401
 
     async def _resolve(*_a: object, **_k: object) -> dict:
@@ -229,7 +230,7 @@ def test_delete_holds_registration_then_releases_on_failure(
 def test_admin_transcript_read_is_audited(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#171:管理员原文读取落审计(actor/thread/时间可对账),fail-open。"""
+    """管理员原文读取落审计(actor/thread/时间可对账),fail-open。"""
     from official_agent.web import routes as r
 
     async def _resolve(*_a: object, **_k: object) -> dict:

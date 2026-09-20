@@ -1,6 +1,6 @@
-"""后端 API 客户端(TOOL-01):服务账号登录、token 续期、统一错误映射、瞬时错误重试。
+"""后端 API 客户端:服务账号登录、token 续期、统一错误映射、瞬时错误重试。
 
-OBS-02:除登录外所有出站请求统一携带 W3C traceparent 头,两侧日志可对账。
+除登录外所有出站请求统一携带 W3C traceparent 头,两侧日志可对账。
 
 契约(对齐后端 openapi.yaml 与 BusinessExceptionEnum):
 - 登录 POST /api/auth/login(body: auth_id/auth_type/verify,HTTP 201),
@@ -8,7 +8,7 @@ OBS-02:除登录外所有出站请求统一携带 W3C traceparent 头,两侧日�
 - 业务错误在 body.code,HTTP 状态随枚举漂移(400/401/403/409...),
   故判定一律以 body.code 为准,HTTP 401 例外(Jwt 过滤器直接 setStatus,无 body)。
 - token 类失效码 {1001,1002,1003,2004,2006} 或 HTTP 401 → 重登一次后重试。
-- 登录失败实测返回 code 401(枚举写作 2002,以后端为准,2026-08-31 冒烟验证)。
+- 登录失败实测返回 code 401(枚举写作 2002,以后端为准)。
 """
 
 import asyncio
@@ -31,7 +31,7 @@ _AUTH_EXPIRED_CODES = frozenset({1001, 1002, 1003, 2004, 2006})
 # 高频业务码 → 可行动提示;未列出的码透传后端 message
 _ACTIONABLE_HINTS: dict[int, str] = {
     2002: "服务账号用户名或密码错误,检查 .env 的 BACKEND_SERVICE_* 配置",
-    2101: "服务账号权限不足,需后端补授该操作的权限(SEC-01 谈判项)",
+    2101: "服务账号权限不足,需后端补授该操作的权限",
     3001: "简历不存在,先用 search_resumes 核对 resume_id/user_id 与周期",
     3010: "该周期已停止投递,不可再修改",
     3407: "候选人尚未提交简历,不能进入预约/评分流程",
@@ -54,7 +54,7 @@ class BackendAuthError(BackendError):
 
 
 class BackendUnavailableError(BackendError):
-    """后端不可达/网络故障(#170):与业务错误、凭证错误分型。
+    """后端不可达/网络故障:与业务错误、凭证错误分型。
 
     入口层据此区分 503(服务端故障,可重试)与 401(凭证无效,需重登录),
     不再依赖文案关键词猜类型。"""
@@ -114,7 +114,7 @@ class BackendClient:
         与服务账号通道语义不同,故不做重登与重试:用户 token 无效/过期
         是另一类失败,如实抛 BackendError 由调用方引导用户重新登录,
         绝不能拿服务账号悄悄顶替。
-        出现第三个用户令牌工具时应拆出 UserTokenClient(review #73,SMELL)。
+        出现第三个用户令牌工具时应拆出 UserTokenClient。
         """
         if not user_token:
             raise BackendError("缺少用户本人令牌(user_token),该操作必须以最终用户身份执行")
@@ -139,6 +139,34 @@ class BackendClient:
             # body 业务码过期(1001-1003/2004/2006)与 HTTP 401 同文案,不泄漏内部信号
             raise BackendError("用户令牌无效或已过期,需用户重新登录后重试") from None
 
+    async def put_as_user(
+        self, path: str, json: dict[str, Any] | None = None, user_token: str = ""
+    ) -> Any:
+        """以最终用户本人令牌发 PUT(本人一票 upsert)。
+
+        语义与 get_as_user 相同:不重登不重试,令牌失效如实抛错。
+        """
+        if not user_token:
+            raise BackendError("缺少用户本人令牌(user_token),该操作必须以最终用户身份执行")
+        try:
+            resp = await self._http.request(
+                "PUT",
+                path,
+                json=json,
+                headers={
+                    "Authorization": f"Bearer {user_token}",
+                    **observability.traceparent_header(),
+                },
+            )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise BackendError(
+                f"后端连接失败({type(exc).__name__}),稍后重试;持续失败请检查后端状态"
+            ) from None
+        try:
+            return _interpret(resp)
+        except _AuthExpired:
+            raise BackendError("用户令牌无效或已过期,需用户重新登录后重试") from None
+
     async def login(self) -> str:
         """服务账号登录并缓存 token。凭证错误抛 BackendAuthError。"""
         token = await self._do_login()
@@ -146,7 +174,7 @@ class BackendClient:
         return token
 
     async def _ensure_token(self) -> str:
-        """token 获取优先级(SEC-09):
+        """token 获取优先级:
         内存缓存 → 本地存储凭证(official-agent login 的产物)→ 账密 login。
         .env 无账密且无存储凭证时,报可行动指引(运行 official-agent login)。
         """

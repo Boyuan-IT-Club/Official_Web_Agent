@@ -1,10 +1,11 @@
-"""agent_threads 建档/软删除(SEC-07 属主载体,MEM-01)。
+"""agent_threads 建档/软删除:属主与生命周期载体。
 
 thread 是 checkpointer 的"业务视图":checkpoints 表只存状态快照(SDK 原样),
-agent_threads 记录 thread_id → 属主/渠道/生命周期。SEC-07 的命名/属主/终结
-全部在这张表上表达;checkpointer 数据保留至 SEC-06 定 TTL。
+agent_threads 记录 thread_id → 属主/渠道/生命周期。命名/属主/终结
+全部在这张表上表达;checkpointer 数据的保留期限由 TTL 清理路径约定
+(见 pg.purge_expired_interrupts 与本文件的 list_expired_soft_deleted)。
 
-thread_id v1 规范(MEM-01 拍板):{module}:{subject}:{random8}
+thread_id v1 规范:{module}:{subject}:{random8}
   例:assistant:interview:8f3a9c2b · eval:batch-2026:1d0e7f
 """
 
@@ -45,9 +46,9 @@ def _conn() -> psycopg.Connection[dict[str, Any]]:
 
 
 def ensure_agent_threads_table() -> None:
-    """幂等建 agent_threads 表(L-1:DDL 进仓库,新环境可自举)。
+    """幂等建 agent_threads 表(DDL 进仓库,新环境可自举)。
 
-    subject 列存会话别名(CLI -s),thread_id 是 SEC-07 规范的
+    subject 列存会话别名(CLI -s),thread_id 由统一规范生成:
     {channel}:{user}:{random8}。
     """
     with _conn() as conn:
@@ -69,7 +70,7 @@ def ensure_agent_threads_table() -> None:
 
 
 def new_thread_id(channel: str, owner_user_id: int) -> str:
-    """SEC-07 规范生成 thread_id:{channel}:u{user}:{random8}。
+    """按统一规范生成 thread_id:{channel}:u{user}:{random8}。
 
     channel=cli/web/feishu;owner 段防猜(用户标识)+ random8(secrets)防碰撞。
     thread_id 自带属主维度,恢复路径可据此校验。
@@ -86,9 +87,9 @@ def create_thread(
 ) -> ThreadRecord:
     """建档:INSERT agent_threads,返回完整记录(幂等)。
 
-    thread_id 缺省按 SEC-07 自动生成({channel}:u{owner}:{random8})。
+    thread_id 缺省自动生成({channel}:u{owner}:{random8})。
     subject 存会话别名(CLI -s),不拼进 thread_id。
-    显式 tid 已存在时 ON CONFLICT DO NOTHING,返回既有记录(续接/复活幂等,H-3)。
+    显式 tid 已存在时 ON CONFLICT DO NOTHING,返回既有记录(续接/复活幂等)。
     """
     tid = thread_id or new_thread_id(channel, owner_user_id)
     with _conn() as conn:
@@ -103,7 +104,7 @@ def create_thread(
         ).fetchone()
         if row is None:
             # 冲突:tid 已存在。幂等仅限「同属主 + 仍 active」——
-            # 跨属主借用 / 已终结复活都是 SEC-07 明令禁止的。
+            # 跨属主借用 / 已终结复活都是明令禁止的。
             existing = conn.execute(
                 "SELECT " + _COLUMNS + " FROM agent_threads WHERE thread_id = %s",
                 (tid,),
@@ -131,9 +132,9 @@ def get_thread(thread_id: str) -> ThreadRecord | None:
 
 
 def resolve_thread(thread_id: str, actor_user_id: int) -> ThreadRecord | None:
-    """恢复/读取路径的属主硬校验入口(SEC-07):非属主 / 已终结返回 None(拒绝)。
+    """恢复/读取路径的属主硬校验入口:非属主 / 已终结返回 None(拒绝)。
 
-    调用方(CLI/GRA 恢复历史前)统一走这里,防可枚举跨会话翻看(PII),
+    调用方(CLI 恢复历史前)统一走这里,防可枚举跨会话翻看(PII),
     且终结即终结(ADR-0008 §4)——已终结 thread 一律拒绝恢复。
     """
     rec = get_thread(thread_id)
@@ -175,7 +176,7 @@ def list_active_threads(owner_user_id: int | None = None) -> list[ThreadRecord]:
 def soft_delete_thread(thread_id: str, *, owner_user_id: int) -> bool:
     """软删除:置 status='terminated' + deleted_at=now(),仅限属主本人。
 
-    owner_user_id 为必填关键字参数(M-3):恒带属主过滤,杜绝跨属主误删。
+    owner_user_id 为必填关键字参数:恒带属主过滤,杜绝跨属主误删。
     """
     with _conn() as conn:
         cur = conn.execute(
@@ -199,7 +200,7 @@ def _record(row: dict[str, Any]) -> ThreadRecord:
 
 
 def hard_delete_thread(thread_id: str, *, owner_user_id: int | None = None) -> bool:
-    """物理删除会话档案(#171):默认限定属主(用户自删);owner_user_id=None
+    """物理删除会话档案:默认限定属主(用户自删);owner_user_id=None
     为运维/TTL 清理通道。只删 agent_threads 档案行;checkpoint/对话日志/
     trace 的清理由调用方联动执行,面面俱到才算删干净。"""
     sql = "DELETE FROM agent_threads WHERE thread_id = %s"
@@ -213,7 +214,7 @@ def hard_delete_thread(thread_id: str, *, owner_user_id: int | None = None) -> b
 
 
 def list_expired_soft_deleted(older_than_days: int) -> list[str]:
-    """列出软删且超过保留期的 thread_id(#171 TTL;0 天=关闭,返回空)。"""
+    """列出软删且超过保留期的 thread_id(0 天=关闭,返回空)。"""
     if older_than_days <= 0:
         return []
     with _conn() as conn:

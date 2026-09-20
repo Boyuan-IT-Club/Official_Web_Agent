@@ -1,14 +1,14 @@
-"""Postgres 状态设施(MEM-01):checkpointer 工厂。
+"""Postgres 状态设施:checkpointer 工厂。
 
 - 与 Langfuse 共享同一实例(ADR-0007),库 official_agent,另建 database 隔离
 - AsyncPostgresSaver:CLI/SSE 事件循环上用 async 连接,不阻塞线程池
 - get_checkpointer() 上下文管理器:进入建连接池并建表(幂等),退出关池
-- agent_threads 建档/软删除在 state/threads.py(SEC-07 属主载体)
+- agent_threads 建档/软删除在 state/threads.py(属主载体)
 
 注 1:必须用 AsyncConnectionPool 而非 from_conn_string——后者是单连接,
   全服务共享;任一请求在查询中途断连(用户关浏览器)即毒化连接
   (「another command is already in progress」),此后所有请求全挂
-  (2026-09-05,M6 #116 联调实测踩坑)。连接池隔离并发与坏连接。
+  (真实联调中踩到过)。连接池隔离并发与坏连接。
 注 2:池连接必须 autocommit=True + prepare_threshold=0(langgraph 官方
   生产部署要求,checkpoint 写路径依赖);row_factory=dict_row 与
   from_conn_string 先例一致。
@@ -56,7 +56,7 @@ async def get_checkpointer() -> AsyncIterator[AsyncPostgresSaver]:
 
 
 def purge_thread_checkpoints(thread_id: str) -> int:
-    """物理删除某 thread 的全部 checkpoint 数据(#171 删除闭环)。
+    """物理删除某 thread 的全部 checkpoint 数据(删除闭环)。
 
     LangGraph PostgresSaver 三表(checkpoints / checkpoint_writes /
     checkpoint_blobs)都按 thread_id 维度;缺表容错(旧库未建全时跳过,
@@ -76,7 +76,7 @@ def purge_thread_checkpoints(thread_id: str) -> int:
             except psycopg.errors.UndefinedTable:
                 conn.rollback()
     return deleted
-# ── checkpointer 挂起载荷 24h TTL(#164;ADR-0007 挂起态清理) ──
+# ── checkpointer 挂起载荷 24h TTL(ADR-0007 挂起态清理) ──
 
 _CHECKPOINT_TABLES = ("checkpoint_writes", "checkpoint_blobs", "checkpoints")
 _INTERRUPT_CHANNEL = "__interrupt__"
@@ -87,7 +87,7 @@ def _uuid_timestamp_age_hours(checkpoint_id: str, now: float) -> float | None:
     有序 id);其他版本/非 UUID → None(宁可不删不可误删)。
 
     v6 的 60 位 unix 时间戳按 hi/mid/low 重排——py3.12 的 stdlib .time 按
-    v1 字段序解码会得到垃圾值(评审 P0 实测 3117 年),必须显式重排。"""
+    v1 字段序解码会得到垃圾值(实测解出 3117 年),必须显式重排。"""
     import uuid
     from datetime import datetime
 
@@ -109,7 +109,7 @@ def _uuid_timestamp_age_hours(checkpoint_id: str, now: float) -> float | None:
 def purge_expired_interrupts(
     *, max_age_hours: int = 24, conn: Any = None, dsn: str | None = None
 ) -> int:
-    """清理挂起超时的 checkpointer 载荷(#164):require_confirmation 挂起的
+    """清理挂起超时的 checkpointer 载荷:require_confirmation 挂起的
     会话超 24h 未恢复 → 删除该 thread 的 checkpoints/blobs/writes 三表行。
 
     挂起判定:checkpoint_writes 存在 __interrupt__ 通道写入;年龄取该
@@ -141,7 +141,7 @@ def purge_expired_interrupts(
         thread_ids = [r[0] for r in cur.fetchall()]
         purged = 0
         for tid in thread_ids:
-            # 挂起 vs 已恢复判别(评审 P1):最新事件仍是 __interrupt__ 写入
+            # 挂起 vs 已恢复判别:最新事件仍是 __interrupt__ 写入
             # 才是「挂起未恢复」;恢复后闲置的 thread 不动(上下文不丢)
             cur.execute(
                 "SELECT max(checkpoint_id) FROM checkpoint_writes "
@@ -171,7 +171,7 @@ def purge_expired_interrupts(
                 "挂起载荷 TTL 清理:purge %d threads(>%dh 未恢复)", purged, max_age_hours
             )
         return purged
-    except Exception:  # noqa: BLE001 — 清理 job fail-open(#164)
+    except Exception:  # noqa: BLE001 — 清理 job fail-open
         logging.getLogger(__name__).warning("挂起载荷 TTL 清理失败(已忽略)", exc_info=True)
         return 0
     finally:

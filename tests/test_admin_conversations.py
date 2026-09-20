@@ -1,4 +1,4 @@
-"""M6 #112 /admin/conversations 管理 API 测试:列表/详情/权限/PII。
+"""/admin/conversations 管理 API 测试:列表/详情/权限/PII。
 
 用 FastAPI TestClient + monkeypatch(同 test_admin_config.py 先例):
 - resolve 被 monkeypatch(admin / 非 admin)
@@ -30,7 +30,8 @@ def _clear_settings_cache():
 
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def client(monkeypatch: pytest.MonkeyPatch, web_no_real_pg: None) -> TestClient:
+    # web_no_real_pg(tests/conftest.py):lifespan 自举/启动恢复不落真 PG。
     monkeypatch.setattr("official_agent.state.pg.get_checkpointer", _fake_checkpointer)
     with TestClient(create_app()) as c:
         yield c
@@ -137,7 +138,7 @@ def test_conversations_list_passes_filters(
 def test_conversations_list_passes_thread_filter(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """M6 #115:thread_id 过滤透传(详情页拉同会话轮次)。"""
+    """thread_id 过滤透传(详情页拉同会话轮次)。"""
     from official_agent.web import routes
 
     _install_resolve(monkeypatch, _admin_identity())
@@ -200,7 +201,7 @@ def test_conversations_detail_missing_404(
 def test_conversations_detail_error_row_no_content(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """错误行详情:只返回 error_code + 元数据,不泄对话内容(#112 契约)。"""
+    """错误行详情:只返回 error_code + 元数据,不泄对话内容。"""
     from official_agent.web import routes
 
     _install_resolve(monkeypatch, _admin_identity())
@@ -231,7 +232,7 @@ def test_conversations_detail_error_row_no_content(
 def test_conversations_invalid_params_400(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """分页参数非整数 → 400(评审 #112 MINOR)。"""
+    """分页参数非整数 → 400。"""
     from official_agent.web import routes
 
     _install_resolve(monkeypatch, _admin_identity())
@@ -253,7 +254,7 @@ def test_conversations_invalid_params_400(
 def test_conversations_limit_clamped_to_200(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """limit 超上限被钳到 200(评审 #112 MINOR)。"""
+    """limit 超上限被钳到 200。"""
     from official_agent.web import routes
 
     _install_resolve(monkeypatch, _admin_identity())

@@ -1,4 +1,4 @@
-"""凭证保管(SEC-09):login 换取的 token 存本地,生命周期感知。
+"""凭证保管:login 换取的 token 存本地,生命周期感知。
 
 存储:~/.official-agent/credentials.json,mode 600,内容
     {"token": "...", "exp": 1700000000, "user_id": 1, "username": "..."}

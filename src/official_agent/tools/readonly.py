@@ -1,16 +1,16 @@
-"""只读工具集(TOOL-03)。端点签名已按 openapi 逐条核对(2026-08-24 漂移修正)。
+"""只读工具集。端点签名已按 openapi 逐条核对。
 
 docstring 契约(ADR-0003):写「何时用」而非「能做什么」,列边界条件,
 关键工具附真实调用示例。docstring 即模型看到的工具描述。
 
-返回投影(TOOL-05 #16 的原则在本文件先行应用最小集):
-- 长列表透传后端的摘要语义(简历是字段值表驱动,字段白名单留 #16
+返回投影(在本文件先行应用最小集):
+- 长列表透传后端的摘要语义(简历是字段值表驱动,字段白名单待后续
   用真实字段键统一裁剪,这里不猜字段名);
 - 聚合工具(get_recruit_statistics)只回计数与下钻提示,不回明细。
 
-PII 红线(#68):get_resume_detail 返回层已就地脱敏(#115 review P0-3,
-与 conversation_log 共用 security/pii.py 规则表)——trace 上报的是脱敏后
-数据。其余工具与 trace 采集点二次脱敏/留存策略仍归 #68 拍板。
+PII 红线:get_resume_detail 返回层已就地脱敏(与 conversation_log 共用
+security/pii.py 规则表)——trace 上报的是脱敏后数据。其余工具与 trace
+采集点二次脱敏/留存策略尚未定。
 """
 
 import asyncio
@@ -53,7 +53,7 @@ async def _read(path: str, params: dict[str, Any] | None = None) -> Any:
     """
     token = _ASKER_TOKEN.get()
     client = await get_backend_client()
-    # 只在确有查询参数时传 params(review:注入的窄签名测试替身 _FakeClient.get(url)
+    # 只在确有查询参数时传 params(注入的窄签名测试替身 _FakeClient.get(url)
     # 不接受 params kwarg;统一带 None 会破坏它)
     query = {"params": params} if params else {}
     if token:
@@ -116,7 +116,7 @@ async def search_resumes(
     if status is not None:
         params["status"] = status
     data = await _read("/api/resumes/search", params=params)
-    # 后端分页为 Spring Page 结构:content/totalElements(2026-09-01 冒烟核实)
+    # 后端分页为 Spring Page 结构:content/totalElements
     if data is None:
         return {"content": [], "totalElements": 0}
     return data
@@ -127,10 +127,10 @@ async def get_resume_detail(user_id: int, cycle_id: int) -> dict:
 
     对应 GET /api/resumes/admin/{userId}/{cycleId}(不存在按 resumeId 直查的端点;
     resumeId 需先经 search_resumes 拿到对应 userId)。
-    PII(#115 review P0-3):返回层就地脱敏(mask_pii_deep,与 conversation_log
-    共用规则表)——完整简历进模型上下文即进 Langfuse trace,工具层脱敏后
-    trace 侧闭环;面向候选人的回答本就不复述隐私字段(assistant.md)。
-    trace 采集点二次脱敏/留存策略仍归 #68 拍板。
+    PII:返回层就地脱敏(mask_pii_deep,与 conversation_log 共用规则表)——
+    完整简历进模型上下文即进 Langfuse trace,工具层脱敏后 trace 侧闭环;
+    面向候选人的回答本就不复述隐私字段(assistant.md)。
+    trace 采集点二次脱敏/留存策略尚未定。
     """
     result = await _read(f"/api/resumes/admin/{user_id}/{cycle_id}")
 
@@ -194,8 +194,8 @@ _DECISION_KEYS = {0: "pending", 1: "passed", 2: "rejected", 3: "toTransfer"}
 async def get_recruit_statistics(cycle_id: int) -> dict:
     """投递/面试/结果的汇总统计。
 
-    后端无单一统计端点(原 /api/interview/statistics 未实现,已列入 SEC-01
-    谈判清单),由 /api/interview/result/list(分页拉全量)与
+    后端无单一统计端点(原 /api/interview/statistics 未实现),由
+    /api/interview/result/list(分页拉全量)与
     /api/interview/evaluation/cycles/{id}/summary 聚合计算。
     返回:简历投递总数、按最终决定(decision)计数、按分配部门计数、已评价人数;
     看个人明细用 search_resumes / list_unassigned 下钻。
@@ -254,13 +254,13 @@ async def get_candidate_card(cycle_id: int, schedule_id: int, on_behalf_of: int)
     对应 GET /api/interview/evaluation/cycles/{id}/candidates/{scheduleId}/resume
     与 …/dimensions。服务账号直调会因场次绑定校验被拒(2005)——需传
     on_behalf_of(面试官 userId,经 X-On-Behalf-Of 代理身份,ADR-0006);
-    该机制依赖 SEC-01 后端谈判落地,在此之前本工具直调必然被拒。
+    该机制依赖后端实现,在此之前本工具直调必然被拒。
     """
     if on_behalf_of is None:
         # 服务账号直调必被场次绑定校验拒(2005);客户端把原因说在前面比后端报错可行动
         raise BackendError(
             "缺少面试官身份(on_behalf_of)。本工具需 X-On-Behalf-Of 代理身份,"
-            "SEC-01 后端谈判落地前仅 Copilot 场景可用"
+            "该代理身份尚未落地,当前仅 Copilot 场景可用"
         )
     client = await get_backend_client()
     headers = {"X-On-Behalf-Of": str(on_behalf_of)}

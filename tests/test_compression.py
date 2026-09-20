@@ -1,6 +1,6 @@
-"""M6 #114 会话压缩单测(#109 预定接缝:token 计数/摘要回写形状/触发阈值)。
+"""会话压缩单测:token 计数/摘要回写形状/触发阈值。
 
-策略(决策 #108,grill 定拍):感知查询意图的批量摘要(ContextAware +
+策略:感知查询意图的批量摘要(ContextAware +
 citations)+ tiktoken 强计数。外部行为契约:
 - count_tokens:中英文都计入,空序列为 0
 - safe_split:切点永不拆散 tool_call / tool 结果对;无法安全切 → None
