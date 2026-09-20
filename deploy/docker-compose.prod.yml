@@ -52,6 +52,12 @@ services:
     # 于是所有经 Backend 代理的 Agent 管理/知识库/评估接口全线不可达。
     # 网络由 Backend 栈创建,须先于本服务存在。
     networks:
+      # default 必须显式列出。给服务写了 networks 之后,compose 就不再把它接入
+      # 本栈的默认网络 —— agent 会解析不到同栈的 agent-pg,启动即 "failed to
+      # resolve host 'agent-pg'"(生产实测部署当场挂掉,且回滚用同一份 compose
+      # 所以一并失败)。两个都要:default 连 agent-pg,backend 供 Backend 按
+      # 服务名访问本服务。
+      - default
       - backend
     ports:
       - "127.0.0.1:8001:8001"       # 宿主 nginx 反代与本机排障用;容器间不经它
