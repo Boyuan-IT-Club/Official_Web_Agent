@@ -128,6 +128,25 @@ jobs:
     needs: build
     if: github.event_name == 'push'
     steps:
+      # 先同步 deploy/ 再重启:CD 原本只拉镜像、用服务器上既有的 compose 文件,
+      # 于是仓库里对 docker-compose.prod.yml / nginx 片段的改动**永远到不了生产**
+      # (代码走镜像能到,编排文件不能)。实测漏过 pgvector 镜像与接入 Backend
+      # 网络两处改动。scp 只覆盖同名文件、不删除,故服务器独有的 .env.prod 与
+      # logs/ 不受影响。
+      - name: Checkout (for deploy manifests)
+        uses: actions/checkout@v4
+
+      - name: Sync deploy manifests to Node A
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST_A }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          source: "deploy/*"
+          target: "${{ env.DEPLOY_DIR }}"
+          overwrite: true
+          strip_components: 0
+
       - name: Pull, restart and verify
         uses: appleboy/ssh-action@v1
         with:
@@ -142,6 +161,17 @@ jobs:
             # .env.prod 是服务器独有的密钥文件(不入库);缺了就中止,
             # 免得 compose 用空变量把容器起成不可用状态
             test -f .env.prod || { echo ".env.prod 不存在,先按 deploy/README.md 配置" >&2; exit 1; }
+
+            # compose 接入 Backend 栈的外部网络(BACKEND_NETWORK)。默认值
+            # official-network 与实际的 boyuan-official_official-network 不符,
+            # 不显式配就会在 up 时报 "network ... not found" —— 提前给可行动提示。
+            NET=$(grep -oP '(?<=^BACKEND_NETWORK=).*' .env.prod || echo official-network)
+            docker network inspect "$NET" >/dev/null 2>&1 || {
+              echo "外部网络 '$NET' 不存在。可用网络:" >&2
+              docker network ls --format '  {{.Name}}' >&2
+              echo "请在 .env.prod 设 BACKEND_NETWORK=<Backend 栈的网络名>" >&2
+              exit 1
+            }
 
             # --env-file 必带:compose 的 ${} 插值只默认读 .env,不读 .env.prod
             # (env_file: 只注入容器,不参与插值 —— 两套机制)
