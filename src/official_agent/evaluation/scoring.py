@@ -21,6 +21,11 @@ _PURE_DIGIT = re.compile(r"^[\d\s.,，。、\-—_*]+$")
 _PLACEHOLDER_PREFIX = ("请输入", "请填写", "请描述", "请介绍", "在此输入")
 # 主观题下的敷衍词(单独回答即绝对卡)
 _PLACEHOLDER_EXACT = frozenset({"无", "无。", "暂无", "没有", "同上", "略", ".", "。", "、"})
+# 「我没有这一项」的常见写法:在**可选栏**里与留空同义(获奖经历没奖、实习经历
+# 没实习)。不收「同上」「略」——那是把该写的事略掉,不是「没有」。
+_NONE_EQUIVALENT = frozenset(
+    {"无", "无。", "暂无", "暂无。", "没有", "没有。", "不涉及", "/", "-", "—"}
+)
 
 
 @dataclass(frozen=True)
@@ -49,11 +54,16 @@ def is_hard_zero_value(
 
     `required=False` 时,**留空不算绝对卡**:可选栏没填是正常的(没有获奖经历
     就空着),拿它判「敷衍」会把一份认真的简历整份判零 —— 实测过这个后果。
+    可选栏写「无」与留空是同一件事,同样豁免:表单上这两种表达同义,豁免只做
+    一半的话,诚实写「无」的人反而比留空的人整份判零(实测 title=获奖经历、
+    required=False 时 `"无"` 就是这个下场)。
     其余规则(抄 placeholder、纯数字、单字)照旧适用:可选栏若填了敷衍内容,
     一样该卡。
     """
     v = (value or "").strip()
     ph = (placeholder or "").strip()
+    if not required and (not v or v in _NONE_EQUIVALENT):
+        return False
     return bool(
         (not v and required)
         or (bool(v) and len(v) <= 1)

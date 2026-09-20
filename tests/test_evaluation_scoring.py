@@ -145,12 +145,24 @@ def test_optional_blank_is_not_hard_zero() -> None:
     assert is_hard_zero_value("") is True  # 缺省保守
 
 
+def test_optional_none_word_is_not_hard_zero() -> None:
+    """可选栏写「无」= 留空,同样豁免。
+
+    「没有获奖经历」在表单上有两种同义写法:空着,或者写「无」。豁免只做了
+    留空那一半时,诚实写「无」的候选人整份硬 0(attitude=bad_faith),
+    什么都不写的人反而照常进模型——同一件事两种判法。
+    """
+    for value in ("无", "无。", "暂无", "没有", "不涉及", "/", "-"):
+        assert is_hard_zero_value(value, title="获奖经历", required=False) is False
+    # 必填栏写「无」仍是敷衍:那一栏本来就该有内容
+    assert is_hard_zero_value("无", title="项目经验", required=True) is True
+
+
 def test_optional_blank_still_catches_filler() -> None:
-    """可选**不代表免检**:填了敷衍内容一样卡(不填和乱填是两回事)。"""
-    assert is_hard_zero_value("无", required=False) is True
-    assert is_hard_zero_value("暂无", required=False) is True
+    """可选**不代表免检**:填了敷衍内容一样卡(「没有这一项」和乱填是两回事)。"""
     assert is_hard_zero_value("a", required=False) is True
     assert is_hard_zero_value("111", required=False) is True
+    assert is_hard_zero_value("同上", required=False) is True
     assert is_hard_zero_value("请填写获奖经历", required=False) is True
 
 
@@ -159,6 +171,7 @@ def test_detect_hard_zero_ignores_optional_blanks() -> None:
     fields = [
         FieldText(field_key="profile", title="个人简介", value="我是张三,做过两个 Web 项目。"),
         FieldText(field_key="awards", title="获奖经历", value="", required=False),
+        FieldText(field_key="internship", title="实习经历", value="无", required=False),
     ]
     assert detect_hard_zero(fields) == {}
     # 必填栏空着仍要卡

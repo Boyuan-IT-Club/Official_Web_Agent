@@ -31,6 +31,7 @@ from official_agent.config import get_effective_settings
 from official_agent.evaluation.graph import _extract_json
 from official_agent.graphs.assistant import build_model
 from official_agent.prompt_loader import load_prompt
+from official_agent.security.injection_guard import wrap_data_zone
 
 PROMPT_FILE = "evaluation/tech_stack.md"
 TEMPERATURE = 0.2
@@ -133,6 +134,27 @@ def _normalize(text: str) -> str:
     return "".join((text or "").split()).casefold()
 
 
+def contains_term(term: str, text: str) -> bool:
+    """名词是否**作为一个独立名词**出现在文本里。
+
+    纯 ASCII 名词加词界:裸子串匹配会让简历里的 `JavaScript` 替编造的 `Java`
+    背书(同理 `MongoDB`→`Go`、`Spring`→`R`),面试官据此问出候选人根本没写过
+    的技术——而那正是这道闸门要拦的事。CJK 名词没有词界可言(「熔断降级」里
+    的「熔断」),维持子串匹配。
+
+    名词内部允许夹空白:同一名词的空格写法不稳定(「VS Code」/「VSCode」),
+    这与词界无关,不能一起收紧。词界只认拉丁字母与数字——CJK、标点、空白都
+    算边界,所以「熟悉C++」「Python、Java」这类紧挨着写法照常命中。
+    """
+    term_norm = _normalize(term)
+    if not term_norm or not text:
+        return False
+    if not term_norm.isascii():
+        return term_norm in _normalize(text)
+    body = r"\s*".join(re.escape(ch) for ch in term_norm)
+    return re.search(rf"(?<![A-Za-z0-9]){body}(?![A-Za-z0-9])", text.casefold()) is not None
+
+
 def _match_header(line: str, headers: Sequence[str]) -> str | None:
     """命中板块标题则返回标题后的同行正文(无则空串);未命中返回 None。
 
@@ -197,19 +219,17 @@ def verify_evidence(name: str, source_text: str) -> bool:
     这是仓深挖「evidence.path 必须在仓内」在无仓场景的等价物,也是唯一的
     真实性锚:编造的名词过不了这一关,面试官就不会问到候选人没写过的东西。
     """
-    normalized_name = _normalize(name)
-    return bool(normalized_name) and normalized_name in _normalize(source_text)
+    return contains_term(name, source_text)
 
 
 def locate_evidence(name: str, source_text: str) -> str:
     """在原文里定位该名词所在的**那一行**,作为出处句;找不到返回空串。
 
-    逐行归一后子串匹配:命中行原样返回,所以结果必然能在原文中原样找到。
+    逐行按闸门同一口径匹配:命中行原样返回,所以结果必然能在原文中原样找到。
     """
-    target = _normalize(name)
     for raw in source_text.splitlines():
         line = raw.strip()
-        if line and target in _normalize(line):
+        if line and contains_term(name, line):
             return line
     return ""
 
@@ -222,14 +242,13 @@ def resolve_quote(name: str, model_quote: str, source_text: str) -> str:
     出处句由原文纠正——这样既不会误杀真实名词,也不会让出处句与名词错配。
     """
     normalized_quote = _normalize(model_quote)
-    normalized_name = _normalize(name)
     if (
         normalized_quote
         and normalized_quote in _normalize(source_text)
-        and normalized_name in normalized_quote
+        and contains_term(name, model_quote)
     ):
         return model_quote
-    return locate_evidence(name, source_text) or normalized_name
+    return locate_evidence(name, source_text) or _normalize(name)
 
 
 def normalize_level(value: Any) -> ClaimedLevel:
@@ -271,13 +290,12 @@ def _clean_used_in(value: Any, source_text: str) -> tuple[str, ...]:
         value = [value]
     if not isinstance(value, (list, tuple)):
         return ()
-    normalized_source = _normalize(source_text)
     seen: set[str] = set()
     out: list[str] = []
     for item in value:
         project = str(item or "").strip()
         key = _normalize(project)
-        if not key or key in seen or key not in normalized_source:
+        if not key or key in seen or not contains_term(project, source_text):
             continue
         seen.add(key)
         out.append(project)
@@ -358,13 +376,17 @@ def _build_material(resume_text: str) -> str:
 
     技术栈栏单列一份是给模型的显式焦点——真实简历里技术栈栏常无分隔符连写
     (「PythonC语言C++Git」),单列能显著降低切分时的漏词。
+
+    简历原文是候选人可写的不可信输入,一律包数据区:不包的话简历里一句
+    「忽略以上要求」就以指令级身份落进 prompt(与评分轨、出题轨同一条红线)。
     """
     tech = locate_tech_section(resume_text)
-    return (
+    return wrap_data_zone(
+        "resume",
         "技术栈栏(自简历正文定位;未定位到则为空):\n"
         + (tech or "(未定位到)")
         + "\n\n简历正文:\n"
-        + resume_text
+        + resume_text,
     )
 
 

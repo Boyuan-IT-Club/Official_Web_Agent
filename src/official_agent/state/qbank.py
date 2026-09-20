@@ -3,13 +3,17 @@
 - interview_qbank:调查/兜底产出的题集(候选+周期+版本,JSONB 信封)
 - qbank_pick_log:面试官实际勾选(候选/场次/面试官/题)——反哺出题的证据,
   候选人永不可见
-- 表自举:DDL 进仓库,幂等;调用方管理事务
+- 表自举:DDL 进仓库,幂等;调用方管理事务。自举**只在进程启动跑一次**
+  (lifespan 或首次调用),不在数据路径上——DDL 即使 no-op 也持表锁
+  (实测 PG 17:CREATE INDEX IF NOT EXISTS 取 ShareLock,挡住所有并发写),
+  而 `_conn()` 非 autocommit,锁持到提交,等于把整张表串行化。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from typing import Any
 
 import psycopg
@@ -17,9 +21,30 @@ from psycopg.rows import dict_row
 
 from official_agent.config import get_settings
 
+_bootstrap_lock = threading.Lock()
+_bootstrapped = False
+
 
 def _conn() -> psycopg.Connection[dict[str, Any]]:
     return psycopg.connect(get_settings().postgres_url, row_factory=dict_row)
+
+
+def _ensure_bootstrapped() -> None:
+    global _bootstrapped
+    if _bootstrapped:
+        return
+    with _bootstrap_lock:
+        if _bootstrapped:
+            return
+        ensure_qbank_ready()
+
+
+def ensure_qbank_ready() -> None:
+    """启动自举:建题库两表(lifespan 调用)。"""
+    global _bootstrapped
+    with _conn() as conn:
+        ensure_qbank_tables(conn)
+    _bootstrapped = True
 
 
 def ensure_qbank_tables(conn: psycopg.Connection[dict[str, Any]]) -> None:
@@ -38,9 +63,8 @@ def ensure_qbank_tables(conn: psycopg.Connection[dict[str, Any]]) -> None:
         )
         """
     )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_qbank_resume ON interview_qbank (resume_id, cycle_id)"
-    )
+    # (resume_id, cycle_id) 是 UNIQUE(resume_id, cycle_id, qbank_version) 的严格前缀
+    conn.execute("DROP INDEX IF EXISTS idx_qbank_resume")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS qbank_pick_log (
@@ -76,11 +100,11 @@ def save_qbank(
             "envelope 非 evaluation_qbank/v2:"
             "本地开发库请清空 interview_qbank 旧结构数据后重跑"
         )
+    _ensure_bootstrapped()
     # MAX+1 并发窗口:撞唯一键重读重试(同 evaluation.save_scorecard 先例)
     for attempt in range(2):
         try:
             with _conn() as conn:
-                ensure_qbank_tables(conn)
                 row = conn.execute(
                     "SELECT COALESCE(MAX(qbank_version), 0) AS v "
                     "FROM interview_qbank WHERE resume_id = %s AND cycle_id = %s",
@@ -111,8 +135,8 @@ def save_qbank(
 
 def latest_qbank(resume_id: int, cycle_id: int) -> dict[str, Any] | None:
     """最新题集(含全部版本号元数据);无则 None。"""
+    _ensure_bootstrapped()
     with _conn() as conn:
-        ensure_qbank_tables(conn)
         row = conn.execute(
             "SELECT resume_id, cycle_id, qbank_version, source, envelope, "
             "prompt_version, created_at "
@@ -138,29 +162,58 @@ def record_pick(
 ) -> int:
     """记一道勾选题(question_ref 必须是 resolve_picks 解析出的权威
     条目,含 ref_id 与定位索引)。返回 pick id。"""
+    ids = record_picks(
+        resume_id=resume_id,
+        cycle_id=cycle_id,
+        interviewer_user_id=interviewer_user_id,
+        question_refs=[question_ref],
+        schedule_id=schedule_id,
+    )
+    return ids[0] if ids else 0
+
+
+def record_picks(
+    *,
+    resume_id: int,
+    cycle_id: int,
+    interviewer_user_id: int,
+    question_refs: list[dict[str, Any]],
+    schedule_id: int | None = None,
+) -> list[int]:
+    """整批勾选**单事务**写入,返回 pick id 列表(与入参同序)。
+
+    逐条自开事务时,第 N 条失败会把前 N-1 条留在库里,而接口只会返 500;
+    面试官重试即在 qbank_pick_log(无唯一约束)里留下重复勾选,反哺出题的
+    证据就被污染了。整批同生共死,重试才是干净的。
+    """
+    if not question_refs:
+        return []
+    _ensure_bootstrapped()
+    ids: list[int] = []
     with _conn() as conn:
-        ensure_qbank_tables(conn)
-        row = conn.execute(
-            """
-            INSERT INTO qbank_pick_log
-                (resume_id, cycle_id, schedule_id, interviewer_user_id, question_ref)
-            VALUES (%s, %s, %s, %s, %s) RETURNING id
-            """,
-            (
-                resume_id,
-                cycle_id,
-                schedule_id,
-                interviewer_user_id,
-                json.dumps(question_ref, ensure_ascii=False),
-            ),
-        ).fetchone()
-    return int(row["id"]) if row else 0
+        for question_ref in question_refs:
+            row = conn.execute(
+                """
+                INSERT INTO qbank_pick_log
+                    (resume_id, cycle_id, schedule_id, interviewer_user_id, question_ref)
+                VALUES (%s, %s, %s, %s, %s) RETURNING id
+                """,
+                (
+                    resume_id,
+                    cycle_id,
+                    schedule_id,
+                    interviewer_user_id,
+                    json.dumps(question_ref, ensure_ascii=False),
+                ),
+            ).fetchone()
+            ids.append(int(row["id"]) if row else 0)
+    return ids
 
 
 def list_picks(resume_id: int, cycle_id: int) -> list[dict[str, Any]]:
     """某候选的勾选记录(时间倒序)。"""
+    _ensure_bootstrapped()
     with _conn() as conn:
-        ensure_qbank_tables(conn)
         rows = conn.execute(
             "SELECT id, resume_id, cycle_id, schedule_id, interviewer_user_id, "
             "question_ref, picked_at "

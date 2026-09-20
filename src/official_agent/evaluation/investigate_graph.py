@@ -415,6 +415,10 @@ async def generate_node(state: InvestigationState) -> dict:
                         thin=thin,
                         no_repo=cv,
                         grade_band=band,
+                        # 探索段采到的截断标记必须跟到校验器:树被截断时白名单
+                        # 只是仓的一部分,不放宽的话大仓里第 601 个之后的**真实**
+                        # 路径会被判编造,两次重试全败、整条深挖线丢失。
+                        paths_truncated=bool(state.get("paths_truncated")),
                     )
                 else:
                     group = _guided_group(group_payload, dossier_text)
@@ -475,9 +479,19 @@ def _has_cjk(text: str) -> bool:
 
 
 def _validate_group_v2(
-    payload: dict[str, Any], dossier_text: str, paths: list[str], *, no_repo: bool = False
+    payload: dict[str, Any],
+    dossier_text: str,
+    paths: list[str],
+    *,
+    no_repo: bool = False,
+    paths_truncated: bool = False,
 ) -> None:
     """v2 后置校验:对抗前提黑名单/路径白名单/链源真实性。
+
+    路径白名单是 fail-closed 的:清单为空 ⇒ 这个仓里没有任何已知路径,
+    任何 evidence.path 都是臆造。只有「清单本身不完整」(paths_truncated:
+    GitHub 递归树被截断/超 600 条)才放宽——那时白名单不代表全集,
+    卡下去会把 full-app 仓的真实路径判成编造。
 
     局限(诚实边界):链源真实性只对拉丁词元可判定,纯中文 theme 跳过
     (由出题 prompt 铁律约束);dossier 文本为扫描全集。"""
@@ -492,9 +506,18 @@ def _validate_group_v2(
         if not p:
             return
         if no_repo:
-            # 简历路径没有仓:任何仓内路径都无从核实,必是模型臆造
+            # 没有可读的仓:任何仓内路径都无从核实,必是模型臆造
             raise ValueError(f"无仓路径不得带仓内 evidence.path({where}):{p!r}")
-        if paths_set and p not in paths_set:
+        if paths_truncated:
+            # 清单不全 ≠ 路径不存在:放宽,但留痕(静默放宽等于白名单形同虚设)
+            logging.getLogger(__name__).warning(
+                "guard_event guard_name=path_whitelist verdict=relaxed "
+                "reason=paths_truncated where=%s path=%r",
+                where,
+                p,
+            )
+            return
+        if p not in paths_set:
             raise ValueError(f"evidence.path 不在仓内({where}):{p!r}")
 
     paths_set = {x.strip() for x in paths if x and x.strip()}
@@ -538,6 +561,7 @@ def validate_qbank_v2_group(
     thin: bool = False,
     no_repo: bool = False,
     grade_band: GradeBand = DEFAULT_GRADE_BAND,
+    paths_truncated: bool = False,
 ) -> QuestionGroupV2:
     """题组 v2 全量校验(探针与 generate 共用;六探针的判定机器)。
 
@@ -546,11 +570,15 @@ def validate_qbank_v2_group(
     - 链层数按**出题深度档**定界(grade_band):标准档 3-5 层,大一档 1-2 层
       ——深度策略只在这一处判定,schema 只留形状上界;
     - 简历路径(no_repo)额外两条:
-      ① 题面引用的技术/项目名必须能在材料里找到(防编造)——链主题、入口题、
-         备选题都要查:没开链的技术题正是落在 reserves 上,只查链会漏掉那一半;
+      ① 链主题必须能在材料里找到(防编造技术/项目名);题面**正文**不按词元
+         核对——实测那样会把 5/5 真实简历拦死(写「卷积神经网络」问「CNN」、
+         写「Git」问「commit 粒度」都是正当表述),入口/备选的真实性由
+         evidence.path 白名单与抽取器的原文闸门承担;
       ② 链的每一层都要有三档参考答案(面试官不熟悉该技术,没有答案可依)。
     """
-    _validate_group_v2(group_payload, dossier_text, paths, no_repo=no_repo)
+    _validate_group_v2(
+        group_payload, dossier_text, paths, no_repo=no_repo, paths_truncated=paths_truncated
+    )
     group = QuestionGroupV2.model_validate(
         {k: group_payload[k] for k in ("entry", "chains", "reserves") if k in group_payload}
     )
@@ -562,7 +590,11 @@ def validate_qbank_v2_group(
         raise ValueError("题组缺入口题(入口必须 1 道)")
     if not group.entry.evidence.path and not group.entry.evidence.note:
         raise ValueError("题空路径须有 evidence.note")
-    if len(group.chains) < 2:
+    if not thin and len(group.chains) < 2:
+        # thin 档不要链:grilling.md 对材料贫乏的仓写的就是「只出入口题
+        # (+至多 1-2 备选),总数 ≤3」。链数下限与 ≤3 互斥——2 条链 ×3 层
+        # +入口已是 7 题,恒破上限,任何渲染后不足 400 字符的可读仓都会
+        # 两次重试全败、整条深挖线丢失。两者二选一,按 prompt 的写法放宽链数。
         raise ValueError(f"追问链不足:要求 2-{MAX_CHAINS},模型给 {len(group.chains)}")
     material = _normalize(dossier_text)
     for chain in group.chains:
@@ -585,13 +617,18 @@ def validate_qbank_v2_group(
 
 
 def _guided_group(group_payload: dict[str, Any], dossier_text: str) -> QuestionGroupV2:
-    """guided:入口引导题,链与备选留空;黑名单与「不带仓路径」仍适用。"""
+    """guided:入口引导题,链与备选留空;黑名单与「不带仓路径」仍适用。
+
+    guided 的前提就是**仓材料读不到**,所以这里与简历路径同档(no_repo):
+    此时任何仓内路径都没有材料可核对,必是臆造。原先传空清单走白名单,
+    而空清单会让白名单整条跳过 —— 禁令写着却不生效。
+    """
     guided_view = {
         "entry": group_payload.get("entry"),
         "chains": [],
         "reserves": group_payload.get("reserves", []),
     }
-    _validate_group_v2(guided_view, dossier_text, [])
+    _validate_group_v2(guided_view, dossier_text, [], no_repo=True)
     return QuestionGroupV2.model_validate(
         {
             "entry": group_payload.get("entry")

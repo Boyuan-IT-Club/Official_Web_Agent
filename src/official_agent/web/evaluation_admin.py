@@ -67,6 +67,9 @@ async def run_evaluation_jobs(
             list(body.items),  # TriggerItem 只含 resume_id
             trigger_user_id=int(identity.get("user_id") or 0),
         )
+    except evaluation.JobStoreError as exc:
+        # DB 侧建 job 失败是服务端故障,别混进下面的"调用方数据错位"
+        raise HTTPException(status_code=500, detail="提交初筛任务失败,请稍后重试") from exc
     except RuntimeError as exc:
         # 权威归属核对失败属调用方数据错位 → 400,不是服务端故障
         raise HTTPException(status_code=400, detail=f"简历归属核对失败:{exc}") from exc
@@ -80,13 +83,20 @@ async def list_evaluation_jobs(
     _: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
     cycle_id: int,
     status: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
 ) -> dict[str, Any]:
-    """job 执行面列表(0 分队列按 scorecard.hard_zero 过滤呈现)。"""
+    """job 执行面列表(0 分队列按 scorecard.hard_zero 过滤呈现)。
+
+    分页:超过一页的更早 job 靠 offset 回看,否则永远看不到。
+    """
     try:
-        jobs = await asyncio.to_thread(evaluation.list_jobs, cycle_id, status=status)
+        jobs = await asyncio.to_thread(
+            evaluation.list_jobs, cycle_id, status=status, limit=limit, offset=offset
+        )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail="查询 job 失败,请稍后重试") from exc
-    return {"items": jobs, "total": len(jobs)}
+    return {"items": jobs, "total": len(jobs), "limit": limit, "offset": offset}
 
 
 @router.post("/admin/evaluation/jobs/retry")
@@ -177,21 +187,20 @@ async def pick_questions(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail="查询题库失败,请稍后重试") from exc
-    picked = 0
+    # 整批单事务:逐条提交时中途失败会让前端重试把已落库的题重复写进
+    # pick log(该表无唯一约束),反哺出题的证据被污染
     try:
-        for q in resolved:
-            await asyncio.to_thread(
-                qbank_store.record_pick,
-                resume_id=body.resume_id,
-                cycle_id=body.cycle_id,
-                interviewer_user_id=int(identity.get("user_id") or 0),
-                question_ref=q,
-                schedule_id=body.schedule_id,
-            )
-            picked += 1
+        ids = await asyncio.to_thread(
+            qbank_store.record_picks,
+            resume_id=body.resume_id,
+            cycle_id=body.cycle_id,
+            interviewer_user_id=int(identity.get("user_id") or 0),
+            question_refs=resolved,
+            schedule_id=body.schedule_id,
+        )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail="记录勾选失败,请稍后重试") from exc
-    return {"picked": picked}
+    return {"picked": len(ids)}
 
 
 @router.get("/admin/evaluation/qbank/picks")
@@ -235,16 +244,31 @@ async def evaluation_queue(
     _: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
     cycle_id: int,
     queue: str = "all",
+    limit: int = 200,
+    offset: int = 0,
 ) -> dict[str, Any]:
-    """评审队列:queue=zero → 初筛不过(hard_zero)子队列;all → 全部评分卡。"""
+    """评审队列:queue=zero → 初筛不过(hard_zero)子队列;all → 全部评分卡。
+
+    每项带 decided_status/decided_version:复评会写一张新 draft 卡把
+    `status` 顶回 draft,这对字段保留了该简历历史上的人工决策,前端据此
+    区分"没看过"与"看过已采纳/已驳回"。
+    """
     if queue not in ("zero", "all"):
         raise HTTPException(status_code=400, detail="queue 只支持 zero/all")
 
     try:
-        items = await asyncio.to_thread(evaluation.list_review_queue, cycle_id, queue)
+        items = await asyncio.to_thread(
+            evaluation.list_review_queue, cycle_id, queue, limit=limit, offset=offset
+        )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail="查询队列失败,请稍后重试") from exc
-    return {"items": items, "total": len(items), "queue": queue}
+    return {
+        "items": items,
+        "total": len(items),
+        "queue": queue,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.get("/admin/evaluation/scorecard")

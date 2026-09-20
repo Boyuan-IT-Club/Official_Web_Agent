@@ -34,6 +34,24 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    # 与 ci.yml 同款真库:数据层集成测试没有 PG 就整档 skip,而 main 的门禁
+    # 在这条流水线上 —— 只给 PR 加库、不给 main 加,等于发布路径上反而没验。
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: official_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      POSTGRES_URL: postgresql://postgres:postgres@127.0.0.1:5432/official_agent
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5

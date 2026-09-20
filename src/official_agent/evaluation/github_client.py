@@ -36,22 +36,38 @@ def _truncate(text: str, *, max_chars: int = _MAX_TEXT_CHARS) -> tuple[str, bool
     )
 
 
+#: GitHub 登录名的合法形:字母数字起止,中间可带连字符,最长 39 字符。
+_LOGIN_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?")
+
+
+def _seg(value: str) -> str:
+    """URL 路径段转义。
+
+    owner/repo/sha 由正则或上游约束,username 由 normalize_github_login 收口——
+    但它们都源自候选人自填的档案,转义是这条链上最后一道确定性防线:路径段里
+    的 `/`、`..`、`?` 不该有机会改写请求打到的端点。
+    """
+    return quote(str(value or ""), safe="")
+
+
 def normalize_github_login(raw: str) -> str:
     """归一化 github 地址/登录名为登录名(对齐后端 GitHubAccountUtil 容忍度)。
 
     支持裸登录名 / https://github.com/x / github.com/x / git@github.com:x/y.git;
     统一小写(对齐后端 GitHubAccountUtil 规范形,owner==login 比较依赖此);
-    解析不出 → 空串(语义:无绑定)。"""
+    解析不出 → 空串(语义:无绑定)。
+
+    裸串按**登录名白名单**收口,不是「没有斜杠冒号空格就放行」:这个值由候选人
+    自填,终点是探索循环的 prompt 与 GitHub 的 URL 路径段,而一整句中文注入文本
+    天然无空格——黑名单式放行等于原样透传。"""
 
     raw = (raw or "").strip().lower()
     if not raw:
         return ""
-    match = re.search(r"github\.com[/:]([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)", raw)
+    match = re.search(rf"github\.com[/:]({_LOGIN_RE.pattern})", raw)
     if match:
         return match.group(1)
-    if "/" not in raw and ":" not in raw and " " not in raw:
-        return raw
-    return ""
+    return raw if _LOGIN_RE.fullmatch(raw) else ""
 
 
 class GitHubClient:
@@ -67,7 +83,7 @@ class GitHubClient:
 
     async def repo(self, owner: str, repo: str) -> dict:
         """仓库元数据:size/stars/language/default_branch/pushed_at。"""
-        data = await self._get_json(f"/repos/{owner}/{repo}")
+        data = await self._get_json(f"/repos/{_seg(owner)}/{_seg(repo)}")
         return data if isinstance(data, dict) else {}
 
     # ── 八工具面 ───────────────────────────────────────────────
@@ -108,7 +124,8 @@ class GitHubClient:
         视角;404/私有/网络错统一 GitHubUnavailable(降级语义)。"""
         params = {"ref": branch} if branch else None
         data = await self._get_json(
-            f"/repos/{owner}/{repo}/contents/{quote(path.lstrip('/'))}", params=params
+            f"/repos/{_seg(owner)}/{_seg(repo)}/contents/{quote(path.lstrip('/'))}",
+            params=params,
         )
         if isinstance(data, list):
             children = [str(item.get("path", "")) for item in data[:100] if isinstance(item, dict)]
@@ -153,7 +170,7 @@ class GitHubClient:
         type=owner 只看名下仓(fork 的 parent 不混入;绑定账号下的其他
         仓不看,但 fork 仓本身仍是候选本人的深挖对象)。"""
         data = await self._get_json(
-            f"/users/{username}/repos",
+            f"/users/{_seg(username)}/repos",
             params={"type": "owner", "sort": "updated", "per_page": per_page},
         )
         return [self._repo_row(item) for item in data if isinstance(item, dict)]
@@ -192,7 +209,7 @@ class GitHubClient:
         params: dict = {"per_page": per_page}
         if author:
             params["author"] = author
-        data = await self._get_json(f"/repos/{owner}/{repo}/commits", params=params)
+        data = await self._get_json(f"/repos/{_seg(owner)}/{_seg(repo)}/commits", params=params)
         return [
             {
                 "sha": str(item.get("sha", "")),
@@ -217,7 +234,7 @@ class GitHubClient:
 
         per-file ≤8K,总预算 24K(=3×单文件上限,保证单文件截断后仍能
         展开);总预算按「装得下才装」贪心,破限文件只计数,结尾汇总留痕。"""
-        data = await self._get_json(f"/repos/{owner}/{repo}/commits/{sha}")
+        data = await self._get_json(f"/repos/{_seg(owner)}/{_seg(repo)}/commits/{_seg(sha)}")
         if not isinstance(data, dict):
             raise GitHubUnavailable("commit 响应结构异常")
         files: list[dict] = []
@@ -300,7 +317,7 @@ class GitHubClient:
 
     async def readme(self, owner: str, repo: str) -> str:
         """README 原文(raw);没有 README → 空串(值得度扣分项,不报错)。"""
-        url = f"{self._base}/repos/{owner}/{repo}/readme"
+        url = f"{self._base}/repos/{_seg(owner)}/{_seg(repo)}/readme"
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.get(
                 url,
@@ -314,7 +331,9 @@ class GitHubClient:
 
     async def commits(self, owner: str, repo: str, *, per_page: int = 30) -> list[dict]:
         """最近提交(message/date);空仓返回 []。"""
-        data = await self._get_json(f"/repos/{owner}/{repo}/commits", params={"per_page": per_page})
+        data = await self._get_json(
+            f"/repos/{_seg(owner)}/{_seg(repo)}/commits", params={"per_page": per_page}
+        )
         return [
             {
                 "message": item.get("commit", {}).get("message", ""),
@@ -336,7 +355,8 @@ class GitHubClient:
             meta = await self.repo(owner, repo)
             branch = meta.get("default_branch") or "main"
         data = await self._get_json(
-            f"/repos/{owner}/{repo}/git/trees/{branch}", params={"recursive": "1"}
+            f"/repos/{_seg(owner)}/{_seg(repo)}/git/trees/{quote(branch, safe='/')}",
+            params={"recursive": "1"},
         )
         if not isinstance(data, dict):
             return [], False

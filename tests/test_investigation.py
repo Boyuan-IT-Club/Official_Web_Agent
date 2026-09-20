@@ -644,7 +644,12 @@ def test_reserve_path_whitelist_enforced() -> None:
 
 @pytest.mark.asyncio
 async def test_thin_dossier_over_limit_rejected(monkeypatch) -> None:
-    """敷衍 dossier(体量 <400 字符)题量 >3 → 拒绝重试。"""
+    """敷衍 dossier(体量 <400 字符)题量 >3 → 拒绝重试。
+
+    钉的是 ≤3 这条上限本身。thin 的合法解是「入口 +(至多 1-2 备选)」,
+    由 test_thin_allows_entry_only_group 钉住 —— 两条一起看才是完整语义:
+    只有这一条时,thin 压根无解也照样绿。
+    """
     payload = json.loads(_v2_payload())  # 缺省组 8 题 > 3
     _install_fake_gh_and_model(
         monkeypatch, json.dumps(payload, ensure_ascii=False), explore_chars=50
@@ -1372,3 +1377,104 @@ def test_cv_prompt_scopes_evidence_to_entry_and_reserves() -> None:
     text = load_prompt(ig.CV_PROMPT_FILE)
     assert "evidence` 只属于 entry 与 reserves" in text
     assert "链层没有这个字段" in text
+
+
+# ── 路径白名单:fail-closed 与截断放宽 ──────────────────
+
+
+def test_path_whitelist_is_fail_closed_on_empty_list() -> None:
+    """路径清单为空 = 这个仓里没有任何已知路径 → 任何 evidence.path 都是臆造。
+
+    旧写法是 `if paths_set and …`:清单一空,整条白名单静默跳过,禁令写着
+    却不生效(guided 组与没调过 list_files 的深挖组都走这条路)。
+    """
+    payload = json.loads(_v2_payload())
+    with pytest.raises(ValueError, match="不在仓内"):
+        ig._validate_group_v2(payload, "README.md src/app.py tests/test_app.py", [])
+
+
+def test_paths_truncated_relaxes_whitelist_with_trace(caplog) -> None:
+    """树被截断时放宽,但留痕。
+
+    文件数超 600 或 GitHub 递归树被截断的仓,白名单只是仓的一部分——不放宽
+    的话模型引用第 601 个之后的**真实**路径会被判编造,两次重试全败,整条
+    深挖线丢失(client 的 tree_paths 早就把这个前提写进了 docstring)。
+    """
+    payload = json.loads(_v2_payload())
+    with caplog.at_level("WARNING"):
+        ig._validate_group_v2(
+            payload,
+            "README.md src/app.py tests/test_app.py",
+            ["README.md"],
+            paths_truncated=True,
+        )
+    assert "path_whitelist" in caplog.text and "paths_truncated" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_truncated_tree_keeps_deep_dive_alive(monkeypatch) -> None:
+    """大仓:截断标记要从探索段一路跟到校验器,否则整条深挖线丢失。
+
+    文件数 >600 时白名单只是仓的一部分,模型引用的真实路径多半不在其中;
+    标记采了却不传(旧写法)= 判编造 → 两次重试全败 → 这个仓一道题都没有。
+    """
+    from official_agent.evaluation.dossier import Dossier
+
+    def _fake_run_explore(project_text, **kw):
+        async def _impl():
+            d = Dossier(attribution=kw.get("attribution", ""))
+            d.add("C1_背景与动机", "# Demo\n" + "x" * 2000)
+            d.add("C3_架构与数据流", "README.md src/app.py tests/test_app.py")
+            d.paths = ["README.md"]  # 树被截断:白名单只剩第一页
+            d.paths_truncated = True
+            d.turns_used = 2
+            return d
+
+        return _impl()
+
+    monkeypatch.setattr(ig, "run_explore", _fake_run_explore)
+    _install_fake_gh_and_model(monkeypatch, _v2_payload())
+    monkeypatch.setattr(ig, "run_explore", _fake_run_explore)  # 替身不被覆盖
+
+    qs = await ig.run_investigation("我做了 https://github.com/me/demo 报名页重构")
+    assert qs["group"]["entry"]["evidence"]["path"] == "src/app.py"  # 清单外仍收下
+
+
+def test_guided_group_rejects_repo_path() -> None:
+    """guided 的前提就是仓材料读不到 → 任何仓内路径必是臆造。"""
+    payload = json.loads(_v2_payload())
+    with pytest.raises(ValueError, match="不得带仓内"):
+        ig._guided_group(payload, "探索段未取得材料,降级通用引导题")
+
+
+# ── thin 档要有合法解 ──────────────────────────────────
+
+
+def test_thin_allows_entry_only_group() -> None:
+    """thin 档:入口题 +（至多 1-2 备选)是 grilling.md 给的写法,必须可行。
+
+    链数下限 2 与「总数 ≤3」互斥(2 链 ×3 层 + 入口 = 7),两者同时生效时
+    thin 无合法解:任何渲染后不足 400 字符的可读仓,出题必然两次重试全败。
+    """
+    payload = json.loads(
+        _v2_payload(
+            chains=[],
+            reserves=[_reserve_q("C6_难点与调试", "src/app.py", "最难的 bug 怎么排查的?")],
+        )
+    )
+    group = ig.validate_qbank_v2_group(
+        payload,
+        "README.md src/app.py tests/test_app.py",
+        paths=["src/app.py"],
+        thin=True,
+    )
+    assert group.total_questions == 2  # 入口 + 1 备选
+
+
+def test_non_thin_still_requires_two_chains() -> None:
+    """材料充足时链数下限照旧 —— 放宽只针对 thin 档。"""
+    payload = json.loads(_v2_payload(chains=[]))
+    with pytest.raises(ValueError, match="追问链不足"):
+        ig.validate_qbank_v2_group(
+            payload, "README.md src/app.py tests/test_app.py", paths=["src/app.py", "README.md"]
+        )

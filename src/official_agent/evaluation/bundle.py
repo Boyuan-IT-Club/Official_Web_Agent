@@ -6,6 +6,7 @@ qbank 信封(groups 分线,source 汇总)。题数硬校验纪律与仓线深挖
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from langchain_core.messages import HumanMessage
@@ -25,8 +26,14 @@ from official_agent.evaluation.investigate import extract_repos
 from official_agent.evaluation.schema import QuestionSet
 from official_agent.graphs.assistant import build_model
 from official_agent.prompt_loader import load_prompt, load_prompt_meta
+from official_agent.security.injection_guard import wrap_data_zone
 
 PROMPT_FILE = "evaluation/b4.md"
+
+#: 仓线上限:一个仓一条完整探索子图(80 轮 / 300s 墙钟),而仓号来自候选人
+#: 自填的项目栏——不封顶就等于把成本开关交给候选人(贴 50 个链接即 50 次探索)。
+#: 取 5 与同文件既有风格一致(奖项 [:3]、技术名词 MAX_ITEMS=6)。
+MAX_REPO_LINES = 5
 
 
 def _prompt_version() -> str:
@@ -65,14 +72,21 @@ def _group_kind(envelope: dict[str, Any]) -> str:
     return "cv_dive" if envelope.get("mode") == "cv_dive" else "repo"
 
 
-async def _b4_questions(payload_hint: str, *, count_min: int, count_max: int) -> list[dict]:
-    """共用的提示词 JSON 出题(错因追问/技能题组)。"""
+async def _b4_questions(
+    payload_hint: str, *, count_min: int, count_max: int, source: str = "candidate-material"
+) -> list[dict]:
+    """共用的提示词 JSON 出题(错因追问/技能题组)。
+
+    材料来自候选人(简历字段/评测记录),是不可信输入,一律包数据区——裸拼
+    会让简历里一句「忽略以上要求」以指令级身份落进 prompt(与出题轨、评分轨
+    同一条红线)。
+    """
     settings = get_effective_settings()
     model = build_model(settings, temperature=0.2)
     prompt_text = (
         load_prompt(PROMPT_FILE)
         + "\n\n---\n\n材料:\n"
-        + payload_hint
+        + wrap_data_zone(source, payload_hint)
         + f"\n\n出 {count_min}-{count_max} 道题。"
         + "\n只输出符合 schema 的 JSON 对象,不要任何其他文字或代码围栏。"
     )
@@ -124,6 +138,15 @@ async def run_bundle(
     # 只出一条简历线(把其中第一个钉给它:子图发现读不到,自然回退到简历深挖)。
     # 无仓/有项目文本但无仓 URL → 仍跑一次,让子图内部按简历内容路由。
     repo_candidates = extract_repos(project_text)
+    if len(repo_candidates) > MAX_REPO_LINES:
+        logging.getLogger(__name__).warning(
+            "bundle_repo_cap resume_id=%s total=%d kept=%d dropped=%r",
+            resume_id,
+            len(repo_candidates),
+            MAX_REPO_LINES,
+            [f"{o}/{n}" for o, n in repo_candidates[MAX_REPO_LINES:]][:5],
+        )
+        repo_candidates = repo_candidates[:MAX_REPO_LINES]
     lines: list[tuple[str, str] | None]
     if repo_candidates:
         probe = GitHubClient(token=github_token)
@@ -197,7 +220,10 @@ async def run_bundle(
                     for task, name in items
                 )
                 ag_questions = await _b4_questions(
-                    f"评测失败清单(任务/test):\n{material}", count_min=2, count_max=3
+                    f"评测失败清单(任务/test):\n{material}",
+                    count_min=2,
+                    count_max=3,
+                    source="autograding-failures",
                 )
                 groups.append(
                     {

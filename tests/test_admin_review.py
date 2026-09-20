@@ -98,8 +98,10 @@ def test_queue_zero_filter_queries_hard_zero(
     monkeypatch.setattr(ea.evaluation, "_conn", lambda: _Conn())
     resp = client.get("/api/agent/admin/evaluation/queue?cycle_id=2026&queue=zero", headers=_AUTH)
     assert resp.status_code == 200
-    assert seen["params"] == (2026, 2026)  # 外层 cycle + 子查询 user_id 归属
+    # 内层 cycle + user_id 归属 + 历史决策标记,三处都按周期限定;末尾是分页
+    assert seen["params"] == (2026, 2026, 2026, 200, 0)
     assert "hard_zero = TRUE" in seen["sql"]
+    assert "LIMIT %s OFFSET %s" in seen["sql"]
     assert resp.json()["items"][0]["hard_zero"] is True
     assert resp.json()["queue"] == "zero"
 

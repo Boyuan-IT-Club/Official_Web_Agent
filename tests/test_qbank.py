@@ -139,11 +139,12 @@ def test_pick_records_with_interviewer_identity(
     _install_resolve(monkeypatch, ["interview:evaluate"])
     captured: dict = {}
 
-    def _fake_pick(**kw):
+    def _fake_picks(**kw):
         captured.update(kw)
-        return 1
+        return [1]
 
-    monkeypatch.setattr(ea.qbank_store, "record_pick", _fake_pick)
+    # 路由必须走整批单事务的 record_picks,而不是逐条 record_pick
+    monkeypatch.setattr(ea.qbank_store, "record_picks", _fake_picks)
     # 落库前必须经服务端权威解析;这里钉"解析结果才是落库内容"
     authoritative = {
         "group_index": 0,
@@ -173,7 +174,37 @@ def test_pick_records_with_interviewer_identity(
     assert resp.json() == {"picked": 1}
     assert captured["interviewer_user_id"] == 5  # 勾选人=当前面试官
     assert captured["schedule_id"] == 77  # 场次进 pick log
-    assert captured["question_ref"] is authoritative  # 落库=权威引用,非客户端原文
+    assert captured["question_refs"] == [authoritative]  # 落库=权威引用,非客户端原文
+
+
+def test_pick_writes_whole_batch_in_one_call(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """多题勾选只调一次落库入口——逐条落库时部分失败会留下半截 pick log。"""
+    from official_agent.web import evaluation_admin as ea
+
+    _install_resolve(monkeypatch, ["interview:evaluate"])
+    calls: list = []
+    resolved = [{"ref_id": "a"}, {"ref_id": "b"}, {"ref_id": "c"}]
+    monkeypatch.setattr(ea.qbank_store, "resolve_picks", lambda r, c, qs: resolved)
+    monkeypatch.setattr(
+        ea.qbank_store,
+        "record_picks",
+        lambda **kw: (calls.append(kw), [1, 2, 3])[1],
+    )
+    resp = client.post(
+        "/api/agent/admin/evaluation/qbank/pick",
+        headers=_AUTH,
+        json={
+            "resume_id": 9,
+            "cycle_id": 2026,
+            "questions": [{"question": q["ref_id"]} for q in resolved],
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.json() == {"picked": 3}
+    assert len(calls) == 1, "整批一次落库,不逐条开事务"
+    assert calls[0]["question_refs"] == resolved
 
 
 # ── v2 信封门禁 + pickable 扁平视图 ──

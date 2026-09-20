@@ -43,6 +43,15 @@ def web_no_real_pg(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "official_agent.state.evaluation.ensure_evaluation_job_ready", lambda: None
     )
+    monkeypatch.setattr(
+        "official_agent.state.evaluation.ensure_evaluation_scorecard_ready", lambda: None
+    )
+    monkeypatch.setattr("official_agent.state.qbank.ensure_qbank_ready", lambda: None)
+    # 自举已改成「每进程一次」的惰性标志。上面几个 ready 被替成 no-op 后
+    # 标志不会置位,数据路径首次调用仍会自己去连真 PG——这里直接置位。
+    monkeypatch.setattr("official_agent.state.evaluation._scorecard_bootstrapped", True)
+    monkeypatch.setattr("official_agent.state.evaluation._job_bootstrapped", True)
+    monkeypatch.setattr("official_agent.state.qbank._bootstrapped", True)
     # 挂起载荷 TTL 清理后台任务(每 6h)首轮即打真 PG
     monkeypatch.setattr("official_agent.state.pg.purge_expired_interrupts", lambda **_k: 0)
 

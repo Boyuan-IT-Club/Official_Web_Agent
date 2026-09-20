@@ -139,8 +139,8 @@ def test_evaluation_jobs_list_passes_filters(
     _install_resolve(monkeypatch, _identity(["resume:audit"]))
     seen: dict = {}
 
-    def _fake_list(cycle_id, *, status=None):
-        seen.update(cycle_id=cycle_id, status=status)
+    def _fake_list(cycle_id, *, status=None, limit=200, offset=0):
+        seen.update(cycle_id=cycle_id, status=status, limit=limit, offset=offset)
         return [{"job_id": 1, "status": "succeeded"}]
 
     monkeypatch.setattr(ea.evaluation, "list_jobs", _fake_list)
@@ -150,9 +150,55 @@ def test_evaluation_jobs_list_passes_filters(
 
     monkeypatch.setattr(asyncio, "to_thread", _fake_to_thread)
     resp = client.get(
-        "/api/agent/admin/evaluation/jobs?cycle_id=2026&status=failed",
+        "/api/agent/admin/evaluation/jobs?cycle_id=2026&status=failed&limit=50&offset=100",
         headers=_AUTH,
     )
     assert resp.status_code == 200
-    assert seen == {"cycle_id": 2026, "status": "failed"}
+    assert seen == {"cycle_id": 2026, "status": "failed", "limit": 50, "offset": 100}
     assert resp.json()["items"][0]["job_id"] == 1
+    # 翻页游标回显:前端要靠它知道自己在第几页
+    assert resp.json()["offset"] == 100
+
+
+def test_evaluation_run_db_failure_is_500_not_400(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """建 job 的库故障是服务端故障,不能报成"简历归属核对失败"(400)。"""
+    from official_agent.web import evaluation_admin as ea
+
+    _install_resolve(monkeypatch, _identity(["evaluation:run"]))
+
+    class _FakeRunner:
+        async def submit(self, *_a: object, **_k: object) -> list[int]:
+            raise ea.evaluation.JobStoreError("创建 job 失败且无活跃 job 可复用")
+
+    monkeypatch.setattr(ea.eval_runner, "get_runner", lambda: _FakeRunner())
+    resp = client.post(
+        "/api/agent/admin/evaluation/run",
+        headers=_AUTH,
+        json={"cycle_id": 2026, "items": [{"resume_id": 11}]},
+    )
+    assert resp.status_code == 500
+    assert "归属核对" not in resp.json()["detail"]
+
+
+def test_evaluation_run_authority_mismatch_is_still_400(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """调用方数据错位仍是 400——两类 RuntimeError 必须分得开。"""
+    from official_agent.web import evaluation_admin as ea
+
+    _install_resolve(monkeypatch, _identity(["evaluation:run"]))
+
+    class _FakeRunner:
+        async def submit(self, *_a: object, **_k: object) -> list[int]:
+            raise RuntimeError("简历权威归属不一致")
+
+    monkeypatch.setattr(ea.eval_runner, "get_runner", lambda: _FakeRunner())
+    resp = client.post(
+        "/api/agent/admin/evaluation/run",
+        headers=_AUTH,
+        json={"cycle_id": 2026, "items": [{"resume_id": 11}]},
+    )
+    assert resp.status_code == 400
+    assert "归属核对" in resp.json()["detail"]

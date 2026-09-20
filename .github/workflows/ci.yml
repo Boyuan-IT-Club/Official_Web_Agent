@@ -8,6 +8,25 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      # 数据层集成测试(tests/test_*_state_pg.py)要真库,否则整档 skip、
+      # 新数据层语义(DDL 幂等、部分唯一索引去重、create_jobs 幂等、
+      # requeue 双守卫、pick log 单事务)零验证。镜像与生产一致。
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: official_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      POSTGRES_URL: postgresql://postgres:postgres@127.0.0.1:5432/official_agent
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5

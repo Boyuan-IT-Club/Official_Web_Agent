@@ -47,9 +47,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             from official_agent.state.audit import ensure_audit_table
 
             ensure_audit_table()
-            # 去重 legacy 重复活跃 job + 建部分唯一索引,必须先于恢复
-            from official_agent.state.evaluation import ensure_evaluation_job_ready
+            # 评测三表(scorecard / qbank / job)的自举全在这里:建表 DDL
+            # 即使 no-op 也持表锁,留在数据路径上会把读写串行化
+            # (见 state/evaluation.py 顶部的自举注释)。job 表还要去重
+            # legacy 重复活跃行 + 建部分唯一索引,必须先于下面的启动恢复。
+            from official_agent.state.evaluation import (
+                ensure_evaluation_job_ready,
+                ensure_evaluation_scorecard_ready,
+            )
+            from official_agent.state.qbank import ensure_qbank_ready
 
+            ensure_evaluation_scorecard_ready()
+            ensure_qbank_ready()
             ensure_evaluation_job_ready()
         except Exception:  # noqa: BLE001 — PG 未起/配置错 → 降级(fail-open,ADR-0005)
             app.state.checkpointer = None

@@ -21,7 +21,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from official_agent.evaluation.dossier import SLOT_NAMES, Dossier
 from official_agent.evaluation.github_client import GitHubClient, GitHubUnavailable
-from official_agent.security.injection_guard import guard_tool_result
+from official_agent.security.injection_guard import guard_tool_result, wrap_data_zone
 from official_agent.state.conversation import extract_usage
 
 #: 预算闸
@@ -151,13 +151,20 @@ async def explore_repo(
         return dossier
 
     system = SystemMessage(content=_explore_system_text())
+    # 自述与登录名都由候选人自填,和工具返回同样不可信——触发消息若裸拼,
+    # 一句「忽略以上要求」就以指令级身份进了循环首轮(工具返回那条通道早已
+    # 由 guard_tool_result 封住,这条是同型漏口)。
     messages: list = [
         system,
         HumanMessage(
             "候选人项目自述:\n"
-            f"{project_text}\n\n"
-            f"锁定仓库:{owner}/{name}(归属: {attribution or '未标注'})"
-            + (f",候选人 GitHub 登录名: {login}" if login else "")
+            + wrap_data_zone("candidate-statement", project_text)
+            + f"\n\n锁定仓库:{owner}/{name}(归属: {attribution or '未标注'})"
+            + (
+                "\n候选人 GitHub 登录名:\n" + wrap_data_zone("candidate-github-login", login)
+                if login
+                else ""
+            )
             + "\n请开始探索:调工具收集十类取材材料,材料自认充分即停止调工具并简短总结。"
         ),
     ]
