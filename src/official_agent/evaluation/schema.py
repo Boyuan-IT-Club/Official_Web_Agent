@@ -83,7 +83,7 @@ class ScorecardOutput(BaseModel):
 class QuestionEvidence(BaseModel):
     """证据锚:仓内可点路径(deep_dive 必填);无仓引导题留空+note 说明。"""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     path: str = ""
     note: str = ""
@@ -92,7 +92,7 @@ class QuestionEvidence(BaseModel):
 class AnswerReference(BaseModel):
     """参考答案三锚:面试官据此判断答得算好/达标/弱。"""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     strong: str = Field(min_length=1)
     acceptable: str = Field(min_length=1)
@@ -144,16 +144,15 @@ CATEGORY = Literal[
 
 ATTRIBUTION_LEVEL = Literal["trusted-own", "trusted-contribution", "claimed", "unverified", "none"]
 
-#: 题组容量上限。链数取**可达上界**(按标准档每链至少 3 层):总量硬顶 15 题、
-#: 入口占 1,故 4×3+1=13 可达、5×3+1=16 已超顶——放到 6 只会让模型照做出题
-#: 再稳定撞硬顶。备选按技术栈广度题的容器取 6。放宽容量不等于鼓励堆题。
-#: 注:短链档(每链层数更少)会让同链数下的题量更小,上界推导不受影响。
+#: 题组容量的**指导值**(prompt 侧写给模型的配额;2026-09 起不再是拒绝
+#: 条件——生产实测模型偶发超限一两条,硬拦等于整组归零,超出照存)。
+#: MAX_CHAINS 同时还是链数下界(≥2)的校验文案参照。改值只影响 prompt
+#: 与文案,不会改变保存行为。
 MAX_CHAINS = 4
 MAX_RESERVES = 6
 
-#: 链层数的**形状**上界。下界放到 1 而不是 3:层数下界是**出题深度策略**
-#: (随年级分档,大一短链),策略判定在语义校验里做——schema 只管形状。
-#: 放在这里写死等于把策略钉进模型层,分档就绕不过去。
+#: 每链层数的指导值。层数的**深度策略**(标准档 3-5、大一档 1-2)由语义
+#: 校验按档位把关(LAYER_BOUNDS),schema 不再设形状上界。
 MAX_CHAIN_LAYERS = 5
 
 
@@ -165,7 +164,7 @@ class ChainLayer(BaseModel):
     既有形状(只有 expected_signal),故为可选而非必填。
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     question: str = Field(min_length=1)
     expected_signal: str = Field(min_length=1)
@@ -181,17 +180,17 @@ class QuestionChain(BaseModel):
       这样防编造校验(链源须出现在材料里)天然生效——编造的技术名过不了。
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     category: CATEGORY
     theme: str = Field(min_length=1, description="链主题(仓路径:证据出处;简历路径:技术名词)")
-    layers: list[ChainLayer] = Field(min_length=1, max_length=MAX_CHAIN_LAYERS)
+    layers: list[ChainLayer] = Field(min_length=1)
 
 
 class EntryQuestion(BaseModel):
     """入口题:题组 opener(通常 C1/C3,热身+定基调)。"""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     category: CATEGORY
     question: str = Field(min_length=1)
@@ -207,7 +206,7 @@ class ReserveQuestion(BaseModel):
     现场挑着问。
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     category: CATEGORY
     question: str = Field(min_length=1)
@@ -219,17 +218,20 @@ class ReserveQuestion(BaseModel):
 class QuestionGroupV2(BaseModel):
     """一个题组:入口 1 + 追问链 + 备选;guided 模式 chains/reserves 可空。
 
-    容量按两条路径的上界取:仓深挖是「一个仓一组」(链 2-4、备选 2-3);
-    简历深挖要覆盖 5-6 个技术名词,每个名词一条技术链(含该名词的项目追问),
-    故 chains 放到 6。reserves 放到 6 供技术栈的独立广度题使用。
-    硬顶仍是 15 题(见校验机器),容量放宽不等于鼓励堆题。
+    数量上限(chains/layers/reserves 的 max)已从 schema **撤下**:生产
+    实测模型偶发超限一两条(5 链/备选混入链层字段),硬拦等于整组归零,
+    代价与收益完全不成比例——超出照存,题多面试官自己挑。MAX_* 常量
+    降级为 prompt 指导值与语义校验的下界参照,不再是拒绝条件。
+    extra 同理放宽为 ignore:形状小 slip(备选混进 expected_signal)剥掉
+    多余字段即可,题目本身无辜。内容质量(防编造/对抗前提/三档答案)
+    仍由校验机器全量把关,与此无关。
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     entry: EntryQuestion | None = None
-    chains: list[QuestionChain] = Field(default_factory=list, max_length=MAX_CHAINS)
-    reserves: list[ReserveQuestion] = Field(default_factory=list, max_length=MAX_RESERVES)
+    chains: list[QuestionChain] = Field(default_factory=list)
+    reserves: list[ReserveQuestion] = Field(default_factory=list)
 
     @property
     def total_questions(self) -> int:

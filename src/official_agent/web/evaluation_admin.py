@@ -140,15 +140,14 @@ class PickBody(BaseModel):
 
 
 def _qbank_missing_detail(job: dict[str, Any] | None) -> str:
-    """题库行缺席时按最新 job 给出真实原因(404 detail)。
+    """题库行缺席且**不在生成中**时的 404 detail。
 
-    先看 job 执行态再看 qbank 态:复跑中的 job 会残留上一轮的
-    qbank_status=failed(mark_job 只更新显式传入的列),不能拿它说事。"""
+    生成中不走这里:get_qbank 对 pending/running 返回 200 + generating
+    标记,让前端渲染"出题中"状态而不是报错。其余场合区分"从未跑过"
+    与"跑了但题库线失败"——生产曾把权限 403 展示成"暂无题库",
+    看似没数据、实则生成失败,文案必须给出真实原因与出路。"""
     if job is None:
         return "该候选暂无预置题库:尚未跑过 AI 初筛,请在简历审核触发"
-    job_status = str(job.get("status") or "")
-    if job_status in ("pending", "running"):
-        return "该候选的 AI 初筛进行中,预置题库将在完成后出现,请稍后刷新"
     if str(job.get("qbank_status") or "") == "failed":
         reason = str(job.get("qbank_error") or "").strip()
         if reason:
@@ -179,6 +178,10 @@ async def get_qbank(
         raise HTTPException(status_code=500, detail="查询题库失败,请稍后重试") from exc
     if row is None:
         job = await asyncio.to_thread(evaluation.latest_job, resume_id, cycle_id)
+        if job and str(job.get("status") or "") in ("pending", "running"):
+            # 生成中不是错:200 + generating 标记,前端渲染"出题中"状态。
+            # 404 会触发前端报错路径——用户在出题窗口内打开抽屉是常态。
+            return {"resume_id": resume_id, "cycle_id": cycle_id, "generating": True}
         raise HTTPException(status_code=404, detail=_qbank_missing_detail(job))
     envelope = row.get("envelope") or {}
     row = dict(row)
