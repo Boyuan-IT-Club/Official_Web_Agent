@@ -115,14 +115,13 @@ def _render_tech(state: InvestigationState) -> str:
     lines = []
     for it in items:
         used = "、".join(it.get("used_in") or []) or "简历未指明项目"
-        lines.append(
-            f"- {it.get('name')}(系统判定程度:{it.get('claimed_level')};出现在:{used})"
-        )
+        lines.append(f"- {it.get('name')}(系统判定程度:{it.get('claimed_level')};出现在:{used})")
     lines.append(
         "注:程度是系统从简历措辞推断的,不是候选人的原话——题面不要把它当引语,"
         "也不要写「你写了/你自述了『掌握 X』」这类话。"
     )
     return "\n".join(lines)
+
 
 async def _norepo_route(state: InvestigationState) -> dict:
     """无仓位置时的路由:抽技术栈,连同项目栏内容一起定路径。
@@ -254,7 +253,6 @@ def route_after_route(state: InvestigationState) -> str:
     return state["route"]  # deep_dive | cv_dive | guided | skip
 
 
-
 def _resume_dossier(state: InvestigationState) -> dict:
     """无仓路径的取材:简历文本 → 档案。
 
@@ -273,6 +271,7 @@ def _resume_dossier(state: InvestigationState) -> dict:
         "explore_usage": {},
         "error": None,
     }
+
 
 async def explore_node(state: InvestigationState) -> dict:
     """探索段:有仓走 ReAct 取材,无仓用简历文本当材料。
@@ -406,8 +405,10 @@ async def generate_node(state: InvestigationState) -> dict:
                     # 3-5 层、校验只收 1-2 层」的死结,两次重试都不合规,整份
                     # 候选人一题都拿不到。
                     band = (
-                        state.get("grade_band") or DEFAULT_GRADE_BAND
-                    ) if cv else DEFAULT_GRADE_BAND
+                        (state.get("grade_band") or DEFAULT_GRADE_BAND)
+                        if cv
+                        else DEFAULT_GRADE_BAND
+                    )
                     group = validate_qbank_v2_group(
                         group_payload,
                         dossier_text,
@@ -553,6 +554,7 @@ def _validate_group_v2(
     _check_question(str(entry.get("question", "")))
     _check_path(str((entry.get("evidence") or {}).get("path", "")), "entry")
 
+
 def validate_qbank_v2_group(
     group_payload: dict[str, Any],
     dossier_text: str,
@@ -566,9 +568,11 @@ def validate_qbank_v2_group(
     """题组 v2 全量校验(探针与 generate 共用;六探针的判定机器)。
 
     - 对抗前提黑名单/路径白名单/链源真实性(_validate_group_v2);
-    - 结构:入口 1 + 链 2-MAX_CHAINS + 总量硬顶 15 + 敷衍 dossier ≤3;
-    - 链层数按**出题深度档**定界(grade_band):标准档 3-5 层,大一档 1-2 层
-      ——深度策略只在这一处判定,schema 只留形状上界;
+    - 结构:入口 1 + 链数下界(非 thin ≥2)+ 敷衍 dossier ≤3。
+      **数量上限不再是拒绝条件**(生产复盘:模型超限一两条就被整组
+      归零,代价与收益不成比例)——超出照存,MAX_* 只留在 prompt 侧
+      做指导;每链层数的档位区间(下方的 LAYER_BOUNDS)是深度策略,
+      与总量无关,照旧把关;
     - 简历路径(no_repo)额外两条:
       ① 链主题必须能在材料里找到(防编造技术/项目名);题面**正文**不按词元
          核对——实测那样会把 5/5 真实简历拦死(写「卷积神经网络」问「CNN」、
@@ -584,8 +588,6 @@ def validate_qbank_v2_group(
     )
     if thin and group.total_questions > 3:
         raise ValueError(f"敷衍 dossier 题量越界:{group.total_questions} > 3")
-    if group.total_questions > 15:
-        raise ValueError(f"题量超硬顶:{group.total_questions} > 15")
     if group.entry is None:
         raise ValueError("题组缺入口题(入口必须 1 道)")
     if not group.entry.evidence.path and not group.entry.evidence.note:
@@ -598,11 +600,12 @@ def validate_qbank_v2_group(
         raise ValueError(f"追问链不足:要求 2-{MAX_CHAINS},模型给 {len(group.chains)}")
     material = _normalize(dossier_text)
     for chain in group.chains:
-        low, high = LAYER_BOUNDS.get(grade_band, LAYER_BOUNDS[DEFAULT_GRADE_BAND])
-        if not low <= len(chain.layers) <= high:
+        # 层数只把**下界**(深度策略:标准档至少 3 层,浅了面试没深度);
+        # 上界已撤——超出照存,面试官自己挑着问,不为超限丢整组。
+        low, _high = LAYER_BOUNDS.get(grade_band, LAYER_BOUNDS[DEFAULT_GRADE_BAND])
+        if len(chain.layers) < low:
             raise ValueError(
-                f"链层数越界({chain.theme[:16]!r}):{len(chain.layers)} 不在 {low}-{high}"
-                f"({grade_band} 档)"
+                f"链层数不足({chain.theme[:16]!r}):{len(chain.layers)} 少于 {low}({grade_band} 档)"
             )
         if no_repo:
             # 链的 theme 是这条链「问的是哪项技术/哪个项目」的声明,必须出自简历。

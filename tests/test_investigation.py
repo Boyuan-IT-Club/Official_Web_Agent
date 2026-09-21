@@ -91,6 +91,7 @@ def test_placeholder_only_keeps_real_content() -> None:
     """占位表述里夹着真实内容 → 有料(宁可判有料,别误打回兜底)。"""
     assert inv.route_project("目前没有做过什么项目,但自己写过爬虫", None) == "cv_dive"
 
+
 @pytest.mark.parametrize(
     "text",
     ["暂无", "无", "没有", "略", "同上", "没做过什么项目", "没什么项目", "暂无项目", "尚未参加"],
@@ -549,22 +550,21 @@ def test_chain_source_ignores_our_scaffolding_words() -> None:
         "category": "C4_实现细节拷打",
         "theme": "源自 dossier C4 项目经验栏的报名页重构",
         "layers": [
-            {"question": f"第{i}层怎么落地?", "expected_signal": "答到什么算过"}
-            for i in range(3)
+            {"question": f"第{i}层怎么落地?", "expected_signal": "答到什么算过"} for i in range(3)
         ],
     }
     payload["chains"][1] = {
         "category": "C7_边界与失败模式",
         "theme": "flask 报名页的边界场景",
         "layers": [
-            {"question": f"第{i}层怎么落地?", "expected_signal": "答到什么算过"}
-            for i in range(3)
+            {"question": f"第{i}层怎么落地?", "expected_signal": "答到什么算过"} for i in range(3)
         ],
     }
     payload["entry"]["evidence"]["path"] = ""
     for r in payload["reserves"]:
         r["evidence"]["path"] = ""
     _validate_group_v2(payload, "档案:报名页重构,用了 flask", [], no_repo=True)
+
 
 def _cv_payload_with(themes: list[str]) -> dict:
     """自足题组:链主题/层问题都不带仓内词元(供无仓校验用例)。"""
@@ -627,6 +627,7 @@ def test_chain_source_still_rejects_fabricated_component() -> None:
     payload["chains"][0]["theme"] = "kafka 消息队列的削峰设计"
     with pytest.raises(ValueError, match="链源不在 dossier"):
         _validate_group_v2(payload, "dossier: 报名页重构,用了 flask", [])
+
 
 def test_reserve_path_whitelist_enforced() -> None:
     """备选题 evidence.path 白名单同样校验(曾只查 entry)。"""
@@ -752,8 +753,7 @@ def _cv_payload() -> str:
 
 #: 带仓 URL 的简历:仓读不到时,这份自述就是唯一可用的材料。
 _REPO_RESUME = (
-    "技术栈:\nPython、Redis\n"
-    "项目经验:\n电商后端重构(github.com/me/private-svc),用 Redis 做缓存\n"
+    "技术栈:\nPython、Redis\n项目经验:\n电商后端重构(github.com/me/private-svc),用 Redis 做缓存\n"
 )
 
 
@@ -988,14 +988,17 @@ async def test_strong_claim_techs_get_chains_weak_ones_do_not(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_all_techs_as_chains_over_capacity_rejected(monkeypatch) -> None:
-    """每个技术都开链会超容量 —— 拒绝而不是硬塞(容量与题量硬顶双重把关)。"""
+async def test_all_techs_as_chains_over_guidance_accepted(monkeypatch) -> None:
+    """每个技术都开链、超过指导配额 → **照收**:数量上限不再拦截。
+
+    生产复盘(#207 followup):FlowGuard 组 5 条链被整组扔掉,材料再好
+    也归零。数量超出只由 prompt 指导,校验器放行,面试官自己挑题。"""
     names = ["Python", "PyTorch", "ResNet", "CNN", "YOLO"]
     resume = f"技术栈:\n{'、'.join(names)}\n项目经验:\n用 PyTorch 做了检测"
     tech = [{"name": n, "raw_text": f"技术栈:{'、'.join(names)}"} for n in names]
     _install_fake_cv_model(monkeypatch, _multi_tech_payload(names), tech=tech)
-    with pytest.raises(RuntimeError, match="at most 4 items"):
-        await ig.run_investigation("用 PyTorch 做了检测", resume_text=resume)
+    qs = await ig.run_investigation("用 PyTorch 做了检测", resume_text=resume)
+    assert len(qs["group"]["chains"]) == len(names)
 
 
 @pytest.mark.asyncio
@@ -1019,7 +1022,6 @@ async def test_cv_prompt_version_reflects_cv_prompt(monkeypatch) -> None:
     qs = await ig.run_investigation(_CV_RESUME)
     assert qs["prompt_version"] == ig._prompt_version(ig.CV_PROMPT_FILE)
     assert "cv_dive" in qs["prompt_version"]
-
 
 
 def test_cv_prompt_chain_budget_matches_capacity() -> None:
@@ -1102,13 +1104,18 @@ async def test_cv_material_keeps_resume_dossier(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_generate_retries_once_on_validation_error(monkeypatch) -> None:
-    """校验不过时把错误回灌让模型自纠 —— 一次失手不该让整份简历无题。
+    """内容性校验不过时把错误回灌让模型自纠 —— 一次失手不该让整份简历无题。
 
-    首次故意给 5 条链(超容量),第二次给合规输出;应产出合规题组而非报错。
+    首次故意给一条**编造主题**的链(简历里没有 Kafka,内容闸门必拦),
+    第二次给合规输出;应产出合规题组而非报错。数量超限(原先是 5 条链)
+    在 #207 followup 后已不算错误,连重试都不需要——直接照收。
     """
-    bad = _multi_tech_payload([f"T{i}" for i in range(5)])
-    resumes = f"技术栈:\n{'、'.join(f'T{i}' for i in range(5))}"
-    tech = [{"name": f"T{i}", "raw_text": resumes} for i in range(5)]
+    bad = _multi_tech_payload(["T0", "Kafka"])  # Kafka 不在简历 → 防编造拦截
+    resumes = "技术栈:\nT0、T1"
+    tech = [
+        {"name": "T0", "raw_text": resumes},
+        {"name": "T1", "raw_text": resumes},
+    ]
     calls: list[str] = []
 
     class _Msg:
@@ -1194,15 +1201,15 @@ def test_chain_layer_count_out_of_range_rejected() -> None:
         validate_qbank_v2_group(payload, "技术栈:Python、PyTorch", paths=[], no_repo=True)
 
 
-def test_more_than_six_chains_rejected() -> None:
-    """技术名词有上限:超出信封容量的链被拒。"""
+def test_more_than_guidance_chains_accepted() -> None:
+    """链数超指导配额 → schema 照收(数量上限已撤,#207 followup)。"""
     from official_agent.evaluation.schema import QuestionGroupV2
 
     payload = json.loads(_multi_tech_payload([f"T{i}" for i in range(7)]))
-    with pytest.raises(ValueError):
-        QuestionGroupV2.model_validate(
-            {"entry": payload["entry"], "chains": payload["chains"], "reserves": []}
-        )
+    group = QuestionGroupV2.model_validate(
+        {"entry": payload["entry"], "chains": payload["chains"], "reserves": []}
+    )
+    assert len(group.chains) == 7
 
 
 def test_deep_dive_chain_layer_still_optional_answer_reference() -> None:
@@ -1251,23 +1258,24 @@ def test_freshman_short_chain_accepted_standard_rejected() -> None:
     )
     assert all(len(c.layers) == 2 for c in group.chains)
 
-    with pytest.raises(ValueError, match="链层数越界"):
-        ig.validate_qbank_v2_group(
-            payload, dossier, paths=[], no_repo=True, grade_band="standard"
-        )
+    with pytest.raises(ValueError, match="链层数不足"):
+        ig.validate_qbank_v2_group(payload, dossier, paths=[], no_repo=True, grade_band="standard")
 
 
-def test_freshman_band_rejects_five_layers() -> None:
-    """大一档**上限也收紧**:5 层对大一就是问太深了。"""
+def test_freshman_band_five_layers_saved() -> None:
+    """大一档 5 层超出深度指导 → **照存**(数量上限不再拦截)。
+
+    深度档只剩层数下界把关(太浅=没深度);上界是指导值,模型真给了
+    深链也保存,丢组的代价远大于题深。"""
     payload = json.loads(_multi_tech_payload(["Python", "PyTorch"]))
     for chain in payload["chains"]:
         layer = chain["layers"][0]
         chain["layers"] = [dict(layer) for _ in range(5)]
     payload["entry"]["evidence"]["path"] = ""
-    with pytest.raises(ValueError, match="链层数越界"):
-        ig.validate_qbank_v2_group(
-            payload, "技术栈:Python、PyTorch", paths=[], no_repo=True, grade_band="freshman"
-        )
+    group = ig.validate_qbank_v2_group(
+        payload, "技术栈:Python、PyTorch", paths=[], no_repo=True, grade_band="freshman"
+    )
+    assert all(len(c.layers) == 5 for c in group.chains)
 
 
 def test_grade_band_default_keeps_standard_behavior() -> None:
@@ -1340,31 +1348,24 @@ async def test_freshman_band_does_not_break_repo_path(monkeypatch) -> None:
     """
     _install_fake_gh_and_model(monkeypatch, _v2_payload())
 
-    qs = await ig.run_investigation(
-        "项目 https://github.com/me/demo", grade="大一"
-    )
+    qs = await ig.run_investigation("项目 https://github.com/me/demo", grade="大一")
     assert qs["mode"] == "repo_deep_dive"
     assert len(qs["group"]["chains"]) == 2
     assert all(len(c["layers"]) == 3 for c in qs["group"]["chains"])
 
 
-def test_chain_layer_rejects_invented_evidence_field() -> None:
-    """链层多写一个键(如模型把出处塞进 `evidence_note`)→ 整组被拒。
+def test_chain_layer_extra_field_stripped_and_saved() -> None:
+    """链层多写一个键(如模型把出处塞进 `evidence_note`)→ 剥键照收。
 
-    真实简历上实测过:prompt 只在「铁律」里说「用 evidence.note 写这句题的
-    出处」,没说它**只属于 entry 与 reserves**;模型于是给链层也加了出处字段,
-    而链层是 extra="forbid"。两次重试都撞同一处,整份候选人零题产出。
-
-    这里钉住「链层是严格三键」这一契约:多一个键就不该被接受 —— 靠 prompt
-    写清楚来避免,而不是放宽 schema。
-    """
+    历史教训反转:真实简历上实测过模型会给链层加出处字段,旧契约
+    (extra=forbid + 靠 prompt 避免)在生产两次撞死(最近一次 #166:
+    备选混进 expected_signal,两次重试全败、整组归零)。prompt 写清楚
+    挡不住偶发 slip——多余键剥掉、题目保存,质量闸门在内容校验一侧。"""
     payload = json.loads(_multi_tech_payload(["Python", "PyTorch"]))
     payload["chains"][0]["layers"][0]["evidence_note"] = "技术栈栏:Python"
     payload["entry"]["evidence"]["path"] = ""
-    with pytest.raises(ValueError, match="evidence_note"):
-        ig.validate_qbank_v2_group(
-            payload, "技术栈:Python、PyTorch", paths=[], no_repo=True
-        )
+    group = ig.validate_qbank_v2_group(payload, "技术栈:Python、PyTorch", paths=[], no_repo=True)
+    assert "evidence_note" not in group.chains[0].layers[0].model_dump()
 
 
 def test_cv_prompt_scopes_evidence_to_entry_and_reserves() -> None:
