@@ -453,3 +453,75 @@ async def test_bundle_caps_repo_lines(monkeypatch, caplog) -> None:
 
     assert called == [("me", f"p{i}") for i in range(bd.MAX_REPO_LINES)]
     assert "bundle_repo_cap" in caplog.text  # 丢掉的仓留痕,不静默
+
+
+# ── 证据线降级:单线失败不炸整条 bundle ─────────────────
+# 生产事故回归:服务账号缺 evaluation:view,评测线 403 从 run_bundle
+# 一路炸穿,4 份简历 job succeeded + qbank_status=failed(零题库)。
+# 修复后评测线/奖项线与仓线同语义:失败只损失该线,兜底照常出题。
+
+
+async def test_bundle_autograding_line_failure_degrades(monkeypatch) -> None:
+    """评测线取数炸(权限/网络)→ 错因组缺席,兜底题组照常产出。"""
+    fields = [
+        FieldText(field_key="self_intro", title="自我介绍", value="我是李四。"),
+        FieldText(field_key="dept", title="志愿部门", value="技术部"),
+    ]
+
+    async def _permission_denied(github_key):
+        raise RuntimeError("权限不足(code 2101)。服务账号权限不足")
+
+    async def _skip_investigation(text, **kw):
+        return {"mode": "skipped", "repo_summary": "", "questions": []}
+
+    fake_model = _FakeModel()
+    monkeypatch.setattr(bd.ig, "run_investigation", _skip_investigation)
+    monkeypatch.setattr(
+        "official_agent.evaluation.autograding.fetch_latest_submission",
+        _permission_denied,
+    )
+    monkeypatch.setattr(bd, "build_model", lambda *a, **k: fake_model)
+
+    envelope = await bd.run_bundle(fields, resume_id=9, cycle_id=2026, github_key="usergithub")
+    groups = {g["group"]: g for g in envelope["groups"]}
+    assert "autograding" not in groups  # 错因线缺席,但没有炸
+    fallback = groups["base_and_skills"]
+    assert len(fallback["questions"]) >= 3 + 2  # 兜底线在,候选人有题可用
+
+
+class _ExplodingSearch:
+    """搜索通道故障的取材替身。"""
+
+    async def search(self, query: str):
+        raise RuntimeError("search backend down")
+
+
+async def test_bundle_award_line_failure_degrades(monkeypatch) -> None:
+    """奖项线取材炸 → 跳过奖项组,不牵连其余线;搜索健康时不受影响。"""
+    fields = [
+        FieldText(field_key="award_history", title="获奖经历", value="- 蓝桥杯省一\n- 校奖学金"),
+        FieldText(field_key="dept", title="志愿部门", value="技术部"),
+    ]
+
+    async def _no_submission(github_key):
+        return None
+
+    async def _skip_investigation(text, **kw):
+        return {"mode": "skipped", "repo_summary": "", "questions": []}
+
+    monkeypatch.setattr(bd.ig, "run_investigation", _skip_investigation)
+    monkeypatch.setattr(
+        "official_agent.evaluation.autograding.fetch_latest_submission", _no_submission
+    )
+    monkeypatch.setattr(bd, "build_model", lambda *a, **k: _FakeModel())
+
+    envelope = await bd.run_bundle(
+        fields,
+        resume_id=9,
+        cycle_id=2026,
+        github_key="usergithub",
+        search_provider=_ExplodingSearch(),
+    )
+    groups = {g["group"]: g for g in envelope["groups"]}
+    assert "awards" not in groups  # 奖项线整体缺席,但没有炸
+    assert "base_and_skills" in groups  # 兜底仍在

@@ -136,9 +136,7 @@ def _extract_grade(simple_fields: list[dict]) -> str:
     return ""
 
 
-async def fetch_scoring_fields(
-    user_id: int, cycle_id: int
-) -> tuple[int, list[FieldText], str]:
+async def fetch_scoring_fields(user_id: int, cycle_id: int) -> tuple[int, list[FieldText], str]:
     """服务账号取简历详情,映射为打分维度(textarea 型字段)。
 
     对应 GET /api/resumes/admin/{userId}/{cycleId}(resume:view 权限走
@@ -358,6 +356,7 @@ class EvaluationRunner:
             card: dict | None = None
             version: int | None = None
             qbank_status = "skipped"
+            qbank_error: str | None = None
             try:
                 t_eval = time.monotonic()
                 fetched_resume_id, fields, grade = await fetch_scoring_fields(
@@ -450,6 +449,9 @@ class EvaluationRunner:
                     )
                 except Exception as qbank_exc:  # noqa: BLE001 — 题库线失败不拖垮评分卡
                     qbank_status = "failed"
+                    # 原因摘要落 job 行:管理面题库 404 文案据此给出真实
+                    # 原因(权限/模型/网络),不再拿"暂无题库"掩盖失败
+                    qbank_error = f"{type(qbank_exc).__name__}: {qbank_exc}"[:500]
                     _log_event(
                         job_id,
                         cycle_id,
@@ -465,6 +467,8 @@ class EvaluationRunner:
                         exc_info=True,
                     )
                 else:
+                    # 成功显式清列:复评翻案时不清,404 文案会拿陈旧原因误导
+                    qbank_error = None
                     _log_event(
                         job_id,
                         cycle_id,
@@ -480,6 +484,7 @@ class EvaluationRunner:
                     "succeeded",
                     card_version=version,
                     qbank_status=qbank_status,
+                    qbank_error=qbank_error,
                 )
             except Exception as exc:  # noqa: BLE001 — job 失败落表,可重试
                 await _set_resume_status(resume_id, 2)

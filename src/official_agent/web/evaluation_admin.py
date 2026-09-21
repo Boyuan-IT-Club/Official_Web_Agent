@@ -139,6 +139,27 @@ class PickBody(BaseModel):
     questions: list[dict[str, Any]] = Field(min_length=1, max_length=20)
 
 
+def _qbank_missing_detail(job: dict[str, Any] | None) -> str:
+    """题库行缺席时按最新 job 给出真实原因(404 detail)。
+
+    先看 job 执行态再看 qbank 态:复跑中的 job 会残留上一轮的
+    qbank_status=failed(mark_job 只更新显式传入的列),不能拿它说事。"""
+    if job is None:
+        return "该候选暂无预置题库:尚未跑过 AI 初筛,请在简历审核触发"
+    job_status = str(job.get("status") or "")
+    if job_status in ("pending", "running"):
+        return "该候选的 AI 初筛进行中,预置题库将在完成后出现,请稍后刷新"
+    if str(job.get("qbank_status") or "") == "failed":
+        reason = str(job.get("qbank_error") or "").strip()
+        if reason:
+            return f"该候选的预置题库生成失败:{reason}。请在简历审核重新触发 AI 初筛"
+        return (
+            "该候选的预置题库生成失败(原因未记录,旧版本 job 不落原因)。"
+            "请在简历审核重新触发 AI 初筛;持续失败请查 agent 日志 qbank_done 事件"
+        )
+    return "该候选暂无预置题库(数据异常:job 已完成但题库缺失)。请在简历审核重新触发 AI 初筛"
+
+
 @router.get("/admin/evaluation/qbank")
 async def get_qbank(
     identity: Annotated[
@@ -147,13 +168,18 @@ async def get_qbank(
     resume_id: int,
     cycle_id: int,
 ) -> dict[str, Any]:
-    """某候选最新预置题库(面试官面试前预查/打分工作台抽屉)。"""
+    """某候选最新预置题库(面试官面试前预查/打分工作台抽屉)。
+
+    题库行缺席时联查最新 job 区分"从未跑过"与"跑了但题库线失败":
+    生产曾把权限 403 炸掉的题库线展示成"暂无题库",看似没数据、
+    实则生成失败——404 文案必须给出真实原因与出路。"""
     try:
         row = await asyncio.to_thread(qbank_store.latest_qbank, resume_id, cycle_id)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail="查询题库失败,请稍后重试") from exc
     if row is None:
-        raise HTTPException(status_code=404, detail="该候选暂无预置题库")
+        job = await asyncio.to_thread(evaluation.latest_job, resume_id, cycle_id)
+        raise HTTPException(status_code=404, detail=_qbank_missing_detail(job))
     envelope = row.get("envelope") or {}
     row = dict(row)
     # v2 题组的可挑题扁平视图(UI 挑题不感知组内嵌套)
