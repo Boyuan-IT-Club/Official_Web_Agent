@@ -60,7 +60,12 @@ services:
       - default
       - backend
     ports:
-      - "127.0.0.1:8001:8001"       # 宿主 nginx 反代与本机排障用;容器间不经它
+      # 绑定地址可配(AGENT_BIND,缺省回环)。Agent 单实例固定 Node A,而
+      # Backend 在 A/B 两节点:B 的 admin 代理要按内网 IP 直达 A 的 8001,
+      # 绑死回环时 B 一律 connection refused(生产实测,评审面板请求落在 B
+      # 即 502)。服务器 .env.prod 设 AGENT_BIND=<A 的内网 IP>;改绑定后须
+      # up -d 重建(restart 不重挂端口)。
+      - "${AGENT_BIND:-127.0.0.1}:8001:8001"
     volumes:
       - ./logs:/app/logs            # RotatingFileHandler 落盘,运维直接查文件
     healthcheck:
