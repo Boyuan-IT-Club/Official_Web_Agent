@@ -425,10 +425,14 @@ def test_qbank_404_failed_job_carries_reason(
     assert "重新触发" in detail
 
 
-def test_qbank_404_running_job_says_in_progress(
+def test_qbank_generating_job_returns_flag_not_error(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """复跑中的 job 残留上一轮 qbank_status=failed → 仍按"进行中"说。"""
+    """job 进行中 → 200 + generating 标记,而非 404 报错。
+
+    用户在出题窗口内打开抽屉是常态:404 会走前端报错路径,把
+    "正在出题"伪装成故障。复跑中的 job 残留上一轮 qbank_status=failed
+    也不影响——生成中就是生成中。"""
     from official_agent.state import evaluation
     from official_agent.web import evaluation_admin as ea
 
@@ -440,5 +444,7 @@ def test_qbank_404_running_job_says_in_progress(
         lambda r, c: {"status": "running", "qbank_status": "failed", "qbank_error": "旧"},
     )
     resp = client.get("/api/agent/admin/evaluation/qbank?resume_id=1&cycle_id=2026", headers=_AUTH)
-    assert resp.status_code == 404
-    assert "进行中" in resp.json()["detail"]
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["generating"] is True
+    assert "envelope" not in body
