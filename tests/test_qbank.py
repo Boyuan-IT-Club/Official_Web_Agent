@@ -379,3 +379,66 @@ def test_resolve_picks_no_qbank(monkeypatch) -> None:
     monkeypatch.setattr(qbank, "latest_qbank", lambda r, c: None)
     with pytest.raises(LookupError, match="暂无预置题库"):
         qbank.resolve_picks(9, 2026, [{"question": "任意"}])
+
+
+# ── 题库 404 文案:区分"从未跑过 / 进行中 / 生成失败" ──────
+# 生产事故回归:权限 403 炸掉的题库线被展示成"暂无题库",看似没数据,
+# 实则生成失败且原因不可见。404 必须联查 job 给出真实原因与出路。
+
+
+def test_qbank_404_without_any_job_says_never_ran(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from official_agent.state import evaluation
+    from official_agent.web import evaluation_admin as ea
+
+    _install_resolve(monkeypatch, ["resume:audit"])
+    monkeypatch.setattr(ea.qbank_store, "latest_qbank", lambda r, c: None)
+    monkeypatch.setattr(evaluation, "latest_job", lambda r, c: None)
+    resp = client.get("/api/agent/admin/evaluation/qbank?resume_id=1&cycle_id=2026", headers=_AUTH)
+    assert resp.status_code == 404
+    assert "尚未跑过 AI 初筛" in resp.json()["detail"]
+
+
+def test_qbank_404_failed_job_carries_reason(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from official_agent.state import evaluation
+    from official_agent.web import evaluation_admin as ea
+
+    _install_resolve(monkeypatch, ["resume:audit"])
+    monkeypatch.setattr(ea.qbank_store, "latest_qbank", lambda r, c: None)
+    monkeypatch.setattr(
+        evaluation,
+        "latest_job",
+        lambda r, c: {
+            "status": "succeeded",
+            "qbank_status": "failed",
+            "qbank_error": "BackendError: 权限不足(code 2101)",
+        },
+    )
+    resp = client.get("/api/agent/admin/evaluation/qbank?resume_id=1&cycle_id=2026", headers=_AUTH)
+    assert resp.status_code == 404
+    detail = resp.json()["detail"]
+    assert "生成失败" in detail
+    assert "权限不足(code 2101)" in detail  # 真实原因直达评审,不再"暂无题库"
+    assert "重新触发" in detail
+
+
+def test_qbank_404_running_job_says_in_progress(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """复跑中的 job 残留上一轮 qbank_status=failed → 仍按"进行中"说。"""
+    from official_agent.state import evaluation
+    from official_agent.web import evaluation_admin as ea
+
+    _install_resolve(monkeypatch, ["resume:audit"])
+    monkeypatch.setattr(ea.qbank_store, "latest_qbank", lambda r, c: None)
+    monkeypatch.setattr(
+        evaluation,
+        "latest_job",
+        lambda r, c: {"status": "running", "qbank_status": "failed", "qbank_error": "旧"},
+    )
+    resp = client.get("/api/agent/admin/evaluation/qbank?resume_id=1&cycle_id=2026", headers=_AUTH)
+    assert resp.status_code == 404
+    assert "进行中" in resp.json()["detail"]

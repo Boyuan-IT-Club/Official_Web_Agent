@@ -226,6 +226,7 @@ def ensure_evaluation_job_table(conn: psycopg.Connection[dict[str, Any]]) -> Non
             error       text,
             card_version int,
             qbank_status text,
+            qbank_error text,
             created_at  timestamptz NOT NULL DEFAULT now(),
             updated_at  timestamptz NOT NULL DEFAULT now()
         )
@@ -262,6 +263,8 @@ def ensure_evaluation_job_integrity(conn: psycopg.Connection[dict[str, Any]]) ->
     """
     # 旧库自举:qbank_status 列对已存在表补加
     conn.execute("ALTER TABLE evaluation_job ADD COLUMN IF NOT EXISTS qbank_status text")
+    # 旧库自举:qbank_error(题库线失败原因摘要,供管理面 404 文案)同窗口补加
+    conn.execute("ALTER TABLE evaluation_job ADD COLUMN IF NOT EXISTS qbank_error text")
     # 保留每 (resume_id, cycle_id) 最新的活跃 job,其余落 failed
     conn.execute(
         """
@@ -375,11 +378,14 @@ def mark_job(
     error: str | None | _Unset = _UNSET,
     card_version: int | None | _Unset = _UNSET,
     qbank_status: str | None | _Unset = _UNSET,
+    qbank_error: str | None | _Unset = _UNSET,
 ) -> bool:
     """状态迁移(pending→running→succeeded/failed;failed 可重试回 pending)。
 
     qbank_status:题库线独立完成态——succeeded/failed/skipped。
     job 终态 succeeded 但 qbank_status=failed 时,管理面可见"有评分无题库"。
+    qbank_error:题库线失败原因摘要(错误类+文案),管理面 404 文案据此
+    给出真实原因,不再拿"暂无题库"掩盖失败;成功路径显式清列防陈旧。
 
     只更新**显式传入**的列:失败路径只带 error,不该顺手把已落库的
     card_version 指针置空(卡还在,指针没了,管理面就查不到那一版)。
@@ -393,6 +399,7 @@ def mark_job(
         ("error", error),
         ("card_version", card_version),
         ("qbank_status", qbank_status),
+        ("qbank_error", qbank_error),
     ):
         if not isinstance(value, _Unset):
             sets.append(f"{column} = %s")
@@ -416,9 +423,26 @@ def get_job(job_id: int) -> dict[str, Any] | None:
     with _conn() as conn:
         row = conn.execute(
             "SELECT job_id, resume_id, user_id, cycle_id, status, attempts, error, "
-            "card_version, qbank_status, created_at, updated_at "
+            "card_version, qbank_status, qbank_error, created_at, updated_at "
             "FROM evaluation_job WHERE job_id = %s",
             (job_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def latest_job(resume_id: int, cycle_id: int) -> dict[str, Any] | None:
+    """该 (resume, cycle) 最新一条 job(不限状态);无则 None。
+
+    管理面题库 404 文案据此区分"从未跑过 / 跑了但题库线失败"——
+    qbank 行缺席本身分不出这两种,原因在 job 行上。"""
+    _ensure_job_bootstrapped()
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT job_id, resume_id, user_id, cycle_id, status, attempts, error, "
+            "card_version, qbank_status, qbank_error, created_at, updated_at "
+            "FROM evaluation_job WHERE resume_id = %s AND cycle_id = %s "
+            "ORDER BY job_id DESC LIMIT 1",
+            (resume_id, cycle_id),
         ).fetchone()
     return dict(row) if row else None
 
@@ -444,7 +468,7 @@ def list_jobs(
     with _conn() as conn:
         rows = conn.execute(
             "SELECT job_id, resume_id, user_id, cycle_id, status, attempts, error, "
-            "card_version, qbank_status, created_at, updated_at "
+            "card_version, qbank_status, qbank_error, created_at, updated_at "
             f"FROM evaluation_job WHERE {where} "  # noqa: S608
             "ORDER BY job_id DESC LIMIT %s OFFSET %s",
             params,

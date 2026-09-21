@@ -263,6 +263,39 @@ def test_qbank_status_persisted(cycle_id: int) -> None:
         _cleanup(cycle_id)
 
 
+def test_qbank_error_persisted_and_cleared(cycle_id: int) -> None:
+    """qbank_error 随失败落库、随成功清列;latest_job 不限状态可回捞。
+
+    管理面题库 404 文案靠这列给真实原因——生产曾把权限 403 展示成
+    "暂无题库",看似没数据、实则生成失败。"""
+    _cleanup(cycle_id)
+    try:
+        job_id = ev_store.create_jobs([(9007, 507)], cycle_id)[0]
+        ev_store.mark_job(job_id, "running")
+        ev_store.mark_job(
+            job_id,
+            "succeeded",
+            card_version=1,
+            qbank_status="failed",
+            qbank_error="BackendError: 权限不足(code 2101)",
+        )
+        row = ev_store.get_job(job_id)
+        assert row["qbank_error"] == "BackendError: 权限不足(code 2101)"
+        assert ev_store.latest_job(9007, cycle_id)["job_id"] == job_id
+
+        # 复评翻案:成功路径必须显式清列,否则 404 文案拿陈旧原因误导
+        job2 = ev_store.create_jobs([(9007, 507)], cycle_id)[0]
+        assert job2 != job_id
+        ev_store.mark_job(job2, "running")
+        ev_store.mark_job(
+            job2, "succeeded", card_version=2, qbank_status="succeeded", qbank_error=None
+        )
+        assert ev_store.get_job(job2)["qbank_error"] is None
+        assert ev_store.latest_job(9007, cycle_id)["job_id"] == job2
+    finally:
+        _cleanup(cycle_id)
+
+
 # ── 数据路径不得再取表级 DDL 锁 ───────────────────────────
 
 

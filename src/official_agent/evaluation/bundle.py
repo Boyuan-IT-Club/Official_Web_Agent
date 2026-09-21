@@ -203,44 +203,62 @@ async def run_bundle(
                 }
             )
 
-    # 评测线
+    # 评测线。单条证据线的失败只损失该线,不炸整条 bundle(与仓线同语义):
+    # 生产曾因服务账号缺 evaluation:view,403 从这里一路炸穿,整份候选人
+    # 零题库(job succeeded + qbank_status=failed)——错因线本就是锦上添花。
     if github_key:
-        from official_agent.evaluation import autograding as ag
+        try:
+            from official_agent.evaluation import autograding as ag
 
-        submission = await ag.fetch_latest_submission(github_key)
-        if submission and not ag.is_full_score(submission):
-            failures = ag.extract_failures(submission)
-            if not failures:
-                pass  # 非满分但抽不出失败明细:出题只会诱导编造,略过该线
-            else:
-                buckets = ag.classify(failures)
-                material = "\n".join(
-                    f"[{kind}] {task}/{name}"
-                    for kind, items in buckets.items()
-                    for task, name in items
-                )
-                ag_questions = await _b4_questions(
-                    f"评测失败清单(任务/test):\n{material}",
-                    count_min=2,
-                    count_max=3,
-                    source="autograding-failures",
-                )
-                groups.append(
-                    {
-                        "group": "autograding",
-                        "mode": "error_analysis",
-                        "repo_summary": f"评测非满分,失败 {len(failures)} 项",
-                        "questions": ag_questions,
-                        "prompt_version": _prompt_version(),
-                    }
-                )
+            submission = await ag.fetch_latest_submission(github_key)
+            if submission and not ag.is_full_score(submission):
+                failures = ag.extract_failures(submission)
+                if not failures:
+                    pass  # 非满分但抽不出失败明细:出题只会诱导编造,略过该线
+                else:
+                    buckets = ag.classify(failures)
+                    material = "\n".join(
+                        f"[{kind}] {task}/{name}"
+                        for kind, items in buckets.items()
+                        for task, name in items
+                    )
+                    ag_questions = await _b4_questions(
+                        f"评测失败清单(任务/test):\n{material}",
+                        count_min=2,
+                        count_max=3,
+                        source="autograding-failures",
+                    )
+                    groups.append(
+                        {
+                            "group": "autograding",
+                            "mode": "error_analysis",
+                            "repo_summary": f"评测非满分,失败 {len(failures)} 项",
+                            "questions": ag_questions,
+                            "prompt_version": _prompt_version(),
+                        }
+                    )
+        except Exception as exc:  # noqa: BLE001 — 错因线失败可容忍,只记日志
+            logging.getLogger(__name__).warning(
+                "评测错因线跳过(resume=%s):%s: %s", resume_id, type(exc).__name__, exc
+            )
 
-    # 奖项线:verified 的背景卡也进信封(搜索通道到位后面试官有料可读)
+    # 奖项线:verified 的背景卡也进信封(搜索通道到位后面试官有料可读)。
+    # 单个奖项的取材失败跳过该奖项,不拖垮其余奖项与其他线。
     awards = extract_awards(fields)
     award_questions: list[dict] = []
     award_briefs: list[dict] = []
     for title in awards[:3]:
-        brief = await build_award_brief(provider, title)
+        try:
+            brief = await build_award_brief(provider, title)
+        except Exception as exc:  # noqa: BLE001 — 单奖项失败可容忍,只记日志
+            logging.getLogger(__name__).warning(
+                "奖项线取材跳过(resume=%s,奖项=%s):%s: %s",
+                resume_id,
+                title,
+                type(exc).__name__,
+                exc,
+            )
+            continue
         award_briefs.append(brief)
         award_questions.extend(brief.get("questions", []))
     if award_questions or award_briefs:
