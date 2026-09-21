@@ -47,6 +47,16 @@ cd deploy/langfuse && docker compose up -d   # web: http://127.0.0.1:3001
 Issues 按模块编号:INF(基础设施)/ TOOL(工具层)/ GRA(编排)/ EVA(评估流水线)/
 COP(Copilot)/ MEM(记忆)/ SEC(安全)/ OBS(观测评估)。提交信息引用编号。
 
+## 工程规范
+
+分层/设计原则/注释/日志/错误处理等细则在 `docs/standards/`(入口
+`docs/standards/README.md` 的加载地图);写代码/重构前必读其中的
+comments.md 与 readability.md。**注释里禁止 issue 号与迭代代号**(如 `#134`、
+`GRA-04`、`R1/R2/R3`)——判据:读者能否仅凭本仓查到该标识。
+
+分期重构计划在 `docs/refactor-roadmap.md`:重构开工前读对应 chunk,
+完成后回写其 §6 进度表;chunk 闸门(测试/eval 基线)见该文 §3。
+
 ## Agent skills
 
 ### Issue tracker
