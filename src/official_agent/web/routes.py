@@ -233,6 +233,8 @@ async def _get_or_create_session(
             else:
                 session_id = new_thread_id("web", 0)
         except Exception:  # noqa: BLE001 — 建档失败不阻断对话(与 CLI 同语义)
+            # 降级必须留痕:否则 conversation 档案静默丢失,排障无从下手
+            logger.warning("会话建档失败,降级为无档案随机会话", exc_info=True)
             session_id = new_thread_id("web", user_id or 0)
 
         # checkpointer:进程级共享(app lifespan 建立,fail-open)。thread_id 隔离会话。

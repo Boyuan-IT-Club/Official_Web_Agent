@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import types
 from collections.abc import AsyncIterator
 
@@ -879,3 +880,35 @@ def test_collect_sources_dedupes_and_tolerates_bad_payload() -> None:
         seen,
     )
     assert len(sources) == 2  # 坏载荷不影响已收集引用
+
+
+def test_chat_thread_creation_failure_degrades_and_logs(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """建档失败 → 降级随机会话继续对话(fail-open),且降级必须留 warning。
+
+    降级会静默丢 conversation 档案;没有这条日志,线上档案缺失无从排查。
+    """
+    from official_agent.web import routes
+
+    _install_fakes(monkeypatch)
+
+    def _boom(*_a: object, **_k: object):
+        raise RuntimeError("pg down")
+
+    monkeypatch.setattr(routes, "create_thread", _boom)
+    monkeypatch.setattr(routes, "_config_fingerprint", lambda: "fp-degraded")
+
+    with (
+        caplog.at_level(logging.WARNING),
+        client.stream(
+            "POST",
+            "/api/agent/chat",
+            json={"message": "hi"},
+            headers={"Authorization": "Bearer tok"},
+        ) as resp,
+    ):
+        assert resp.status_code == 200
+        events = _sse_events(resp)
+    assert any(e.get("type") == "session" for e in events), "降级后仍要正常开轮"
+    assert any("会话建档失败" in r.message for r in caplog.records), "降级必须留痕"

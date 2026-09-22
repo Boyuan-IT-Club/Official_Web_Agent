@@ -61,6 +61,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             ensure_qbank_ready()
             ensure_evaluation_job_ready()
         except Exception:  # noqa: BLE001 — PG 未起/配置错 → 降级(fail-open,ADR-0005)
+            # 降级必须留痕:配置错误与 PG 未起症状相同(/health degraded),靠这条日志区分
+            logging.getLogger(__name__).warning(
+                "启动建表自举失败,降级为无 checkpointer(记忆/落账不可用)", exc_info=True
+            )
             app.state.checkpointer = None
         # 启动自动恢复:进程重启后,PG 里残留的 pending/running job
         # 由 lifespan 全量扫回并重派(超 10 分钟 + attempts 未满;达上限的

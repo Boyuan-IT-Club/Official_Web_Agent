@@ -191,6 +191,10 @@ async def run_bundle(
                 }
             )
         except Exception as exc:  # noqa: BLE001
+            # 仓线失败必须留痕:信封 error 字段只有截断摘要,没有堆栈(对照下方评测线)
+            logging.getLogger(__name__).warning(
+                "仓线探测失败 repo=%s/%s", owner, name, exc_info=True
+            )
             groups.append(
                 {
                     "group": "repo",

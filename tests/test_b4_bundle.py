@@ -1,5 +1,7 @@
 """错因归类/最近最好/奖项降级/兜底题组/bundle 组装测试(fakes)。"""
 
+import logging
+
 import pytest
 
 from official_agent.evaluation import autograding as ag
@@ -525,3 +527,35 @@ async def test_bundle_award_line_failure_degrades(monkeypatch) -> None:
     groups = {g["group"]: g for g in envelope["groups"]}
     assert "awards" not in groups  # 奖项线整体缺席,但没有炸
     assert "base_and_skills" in groups  # 兜底仍在
+
+
+@pytest.mark.asyncio
+async def test_bundle_repo_line_failure_degrades_and_logs(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """单仓探测失败:该线降级为 error 组(bundle 不炸),且必须留 warning。
+
+    信封 error 字段只有截断摘要;没有这条日志,探测失败只剩无堆栈的一行字。
+    """
+    fields = [FieldText(field_key="self_intro", title="自我介绍", value="我是王五。")]
+
+    async def _boom(_text: str, **_kw: object):
+        raise RuntimeError("probe exploded")
+
+    async def _no_submission(_github_key: str):
+        return None
+
+    monkeypatch.setattr(bd.ig, "run_investigation", _boom)
+    monkeypatch.setattr(
+        "official_agent.evaluation.autograding.fetch_latest_submission",
+        _no_submission,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        envelope = await bd.run_bundle(
+            fields, resume_id=11, cycle_id=2026, github_key="usergithub"
+        )
+    assert any(
+        g.get("mode") == "error" for g in envelope["groups"]
+    ), "失败线降级为 error 组,bundle 不炸"
+    assert any("仓线探测失败" in r.message for r in caplog.records), "仓线失败必须留痕"
