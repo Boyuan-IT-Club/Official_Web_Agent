@@ -106,8 +106,8 @@
 
 - `uv run ruff check .`:全绿。
 - `uv run pytest`:定稿时 **693 passed / 33 skipped**(skip 全部为集成档缺 pgvector
-  容器的自 SKIP);Batch 1 完成后 **697 passed / 33 skipped**(净增 4 条测试)。
-  之后任何 chunk 的基线都必须不低于此。
+  容器的自 SKIP);Batch 1 完成后 697;Batch 2 完成后 **700 passed / 33 skipped**
+  (净增 7 条测试)。之后任何 chunk 的基线都必须不低于此。
 
 ---
 
@@ -290,11 +290,11 @@
 | 2.0 | 主链路特征测试 | 完成 | 649f025;事件序列 + 全生命周期两条规范测试 |
 | 2.1 | 共享鉴权模块 | 完成 | 9fa1e35;require_any 工厂收口五份副本 |
 | 2.2 | 会话存储抽取 | 完成 | 16e15f4;session_store.py 92 行纯模块 |
-| 2.3 | 配置热重建抽取 | 待办 | |
-| 2.4 | 遥测落账抽取 | 待办 | |
-| 2.5 | 配置管理面拆分 | 待办 | |
-| 2.6 | _stream_turn 拆解 | 待办 | 依赖 2.0、2.2 |
-| 2.7 | chat 入参 Pydantic 化 | 待办 | |
+| 2.3 | 配置热重建抽取 | 完成 | ada640f;agent_factory.py,指纹失败改 warning 留痕 |
+| 2.4 | 遥测落账抽取 | 完成 | 见 2.5 前一提交;telemetry.py,psycopg 延迟纪律保持 |
+| 2.5 | 配置管理面拆分 | 完成 | a5ae58d;config_admin.py 独立 router |
+| 2.6 | _stream_turn 拆解 | 完成 | e34d864;编排 + 六小件,事件序列测试零改动通过 |
+| 2.7 | chat 入参 Pydantic 化 | 完成 | 0cd172d;畸形 body 500→422,400 契约保持 |
 | 3.1 | state/evaluation 拆分 | 待办 | |
 | 3.2 | 评估大函数拆解 | 待办 | |
 | 3.3 | 重复与常量收口 | 待办 | |
