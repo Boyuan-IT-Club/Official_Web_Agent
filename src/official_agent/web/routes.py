@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import AIMessageChunk, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from pydantic import BaseModel
 
 from official_agent.graphs.assistant import (
     _ROLE_TOOL_NAMES,  # noqa: PLC2701 — 同模块装配表(prefix_hash 证据)
@@ -156,9 +157,21 @@ async def _get_or_create_session(
         return session, True
 
 
+class ChatBody(BaseModel):
+    """POST /chat 入参:一轮用户消息。session_id 缺省 = 新建会话。
+
+    形状校验交 schema(畸形 JSON → FastAPI 标准 422);空/超长属语义
+    校验,端点内手工判(保持 400 契约,前端文案不变)。
+    """
+
+    message: str
+    session_id: str | None = None
+
+
 @router.post("/chat")
 async def chat(
     request: Request,
+    body: ChatBody,
     auth: Annotated[tuple[ResolvedIdentity, str], Depends(_authenticate)],
 ) -> StreamingResponse:
     """一轮对话(SSE 流)。body: {"message": str, "session_id": str | null}
@@ -168,13 +181,12 @@ async def chat(
     tool(role,name) / done / error(code,message)。
     """
     identity, user_token = auth
-    body = await request.json()
-    message = (body.get("message") or "").strip()
+    message = body.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="message 不能为空")
     if len(message) > _MAX_MESSAGE_CHARS:
         raise HTTPException(status_code=400, detail=f"消息过长(上限 {_MAX_MESSAGE_CHARS} 字)")
-    session_id = (body.get("session_id") or "").strip() or None
+    session_id = (body.session_id or "").strip() or None
 
     session, is_new = await _get_or_create_session(request, identity, user_token, session_id)
     checkpointer = getattr(request.app.state, "checkpointer", None)

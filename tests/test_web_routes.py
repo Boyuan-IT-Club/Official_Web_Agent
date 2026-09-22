@@ -1069,3 +1069,18 @@ def test_session_full_lifecycle_create_resume_delete(
         headers={"Authorization": "Bearer tok"},
     )
     assert resp.status_code == 404
+
+
+def test_chat_malformed_body_not_500(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """畸形 JSON / 非对象 body → FastAPI 标准 422,不再以 500 崩给前端。"""
+    _install_fakes(monkeypatch)
+    resp = client.post(
+        "/api/agent/chat", content=b"not-json{", headers={"Authorization": "Bearer tok"}
+    )
+    assert resp.status_code == 422
+    resp = client.post(
+        "/api/agent/chat", json=["an", "array"], headers={"Authorization": "Bearer tok"}
+    )
+    assert resp.status_code == 422
