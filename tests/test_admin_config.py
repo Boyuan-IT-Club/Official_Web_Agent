@@ -60,12 +60,11 @@ def _non_admin_identity() -> dict:
 
 
 def _install_resolve(monkeypatch: pytest.MonkeyPatch, identity: dict) -> None:
-    from official_agent.web import routes
 
     async def _resolve(*_a: object, **_k: object) -> dict:
         return identity
 
-    monkeypatch.setattr(routes, "resolve", _resolve)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
 
 
 def test_admin_config_requires_auth(client: TestClient) -> None:

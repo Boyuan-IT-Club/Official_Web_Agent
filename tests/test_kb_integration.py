@@ -260,7 +260,6 @@ async def test_admin_api_roundtrip_real_pg(monkeypatch) -> None:
 
     from fastapi.testclient import TestClient
 
-    from official_agent.web import routes
     from official_agent.web.app import create_app
 
     _patch_pg(monkeypatch)
@@ -291,7 +290,7 @@ async def test_admin_api_roundtrip_real_pg(monkeypatch) -> None:
             "source": "web",
         }
 
-    monkeypatch.setattr(routes, "resolve", _resolve)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
 
     with TestClient(create_app()) as client:
         assert client.get("/health").json()["status"] == "ok"

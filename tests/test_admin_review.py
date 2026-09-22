@@ -44,12 +44,11 @@ def _identity(codes: list[str]) -> dict:
 
 
 def _install_resolve(monkeypatch: pytest.MonkeyPatch, codes: list[str]) -> None:
-    from official_agent.web import routes
 
     async def _resolve(*_a: object, **_k: object) -> dict:
         return _identity(codes)
 
-    monkeypatch.setattr(routes, "resolve", _resolve)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
 
 
 _AUTH = {"Authorization": "Bearer reviewer-jwt"}

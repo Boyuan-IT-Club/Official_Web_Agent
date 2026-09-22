@@ -12,7 +12,7 @@ import logging
 from dataclasses import asdict
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from official_agent.graphs.identity import ResolvedIdentity
@@ -20,20 +20,12 @@ from official_agent.kb import store as kb_store
 from official_agent.kb.embedding import EmbeddingError, EmbeddingNotConfiguredError
 from official_agent.kb.schema import KbSchemaError
 from official_agent.kb.store import KbValidationError
-from official_agent.web.routes import _authenticate
+from official_agent.web.auth import require_any as _require_any
 
 router = APIRouter()
 
-
-async def _require_kb_manage(
-    request: Request, authorization: Annotated[str | None, Header()] = None
-):
-    """KB 管理 API 认证:官网 JWT → resolve → permission_codes 含 kb:manage。"""
-    identity, _ = await _authenticate(request, authorization)
-    codes = identity.get("permission_codes") or []
-    if "kb:manage" not in codes:
-        raise HTTPException(status_code=403, detail="需要 kb:manage 权限")
-    return identity
+# KB 管理 API 认证:官网 JWT → resolve → permission_codes 含 kb:manage
+_require_kb_manage = _require_any("kb:manage")
 
 
 class KbSourceUpsert(BaseModel):

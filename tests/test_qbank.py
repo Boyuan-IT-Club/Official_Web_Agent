@@ -94,7 +94,6 @@ def client(monkeypatch: pytest.MonkeyPatch, web_no_real_pg: None) -> TestClient:
 
 
 def _install_resolve(monkeypatch: pytest.MonkeyPatch, codes: list[str]) -> None:
-    from official_agent.web import routes
 
     async def _resolve(*_a: object, **_k: object) -> dict:
         return {
@@ -105,7 +104,7 @@ def _install_resolve(monkeypatch: pytest.MonkeyPatch, codes: list[str]) -> None:
             "source": "web",
         }
 
-    monkeypatch.setattr(routes, "resolve", _resolve)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
 
 
 _AUTH = {"Authorization": "Bearer tok"}

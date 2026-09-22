@@ -110,7 +110,7 @@ def test_delete_session_purges_all_store_faces(
     async def _resolve(*_a: object, **_k: object) -> dict:
         return _identity(7)
 
-    monkeypatch.setattr(routes, "resolve", _resolve)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
 
     import official_agent.state.threads as thread_store_mod
 
@@ -154,7 +154,7 @@ def test_delete_session_rejects_non_owner(client: TestClient, monkeypatch) -> No
     async def _resolve(*_a: object, **_k: object) -> dict:
         return _identity(7)
 
-    monkeypatch.setattr(routes, "resolve", _resolve)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
     import official_agent.state.threads as thread_store_mod
 
     monkeypatch.setattr(thread_store_mod, "resolve_thread", lambda tid, uid: None)
@@ -176,7 +176,7 @@ def test_chat_rejected_while_session_deleting(
     async def _resolve(*_a: object, **_k: object) -> dict:
         return _identity(7)
 
-    monkeypatch.setattr(routes, "resolve", _resolve)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
     # 会话不在内存(模拟重启后),但删除端已登记 → 必须拒绝,而非走恢复路径
     routes._deleting_sessions.add("web:u7:inflight01")
 
@@ -197,7 +197,7 @@ def test_delete_holds_registration_then_releases_on_failure(
     async def _resolve(*_a: object, **_k: object) -> dict:
         return _identity(7)
 
-    monkeypatch.setattr(routes, "resolve", _resolve)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
     import official_agent.state.threads as thread_store_mod
 
     rec = type("Rec", (), {"thread_id": "web:u7:fail01", "owner_user_id": 7, "status": "active"})()
@@ -236,7 +236,7 @@ def test_admin_transcript_read_is_audited(
     async def _resolve(*_a: object, **_k: object) -> dict:
         return _identity(9, monitor=True)
 
-    monkeypatch.setattr(r, "resolve", _resolve)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
     rec = type("Rec", (), {"thread_id": "web:u7:abc", "owner_user_id": 7, "status": "active"})()
 
     def _get_thread(tid):

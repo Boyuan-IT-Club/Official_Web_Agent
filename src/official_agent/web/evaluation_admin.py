@@ -10,42 +10,25 @@ import logging
 import secrets
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from official_agent.evaluation import runner as eval_runner
 from official_agent.graphs.identity import ResolvedIdentity
 from official_agent.state import audit, evaluation
 from official_agent.state import qbank as qbank_store
-from official_agent.web.routes import _authenticate
+from official_agent.web.auth import require_any as _require_any
 
 router = APIRouter()
 
+# 初筛管理认证:JWT → resolve → permission_codes 含 resume:audit
+_require_resume_audit = _require_any("resume:audit")
 
-async def _require_resume_audit(
-    request: Request, authorization: Annotated[str | None, Header()] = None
-):
-    """初筛管理认证:JWT → resolve → permission_codes 含 resume:audit。"""
-    identity, _ = await _authenticate(request, authorization)
-    codes = identity.get("permission_codes") or []
-    if "resume:audit" not in codes:
-        raise HTTPException(status_code=403, detail="需要 resume:audit 权限")
-    return identity
-
-
-async def _require_evaluation_run(
-    request: Request, authorization: Annotated[str | None, Header()] = None
-):
-    """初筛执行权:与 resume:audit(查看权)解耦的独立权限码。
-
-    触发/重试 AI 初筛必须持 evaluation:run(后端 V46:仅超管与管理员
-    授予;面试官/普通审核员不持有);前端按钮显隐用同一权限码,双侧
-    拒绝语义一致。Backend 侧简历状态 6 写入同样验此码(服务账号)。"""
-    identity, _ = await _authenticate(request, authorization)
-    codes = identity.get("permission_codes") or []
-    if "evaluation:run" not in codes:
-        raise HTTPException(status_code=403, detail="需要 evaluation:run 权限")
-    return identity
+# 初筛执行权:与 resume:audit(查看权)解耦的独立权限码。触发/重试 AI 初筛
+# 必须持 evaluation:run(仅超管与管理员授予;面试官/普通审核员不持有);前端
+# 按钮显隐用同一权限码,双侧拒绝语义一致。Backend 侧简历状态 6 写入同样验
+# 此码(服务账号)。
+_require_evaluation_run = _require_any("evaluation:run")
 
 
 class RunBody(BaseModel):
@@ -118,19 +101,6 @@ async def retry_failed_jobs(
 
 
 # ── 预置题库(/admin/evaluation/qbank):面试官挑题面 ──
-
-
-def _require_any(*codes: str):
-    """任一权限码通过即放行(qbank 面:面试官 interview:evaluate / 评审 resume:audit)。"""
-
-    async def _dep(request: Request, authorization: Annotated[str | None, Header()] = None):
-        identity, _ = await _authenticate(request, authorization)
-        owned = identity.get("permission_codes") or []
-        if not any(c in owned for c in codes):
-            raise HTTPException(status_code=403, detail=f"需要 {' 或 '.join(codes)} 权限")
-        return identity
-
-    return _dep
 
 
 class PickBody(BaseModel):

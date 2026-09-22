@@ -7,7 +7,7 @@
 - 同 session_id 被不同 user 访问 → 403(属主)
 
 路由层不真连后端/模型/PG:
-- routes.resolve 被 monkeypatch(fake_resolve 返回 ResolvedIdentity)
+- web.auth.resolve 被 monkeypatch(fake_resolve 返回 ResolvedIdentity)
 - build_assistant_agent 被 monkeypatch(_FakeAgent 吐一条消息)
 - lifespan 的 get_checkpointer 被 monkeypatch 成假 saver(None)
 身份解析本身(_resolve_web→/auth/me)已在 test_identity.py 覆盖。
@@ -85,9 +85,9 @@ def _install_fakes(
         async def _resolve_sequential(*_a: object, **_k: object) -> dict:
             return next(responses)
 
-        monkeypatch.setattr(routes, "resolve", _resolve_sequential)
+        monkeypatch.setattr("official_agent.web.auth.resolve", _resolve_sequential)
     else:
-        monkeypatch.setattr(routes, "resolve", fake_resolve(auth_ok_data()))
+        monkeypatch.setattr("official_agent.web.auth.resolve", fake_resolve(auth_ok_data()))
     monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: _FakeAgent())
 
 
@@ -135,9 +135,8 @@ def test_chat_bad_token_returns_401(client: TestClient, monkeypatch: pytest.Monk
 
         raise BackendError("用户令牌无效或已过期,需用户重新登录后重试")
 
-    from official_agent.web import routes
 
-    monkeypatch.setattr(routes, "resolve", _fail)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _fail)
     resp = client.post(
         "/api/agent/chat", json={"message": "你好"}, headers={"Authorization": "Bearer bad"}
     )
@@ -503,7 +502,7 @@ def test_chat_error_path_logs_error_row(
 
     monkeypatch.setattr(routes, "_log_conversation", _fake_log)
     monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: _FailingAgent())
-    monkeypatch.setattr(routes, "resolve", fake_resolve(auth_ok_data()))
+    monkeypatch.setattr("official_agent.web.auth.resolve", fake_resolve(auth_ok_data()))
     with client.stream(
         "POST",
         "/api/agent/chat",
@@ -671,7 +670,7 @@ def _install_fake_agent(monkeypatch: pytest.MonkeyPatch, reply: str) -> list:
         async def aget_state(self, config: RunnableConfig):
             return None
 
-    monkeypatch.setattr(routes, "resolve", fake_resolve(auth_ok_data()))
+    monkeypatch.setattr("official_agent.web.auth.resolve", fake_resolve(auth_ok_data()))
     monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: _ScriptedAgent())
     return seen
 
@@ -684,7 +683,7 @@ def test_chat_toolless_reply_buffered_and_guarded(
     _install_fake_agent(monkeypatch, "查询结果:您有 3 份简历待筛选。")
     ident = auth_ok_data(role="unknown", role_names=["访客"])
     ident["permission_codes"] = []
-    monkeypatch.setattr("official_agent.web.routes.resolve", fake_resolve(ident))
+    monkeypatch.setattr("official_agent.web.auth.resolve", fake_resolve(ident))
     resp = client.post(
         "/api/agent/chat", json={"message": "有几份简历?"}, headers={"Authorization": "Bearer tok"}
     )
@@ -718,7 +717,7 @@ def test_chat_toolless_honest_reply_passes_through(
     _install_fake_agent(monkeypatch, "我没有查询权限,请联系管理员。")
     ident = auth_ok_data(role="unknown", role_names=["访客"])
     ident["permission_codes"] = []
-    monkeypatch.setattr("official_agent.web.routes.resolve", fake_resolve(ident))
+    monkeypatch.setattr("official_agent.web.auth.resolve", fake_resolve(ident))
     resp = client.post(
         "/api/agent/chat", json={"message": "在吗"}, headers={"Authorization": "Bearer tok"}
     )
@@ -751,7 +750,9 @@ def test_guard_rewrite_persists_to_checkpointer(
         async def aupdate_state(self, config: RunnableConfig, update: dict, **kwargs):
             seen_messages.extend(update["messages"])
 
-    monkeypatch.setattr(routes, "resolve", fake_resolve(auth_ok_data(role="unknown")))
+    monkeypatch.setattr(
+        "official_agent.web.auth.resolve", fake_resolve(auth_ok_data(role="unknown"))
+    )
     monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: _StatefulAgent())
     resp = client.post(
         "/api/agent/chat", json={"message": "有几份简历?"}, headers={"Authorization": "Bearer tok"}

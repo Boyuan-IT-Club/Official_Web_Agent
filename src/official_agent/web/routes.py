@@ -21,7 +21,7 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import AIMessageChunk, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
@@ -35,12 +35,14 @@ from official_agent.graphs.assistant.compression import (
     maybe_compress,
     summarize_messages,
 )
-from official_agent.graphs.identity import ResolvedIdentity, resolve
+from official_agent.graphs.identity import ResolvedIdentity
 from official_agent.observability import langfuse_callbacks
 from official_agent.security.pii import ReplyPiiMasker
 from official_agent.state.threads import create_thread, new_thread_id, resolve_thread
 from official_agent.tools.client import BackendError, BackendUnavailableError
 from official_agent.tools.readonly import asker_scope
+from official_agent.web.auth import authenticate as _authenticate
+from official_agent.web.auth import require_any as _require_any
 
 router = APIRouter()
 
@@ -124,28 +126,6 @@ def _evict_sessions_locked(now: float) -> None:
             break
         _sessions.pop(victim, None)
         _sessions_last_access.pop(victim, None)
-
-
-async def _authenticate(request: Request, authorization: Annotated[str | None, Header()] = None):
-    """Authorization: Bearer <官网JWT> → (身份, 官网JWT)。
-
-    官网 JWT 两用:① resolve 换身份(只查 /auth/me)② 原样绑定给工具
-    查本人数据(get_as_user 裸发)。JWT 只存会话态,不进 checkpointer。
-    """
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="缺少 Bearer token")
-    token = authorization.split(" ", 1)[1].strip()
-    if not token:
-        raise HTTPException(status_code=401, detail="Bearer token 为空")
-
-    try:
-        identity = await resolve({"kind": "web", "token": token})  # type: ignore[typeddict-item]
-    except BackendUnavailableError as exc:
-        # 后端网络/服务故障是 503(可重试),不与凭证错误混为 401
-        raise HTTPException(status_code=503, detail="认证服务暂时不可用,请稍后重试") from exc
-    except BackendError as exc:  # 凭证无效/过期等
-        raise HTTPException(status_code=401, detail="身份解析失败") from exc
-    return identity, token
 
 
 async def _get_or_create_session(
@@ -338,7 +318,6 @@ def _error_code(exc: Exception) -> str:
     """
     import httpx
 
-    from official_agent.tools.client import BackendUnavailableError
 
     text = str(exc)
     if any(h in text for h in _AUTH_FAIL_HINTS):
@@ -844,13 +823,8 @@ def _mask_secret(value: str) -> str:
     return value[-4:] if len(value) >= 4 else "****"
 
 
-async def _require_monitor(request: Request, authorization: Annotated[str | None, Header()] = None):
-    """管理 API 认证:官网 JWT → resolve → permission_codes 含 agent:monitor。"""
-    identity, _ = await _authenticate(request, authorization)
-    codes = identity.get("permission_codes") or []
-    if "agent:monitor" not in codes:
-        raise HTTPException(status_code=403, detail="需要 agent:monitor 权限")
-    return identity
+# 管理 API 认证:官网 JWT → resolve → permission_codes 含 agent:monitor
+_require_monitor = _require_any("agent:monitor")
 
 
 @router.get("/admin/config")

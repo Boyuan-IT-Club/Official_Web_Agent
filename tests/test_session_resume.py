@@ -84,7 +84,7 @@ def _install(monkeypatch: pytest.MonkeyPatch, *, thread: ThreadRecord | None, us
     async def _resolve(*_a: object, **_k: object) -> dict:
         return _identity(user_id)
 
-    monkeypatch.setattr(routes, "resolve", _resolve)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
     monkeypatch.setattr(
         routes,
         "resolve_thread",
@@ -453,13 +453,13 @@ def test_auth_backend_down_is_503_not_401(
     async def _bad_token(*_a: object, **_k: object):
         raise BackendError("用户令牌无效或已过期,需用户重新登录后重试")
 
-    monkeypatch.setattr(routes, "resolve", _down)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _down)
     resp = client.post(
         "/api/agent/chat", json={"message": "你好"}, headers={"Authorization": "Bearer tok"}
     )
     assert resp.status_code == 503
 
-    monkeypatch.setattr(routes, "resolve", _bad_token)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _bad_token)
     resp = client.post(
         "/api/agent/chat", json={"message": "你好"}, headers={"Authorization": "Bearer tok"}
     )
