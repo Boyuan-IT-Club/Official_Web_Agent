@@ -97,18 +97,20 @@ def _sse_events(resp) -> list[dict]:
 
 
 def test_error_code_classification() -> None:
-    """执行期异常 → 契约错误码。"""
+    """执行期异常 → 契约错误码;分类只看异常类型,不看异常文案。"""
     import httpx
 
-    from official_agent.tools.client import BackendError
+    from official_agent.tools.client import BackendAuthError, BackendError
     from official_agent.web.routes import _error_code
 
-    assert _error_code(BackendError("用户令牌无效或已过期,需用户重新登录后重试")) == "auth_expired"
-    assert _error_code(BackendError("token 无效")) == "auth_expired"
+    assert _error_code(
+        BackendAuthError("用户令牌无效或已过期,需用户重新登录后重试")
+    ) == "auth_expired"
+    # 普通业务错误(哪怕文案带 token 字样)不再被当成 auth 失效
+    assert _error_code(BackendError("token 无效")) == "invalid_request"
+    assert _error_code(BackendError("该周期未开放投递")) == "invalid_request"
     assert _error_code(httpx.ConnectError("refused")) == "backend_unavailable"
     assert _error_code(httpx.TimeoutException("slow")) == "backend_unavailable"
-    # 非 auth 的后端业务错误(如「未投递」)→ invalid_request
-    assert _error_code(BackendError("该周期未开放投递")) == "invalid_request"
     assert _error_code(RuntimeError("boom")) == "unknown"
 
 
@@ -131,9 +133,9 @@ def test_chat_bad_token_returns_401(client: TestClient, monkeypatch: pytest.Monk
     """身份解析失败(后端 /auth/me 拒/不可达)→ 401,不透出异常细节。"""
 
     async def _fail(*_a: object, **_k: object):
-        from official_agent.tools.client import BackendError
+        from official_agent.tools.client import BackendAuthError
 
-        raise BackendError("用户令牌无效或已过期,需用户重新登录后重试")
+        raise BackendAuthError("用户令牌无效或已过期,需用户重新登录后重试")
 
 
     monkeypatch.setattr("official_agent.web.auth.resolve", _fail)

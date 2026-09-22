@@ -445,13 +445,13 @@ def test_auth_backend_down_is_503_not_401(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """后端不可达 → 503;凭证无效仍 401——两类失败不再混淆。"""
-    from official_agent.tools.client import BackendError, BackendUnavailableError
+    from official_agent.tools.client import BackendAuthError, BackendUnavailableError
 
     async def _down(*_a: object, **_k: object):
         raise BackendUnavailableError("后端连接失败(ConnectError)")
 
     async def _bad_token(*_a: object, **_k: object):
-        raise BackendError("用户令牌无效或已过期,需用户重新登录后重试")
+        raise BackendAuthError("用户令牌无效或已过期,需用户重新登录后重试")
 
     monkeypatch.setattr("official_agent.web.auth.resolve", _down)
     resp = client.post(

@@ -222,8 +222,6 @@ _ERR_SAFE_COPY: dict[str, str] = {
     _ERR_UNKNOWN: "服务出现异常,请稍后重试",
 }
 
-# auth 失效的关键词(get_as_user 失败文案含之;message 判定的最后兜底)。
-_AUTH_FAIL_HINTS = ("令牌", "token", "登录", "JWT")
 # 单条消息长度上限(先收敛单请求滥用面;超限走 400 invalid_request,前端零改动)
 _MAX_MESSAGE_CHARS = 2000
 
@@ -253,17 +251,18 @@ def _sse_error(code: str) -> dict[str, str]:
 
 def _error_code(exc: Exception) -> str:
     """执行期异常 → 面向客户端的稳定错误码。分类原则:
-    - 用户令牌失效(get_as_user 文案)或明确登录/token 问题 → auth_expired
+    - BackendAuthError(用户令牌/服务账号凭证失效)→ auth_expired
     - BackendUnavailableError(网络/传输故障)→ backend_unavailable
     - httpx 传输/超时 → backend_unavailable(后端不可达/网关错)
     - 其余 BackendError(业务错误)按其文案;未知 → unknown
     观测/模型错误由 LangGraph 包装,不易精确识别,归 unknown(前端可重试)。
+    分类只看异常类型,不看文案——后端文案一改,子串匹配的分类立刻失效。
     """
     import httpx
 
+    from official_agent.tools.client import BackendAuthError
 
-    text = str(exc)
-    if any(h in text for h in _AUTH_FAIL_HINTS):
+    if isinstance(exc, BackendAuthError):
         return _ERR_AUTH_EXPIRED
     if isinstance(exc, (httpx.HTTPError, BackendUnavailableError)):
         return _ERR_BACKEND_UNAVAILABLE
