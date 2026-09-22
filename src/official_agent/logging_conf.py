@@ -15,10 +15,22 @@ import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+# trace_id 由 TraceIdFilter 注入(observability.current_trace_id,永非空):
+# 一次请求从 web 入口到 tools/state 的所有日志共享同一 id,按 id 串成一条线。
+_FORMAT = "%(asctime)s %(levelname)s %(name)s [%(trace_id)s] %(message)s"
 _LOG_FILENAME = "official-agent.log"
 _MAX_BYTES = 10 * 1024 * 1024  # 10MB
 _BACKUP_COUNT = 5
+
+
+class TraceIdFilter(logging.Filter):
+    """给每条日志记录注入当前 trace id(排障串联键;详见 observability)。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        from official_agent.observability import current_trace_id
+
+        record.trace_id = current_trace_id()
+        return True
 
 
 def setup_logging(log_dir: Path | None = None, level: str = "INFO") -> None:
@@ -31,14 +43,16 @@ def setup_logging(log_dir: Path | None = None, level: str = "INFO") -> None:
     """
     root = logging.getLogger()
     # 幂等:已加过我们标记的 file handler 则不重复加
-    if any(getattr(h, "_m6_official_agent", False) for h in root.handlers):
+    if any(getattr(h, "_official_agent_handler", False) for h in root.handlers):
         return
 
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
     formatter = logging.Formatter(_FORMAT)
+    trace_filter = TraceIdFilter()
 
     stream = logging.StreamHandler()
     stream.setFormatter(formatter)
+    stream.addFilter(trace_filter)
     root.addHandler(stream)
 
     if log_dir is None:
@@ -54,7 +68,8 @@ def setup_logging(log_dir: Path | None = None, level: str = "INFO") -> None:
     )
     file_handler.setFormatter(formatter)
     # 标记:幂等检查用(见上方 guard),避免误伤应用加的 RotatingFileHandler
-    file_handler._m6_official_agent = True  # type: ignore[attr-defined]
+    file_handler._official_agent_handler = True  # type: ignore[attr-defined]
+    file_handler.addFilter(trace_filter)
     # 权限收紧:日志文件 0600(默认 umask 可能 0644)
     with contextlib.suppress(OSError):
         (log_dir / _LOG_FILENAME).chmod(0o600)

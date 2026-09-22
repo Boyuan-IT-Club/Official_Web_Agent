@@ -18,7 +18,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from official_agent.config import get_settings
@@ -150,6 +150,31 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def _request_trace_id(request: Request, call_next):
+        """入口置请求级 trace id,响应头 X-Request-Id 回传。
+
+        入站 X-Request-Id 优先(上游/网关串联),否则随机;值统一归一为
+        W3C 32-hex,此后日志(TraceIdFilter)、出站后端请求 traceparent、
+        审计 trace_id 共用同一 id——一次请求全线可按 id 串成一条线。
+        """
+        import secrets
+
+        from official_agent.observability import (
+            reset_turn_trace_id,
+            set_turn_trace_id,
+            to_w3c_trace_id,
+        )
+
+        rid = to_w3c_trace_id(request.headers.get("x-request-id") or secrets.token_hex(16))
+        token = set_turn_trace_id(rid)
+        try:
+            response = await call_next(request)
+        finally:
+            reset_turn_trace_id(token)
+        response.headers["X-Request-Id"] = rid
+        return response
 
     from official_agent.web import routes
     from official_agent.web.config_admin import router as config_admin_router
