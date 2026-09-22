@@ -52,6 +52,8 @@ def _point_settings_at_pg(monkeypatch: pytest.MonkeyPatch) -> None:
 
     settings = get_settings()
     monkeypatch.setattr(settings, "postgres_url", PG_URL)
+    # 池按 postgres_url 懒建;patch 后重建,保证池连接指向本测试的库
+    ev_store.reset_pool()
 
 
 def _cleanup(cycle_id: int) -> None:
@@ -322,6 +324,7 @@ def test_data_path_takes_no_ddl_lock(table: str, cycle_id: int, monkeypatch) -> 
     from official_agent.config import get_settings
 
     monkeypatch.setattr(get_settings(), "postgres_url", PG_URL_WITH_LOCK_TIMEOUT)
+    ev_store.reset_pool()
     holder = _hold_row_exclusive(table)
     try:
         # 未提交的 LOCK 一直持有;以下调用必须在 2s 内返回而不是 lock timeout
@@ -342,7 +345,9 @@ def test_create_jobs_commits_per_item(cycle_id: int, monkeypatch) -> None:
     期间 worker 的 mark_job 和管理面的 job 列表全被挡住。
     """
     _cleanup(cycle_id)
-    real_find = ev_store._find_active_job
+    from official_agent.state.evaluation import job_store
+
+    real_find = job_store._find_active_job
     seen: list[int] = []
 
     def _boom_on_third(conn, resume_id, cycle, *a, **kw):
@@ -351,7 +356,7 @@ def test_create_jobs_commits_per_item(cycle_id: int, monkeypatch) -> None:
             raise psycopg.OperationalError("模拟第 3 条失败")
         return real_find(conn, resume_id, cycle, *a, **kw)
 
-    monkeypatch.setattr(ev_store, "_find_active_job", _boom_on_third)
+    monkeypatch.setattr(job_store, "_find_active_job", _boom_on_third)
     try:
         with pytest.raises(psycopg.OperationalError):
             ev_store.create_jobs([(9101, 601), (9102, 602), (9103, 603)], cycle_id)

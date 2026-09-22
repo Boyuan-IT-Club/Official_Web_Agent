@@ -94,7 +94,9 @@ def test_queue_zero_filter_queries_hard_zero(
 
             return _Cur()
 
-    monkeypatch.setattr(ea.evaluation, "_conn", lambda: _Conn())
+    monkeypatch.setattr(
+        "official_agent.state.evaluation._connection._conn", lambda: _Conn()
+    )
     resp = client.get("/api/agent/admin/evaluation/queue?cycle_id=2026&queue=zero", headers=_AUTH)
     assert resp.status_code == 200
     # 内层 cycle + user_id 归属 + 历史决策标记,三处都按周期限定;末尾是分页
