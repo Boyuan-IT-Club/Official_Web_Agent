@@ -218,7 +218,7 @@ async def _get_or_create_session(
                 identity, user_token=user_token, checkpointer=checkpointer
             )
             session = _SessionState(session_id, identity, user_token, agent)
-            session.applied_config_fingerprint = _config_fingerprint()
+            session.applied_config_fingerprint = await asyncio.to_thread(_config_fingerprint)
             _sessions[session_id] = session
             _sessions_last_access[session_id] = now
             _evict_sessions_locked(now)
@@ -227,7 +227,9 @@ async def _get_or_create_session(
         # thread_id:建档优先;PG 不可用降级随机 thread_id(保隔离,不持久化)
         try:
             if user_id is not None:
-                session_id = create_thread("web", user_id, subject="web-chat").thread_id
+                # psycopg 是同步驱动,建档不能在事件循环上直跑(此处还持 _sessions_lock)
+                rec = await asyncio.to_thread(create_thread, "web", user_id, subject="web-chat")
+                session_id = rec.thread_id
             else:
                 session_id = new_thread_id("web", 0)
         except Exception:  # noqa: BLE001 — 建档失败不阻断对话(与 CLI 同语义)
@@ -238,7 +240,7 @@ async def _get_or_create_session(
         agent = build_assistant_agent(identity, user_token=user_token, checkpointer=checkpointer)
         session = _SessionState(session_id, identity, user_token, agent)
         # 新建即记录当前配置指纹,避免首轮 _ensure_fresh_agent_config 误重建
-        session.applied_config_fingerprint = _config_fingerprint()
+        session.applied_config_fingerprint = await asyncio.to_thread(_config_fingerprint)
         _sessions[session_id] = session
         _sessions_last_access[session_id] = now
         _evict_sessions_locked(now)
@@ -308,14 +310,15 @@ _MAX_MESSAGE_CHARS = 2000
 _model_gate: asyncio.Semaphore | None = None
 
 
-def _get_model_gate() -> asyncio.Semaphore:
+async def _get_model_gate() -> asyncio.Semaphore:
     global _model_gate
     if _model_gate is None:
         from official_agent.config import get_effective_settings
 
-        _model_gate = asyncio.Semaphore(
-            max(int(get_effective_settings().model_call_global_concurrency), 1)
-        )
+        # get_effective_settings 每次直连 PG 读 agent_config(无缓存),不能占事件循环;
+        # 闸建好后进程内复用,不再触库
+        settings = await asyncio.to_thread(get_effective_settings)
+        _model_gate = asyncio.Semaphore(max(int(settings.model_call_global_concurrency), 1))
     return _model_gate
 
 
@@ -358,15 +361,16 @@ def _config_fingerprint() -> str:
     return repr(tuple((k, getattr(settings, k, None)) for k in sorted(HOT_KEYS)))
 
 
-def _ensure_fresh_agent_config(session: _SessionState, checkpointer: Any) -> None:
+async def _ensure_fresh_agent_config(session: _SessionState, checkpointer: Any) -> None:
     """配置热生效:比对配置指纹,变了则重建 session 的 agent。
 
     PUT /admin/config 只失效 get_settings 缓存;活跃会话的 agent 是进程内
     复用的(见模块 docstring),不重建就一直用旧 model/provider。此处每轮
     比对指纹,发现变化即用新配置重建 agent(身份/token 不变)。
+    指纹读取走线程池:get_effective_settings 每次直连 PG,不能占事件循环。
     """
     try:
-        current = _config_fingerprint()
+        current = await asyncio.to_thread(_config_fingerprint)
     except Exception:  # noqa: BLE001 — PG 不可用 → 指纹取 env(不重建)
         return
     if session.applied_config_fingerprint == current:
@@ -403,7 +407,7 @@ async def _compress_if_needed(session: _SessionState, config: dict, user_query: 
         messages = (getattr(state, "values", None) or {}).get("messages") or []
         if not messages:
             return None
-        settings = get_effective_settings()
+        settings = await asyncio.to_thread(get_effective_settings)
         # 摘要用 strong 模型(ADR-0004「压缩即理解」,降 light 须 eval 证明);
         # 温度 0 + 输出预算 = reasoning-safe
         summarizer = build_model(settings).bind(temperature=0, max_tokens=SUMMARY_MAX_TOKENS)
@@ -455,7 +459,7 @@ async def _stream_turn(
     await session.turn_lock.acquire()
     try:
         # 配置热生效:配置指纹变了 → 重建 agent(新 model/provider 立即作用于本轮)
-        _ensure_fresh_agent_config(session, checkpointer)
+        await _ensure_fresh_agent_config(session, checkpointer)
         # 轮计数(1 起),压缩事件「触发轮」留痕用
         session.turns += 1
 
@@ -506,9 +510,9 @@ async def _stream_turn(
             # 卡死的模型/工具调用在配置时限内被取消,turn_lock 随 with 释放。
             from official_agent.config import get_effective_settings
 
-            _settings = get_effective_settings()
+            _settings = await asyncio.to_thread(get_effective_settings)
             config["recursion_limit"] = max(int(_settings.turn_recursion_limit), 1)
-            gate = _get_model_gate()
+            gate = await _get_model_gate()
             try:
                 gate_acquired = False
                 try:
@@ -730,6 +734,11 @@ async def _rewrite_last_ai_message(agent: Any, config: dict, final_reply: str) -
         logging.getLogger(__name__).warning("编造守卫回写 checkpointer 失败(已忽略)", exc_info=True)
 
 
+# fire-and-forget 观测写入任务的强引用集:事件循环只持弱引用,不留在集里的
+# 任务可能在完成前被 GC 中途取消(asyncio 官方文档明确告诫);完成后经回调出集。
+_background_tasks: set[asyncio.Task[None]] = set()
+
+
 def _log_conversation(
     session: _SessionState,
     *,
@@ -746,13 +755,15 @@ def _log_conversation(
 
     lazy import:web 入口不顶层依赖 psycopg(无 PG 环境可跑服务,
     观测侧不给主链路加硬依赖,同 app.py lifespan 先例)。
-    fire-and-forget:写入放后台任务,不阻塞 SSE 流尾(ADR-0005 fail-open)。
+    fire-and-forget:psycopg 是同步驱动,写入经 to_thread 进线程池,
+    不占事件循环、不阻塞 SSE 流尾(ADR-0005 fail-open)。
     """
     from official_agent.state.conversation import write_conversation
 
     async def _write() -> None:
         try:
-            write_conversation(
+            await asyncio.to_thread(
+                write_conversation,
                 thread_id=session.session_id,
                 user_id=session.identity.get("user_id"),
                 channel=session.identity.get("source") or "web",
@@ -768,7 +779,9 @@ def _log_conversation(
         except Exception:  # noqa: BLE001 — 观测写入失败不拖垮对话(ADR-0005)
             logger.warning("conversation_log 写入失败(已忽略)", exc_info=True)
 
-    asyncio.create_task(_write())
+    task = asyncio.create_task(_write())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 def _elapsed_ms(started: float) -> int:
@@ -851,7 +864,7 @@ async def get_admin_config(
 
     settings = get_settings()
     try:
-        db_overrides = get_all_config()
+        db_overrides = await asyncio.to_thread(get_all_config)
     except Exception:  # noqa: BLE001 — PG 不可用 → 只显示 env(fail-open)
         db_overrides = {}
 
@@ -907,7 +920,7 @@ async def put_admin_config(
             raise HTTPException(status_code=400, detail=f"{key} 值不能为空")
         if key == "llm_base_url":
             _validate_base_url(value)
-        set_config(key, value)
+        await asyncio.to_thread(set_config, key, value)
     # 全部键成功写库后才失效缓存(避免部分写 + 缓存未刷的分离)
     invalidate_settings_cache()
     return {"updated": list(body.keys())}
@@ -967,7 +980,9 @@ async def get_admin_conversations(
         offset = max(0, int(offset_raw))
     except ValueError:
         raise HTTPException(status_code=400, detail="user_id/limit/offset 必须为整数") from None
-    items = list_conversations(user_id=user_id, thread_id=thread_id, limit=limit, offset=offset)
+    items = await asyncio.to_thread(
+        list_conversations, user_id=user_id, thread_id=thread_id, limit=limit, offset=offset
+    )
     return {"items": items, "limit": limit, "offset": offset}
 
 
@@ -977,7 +992,7 @@ async def get_admin_conversation_detail(
     _: Annotated[ResolvedIdentity, Depends(_require_monitor)],
 ) -> dict[str, Any]:
     """对话详情:轮次/工具/耗时/错误码 + 可展开回复摘要。"""
-    row = get_conversation(conversation_id)
+    row = await asyncio.to_thread(get_conversation, conversation_id)
     if row is None:
         raise HTTPException(status_code=404, detail="会话不存在")
     return row
@@ -1041,8 +1056,10 @@ async def list_my_sessions(
 
     identity, _ = auth
     user_id = identity.get("user_id")
-    threads = list_active_threads(user_id) if user_id is not None else []
-    overview = session_overview([t.thread_id for t in threads])
+    threads = (
+        await asyncio.to_thread(list_active_threads, user_id) if user_id is not None else []
+    )
+    overview = await asyncio.to_thread(session_overview, [t.thread_id for t in threads])
     items = [
         {
             "thread_id": t.thread_id,
@@ -1073,7 +1090,7 @@ async def get_my_session_messages(
 
     identity, _ = auth
     user_id = identity.get("user_id")
-    if user_id is None or resolve_thread(thread_id, user_id) is None:
+    if user_id is None or await asyncio.to_thread(resolve_thread, thread_id, user_id) is None:
         raise HTTPException(status_code=404, detail="会话不存在")
     messages = await _fetch_transcript(request, thread_id)
     return {"thread_id": thread_id, "messages": messages}
@@ -1097,7 +1114,7 @@ async def delete_my_session(
 
     identity, _ = auth
     user_id = identity.get("user_id")
-    if user_id is None or resolve_thread(thread_id, user_id) is None:
+    if user_id is None or await asyncio.to_thread(resolve_thread, thread_id, user_id) is None:
         raise HTTPException(status_code=404, detail="会话不存在")
     # 整段删除持"_deleting_sessions"登记——check 与清理之间不再有窗口。
     # 只在持锁时登记,顺带确认没有在途轮次(在途 generator 会复活已清数据)。
@@ -1149,8 +1166,8 @@ async def get_admin_sessions(
         user_id = int(user_id_raw) if user_id_raw else None
     except ValueError:
         raise HTTPException(status_code=400, detail="user_id 必须为整数") from None
-    threads = list_active_threads(user_id)
-    overview = session_overview([t.thread_id for t in threads])
+    threads = await asyncio.to_thread(list_active_threads, user_id)
+    overview = await asyncio.to_thread(session_overview, [t.thread_id for t in threads])
     items = [
         {
             "thread_id": t.thread_id,
@@ -1182,7 +1199,7 @@ async def get_admin_session_messages(
     from official_agent.state.audit import write_audit
     from official_agent.state.threads import get_thread
 
-    rec = get_thread(thread_id)
+    rec = await asyncio.to_thread(get_thread, thread_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="会话不存在")
     try:

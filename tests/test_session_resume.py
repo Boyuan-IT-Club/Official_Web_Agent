@@ -418,7 +418,11 @@ def test_model_gate_saturation_returns_busy(
     from official_agent.config import get_settings
 
     monkeypatch.setattr(get_settings(), "model_gate_acquire_timeout", 1)
-    monkeypatch.setattr(routes, "_get_model_gate", lambda: _FullGate())
+
+    async def _full_gate() -> _FullGate:
+        return _FullGate()
+
+    monkeypatch.setattr(routes, "_get_model_gate", _full_gate)
     monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: _FakeGateAgent())
     resp = client.post(
         "/api/agent/chat",
@@ -573,7 +577,10 @@ def test_gate_busy_logs_conversation_and_emits_one_error(
         def release(self) -> None:  # pragma: no cover — 未获取则不释放
             raise AssertionError("未获取的闸不得 release")
 
-    monkeypatch.setattr(routes, "_get_model_gate", lambda: _Saturated())
+    async def _saturated_gate() -> _Saturated:
+        return _Saturated()
+
+    monkeypatch.setattr(routes, "_get_model_gate", _saturated_gate)
 
     resp = client.post(
         "/api/agent/chat",
