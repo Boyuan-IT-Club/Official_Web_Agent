@@ -912,3 +912,144 @@ def test_chat_thread_creation_failure_degrades_and_logs(
         events = _sse_events(resp)
     assert any(e.get("type") == "session" for e in events), "降级后仍要正常开轮"
     assert any("会话建档失败" in r.message for r in caplog.records), "降级必须留痕"
+
+
+def test_chat_full_event_sequence_ordering(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """规范序列(Batch 2 安全网):session → tool → 流式 delta… → sources → done。
+
+    断言三件事:事件类型严格有序;正文跨掩码尾缓冲拼接后完整不丢字;
+    sources delta 紧贴 done 且 content 为空。不钉掩码切点(_TAIL 属实现细节)。
+    """
+
+    class _SeqAgent:
+        async def astream(self, *_a: object, config=None, **_k: object):
+            yield (
+                "updates",
+                {
+                    "agent": {
+                        "messages": [
+                            AIMessage(
+                                content="",
+                                tool_calls=[
+                                    {"name": "get_my_interview", "args": {}, "id": "c1"}
+                                ],
+                            )
+                        ]
+                    }
+                },
+            )
+            yield "messages", (AIMessageChunk(content="a" * 40), {})
+            yield "messages", (AIMessageChunk(content="b" * 40), {})
+            yield (
+                "updates",
+                {
+                    "agent": {
+                        "messages": [
+                            ToolMessage(
+                                content='{"results": [{"source_id": "kb_1", "title": "周期"}]}',
+                                name="search_knowledge",
+                                tool_call_id="c1",
+                            )
+                        ]
+                    }
+                },
+            )
+            yield "messages", (
+                AIMessageChunk(
+                    content="",
+                    usage_metadata={
+                        "input_tokens": 1,
+                        "output_tokens": 1,
+                        "total_tokens": 2,
+                    },
+                ),
+                {},
+            )
+
+        async def aget_state(self, config):
+            return None
+
+    from official_agent.web import routes
+
+    _install_fakes(monkeypatch)
+    monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: _SeqAgent())
+    with client.stream(
+        "POST",
+        "/api/agent/chat",
+        json={"message": "我的面试安排"},
+        headers={"Authorization": "Bearer tok"},
+    ) as resp:
+        assert resp.status_code == 200
+        events = _sse_events(resp)
+
+    assert [e["type"] for e in events] == [
+        "session",
+        "tool",
+        "delta",
+        "delta",
+        "delta",
+        "delta",
+        "done",
+    ]
+    assert events[0]["created"] is True
+    assert events[1] == {"type": "tool", "role": "tool", "name": "get_my_interview"}
+    body = "".join(e["content"] for e in events if e["type"] == "delta")
+    assert "a" * 40 in body and "b" * 40 in body, "掩码尾缓冲不得丢字"
+    sources_event = events[-2]
+    assert sources_event["content"] == ""
+    assert sources_event["sources"] == [{"source_id": "kb_1", "title": "周期"}]
+    assert events[-1] == {"type": "done", "session_id": events[0]["session_id"]}
+
+
+def test_session_full_lifecycle_create_resume_delete(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """全生命周期:新建(created=True)→ 续传(False)→ 删除 204 → 原 id 续聊 404。"""
+    import official_agent.state.conversation as conv
+    import official_agent.state.pg as pg_mod
+    from official_agent.state import threads as thread_store
+    from official_agent.web import routes
+
+    _install_fakes(monkeypatch)
+
+    def _post(message: str, session_id: str | None = None) -> list[dict]:
+        payload: dict = {"message": message}
+        if session_id:
+            payload["session_id"] = session_id
+        with client.stream(
+            "POST",
+            "/api/agent/chat",
+            json=payload,
+            headers={"Authorization": "Bearer tok"},
+        ) as resp:
+            assert resp.status_code == 200
+            return _sse_events(resp)
+
+    ev1 = _post("第一轮")
+    sid = ev1[-1]["session_id"]
+    assert ev1[0] == {"type": "session", "session_id": sid, "created": True}
+
+    ev2 = _post("第二轮", sid)
+    assert ev2[0] == {"type": "session", "session_id": sid, "created": False}
+
+    # 删除三面清理替身(delete 路径的 store 函数是 lazy import,打在源模块)
+    rec = type("Rec", (), {"thread_id": sid, "owner_user_id": 7, "status": "active"})()
+    monkeypatch.setattr(
+        thread_store, "resolve_thread", lambda tid, uid: rec if tid == sid else None
+    )
+    monkeypatch.setattr(pg_mod, "purge_thread_checkpoints", lambda tid: 3)
+    monkeypatch.setattr(conv, "delete_thread_conversations", lambda tid: 5)
+    monkeypatch.setattr(thread_store, "hard_delete_thread", lambda tid, *, owner_user_id: True)
+    resp = client.delete(f"/api/agent/sessions/{sid}", headers={"Authorization": "Bearer tok"})
+    assert resp.status_code == 204
+
+    # 删除后原 id 续聊:恢复路径档案校验不过 → 404(绝不复活已删会话)
+    monkeypatch.setattr(routes, "resolve_thread", lambda tid, uid: None)
+    resp = client.post(
+        "/api/agent/chat",
+        json={"message": "再聊", "session_id": sid},
+        headers={"Authorization": "Bearer tok"},
+    )
+    assert resp.status_code == 404
