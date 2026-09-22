@@ -18,6 +18,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -317,25 +318,152 @@ async def _compress_if_needed(
         return None
 
 
+def _sse(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+@dataclass
+class _TurnAccum:
+    """单轮流式消费的就地累计状态(回复块/工具/引用锚/跨步 usage 求和)。"""
+
+    reply_chunks: list[str] = field(default_factory=list)
+    tools_called: list[str] = field(default_factory=list)
+    sources: list[dict[str, str]] = field(default_factory=list)
+    seen_sources: set[str] = field(default_factory=set)
+    usage: dict[str, int | None] = field(
+        default_factory=lambda: dict.fromkeys(
+            ("input_tokens", "output_tokens", "cache_hit_tokens", "cache_miss_tokens"), 0
+        )
+    )
+
+
+def _feed_text_chunk(
+    chunk: AIMessageChunk, acc: _TurnAccum, masker: ReplyPiiMasker | None
+) -> str | None:
+    """文本块入回复累计,返回掩码后可下发片段(无文本/无增量 → None)。"""
+    text = chunk.content if isinstance(chunk.content, str) else ""
+    if not text:
+        return None
+    acc.reply_chunks.append(text)
+    if masker is None:
+        return None
+    return masker.feed(text)
+
+
+def _accumulate_usage(
+    chunk: Any,
+    usage_acc: dict[str, int | None],
+    last_usage: dict[str, int | None] | None,
+) -> dict[str, int | None] | None:
+    """usage 终块并入跨步累计;返回新的 last_usage。
+
+    同值跳过:流式下同一累计值会在多个 chunk 上重复出现,不去重就重复求和。
+    raw token_usage 优先(prompt_cache 字段只在原始形状)。
+    """
+    um = getattr(chunk, "usage_metadata", None)
+    raw_usage = (getattr(chunk, "response_metadata", None) or {}).get("token_usage")
+    usage_payload = raw_usage if raw_usage else um
+    if um is None or not usage_payload:
+        return last_usage
+    extracted = telemetry.extract_usage(usage_payload)
+    if extracted == last_usage:
+        return last_usage
+    for k, v in extracted.items():
+        if v is not None:
+            usage_acc[k] = (usage_acc.get(k) or 0) + v
+    return extracted
+
+
+def _drain_updates(payload: Any, acc: _TurnAccum) -> list[dict[str, Any]]:
+    """updates 模式:收集 tool 事件载荷与 search_knowledge 引用锚。"""
+    events: list[dict[str, Any]] = []
+    for _ns, node_update in payload.items():
+        if not isinstance(node_update, dict):
+            continue
+        for m in node_update.get("messages") or []:
+            # 工具调用状态(tool 事件,role=tool)
+            for tc in getattr(m, "tool_calls", None) or ():
+                acc.tools_called.append(tc.get("name") or "")
+                events.append({"type": "tool", "role": "tool", "name": tc.get("name")})
+            # search_knowledge 的结果收集为引用锚(轮末随 delta.sources 下发)
+            if isinstance(m, ToolMessage) and getattr(m, "name", "") == "search_knowledge":
+                telemetry.collect_sources(m, acc.sources, acc.seen_sources)
+    return events
+
+
+async def _consume_model_stream(
+    agent: Any,
+    messages: list,
+    config: dict,
+    *,
+    masker: ReplyPiiMasker | None,
+    acc: _TurnAccum,
+) -> AsyncIterator[str]:
+    """消费 astream 双模式流:吐 SSE 事件,就地更新 acc(回复/工具/引用/usage)。"""
+    last_usage: dict[str, int | None] | None = None
+    async for mode, payload in agent.astream(
+        {"messages": messages}, config=config, stream_mode=["messages", "updates"]
+    ):
+        if mode == "messages":
+            chunk, _meta = payload
+            if isinstance(chunk, AIMessageChunk):
+                out = _feed_text_chunk(chunk, acc, masker)
+                if out:
+                    yield _sse({"type": "delta", "role": "assistant", "content": out})
+            last_usage = _accumulate_usage(chunk, acc.usage, last_usage)
+        elif mode == "updates":
+            for event in _drain_updates(payload, acc):
+                yield _sse(event)
+
+
+async def _toolless_guarded_reply(
+    agent: Any, config: dict, reply_chunks: list[str]
+) -> AsyncIterator[str]:
+    """无工具档:整段回复过编造守卫后一次性下发(缓冲直播)。
+
+    守卫在一切持久化之前——直播、conversation_log、checkpointer 三面同用
+    改写文本;压缩必须排在其后,否则编造原文会被压进摘要。
+    """
+    from official_agent.security.fabrication_guard import guard_empty_tools_reply
+    from official_agent.security.pii import mask_pii_output
+
+    final_reply, verdict = guard_empty_tools_reply("".join(reply_chunks))
+    # toolless 回复出口同过 PII 掩(与 cli 对称;掩后文本进回写)
+    final_reply, _pii_trace = mask_pii_output(final_reply)
+    if verdict != "clean":
+        logging.getLogger(__name__).warning(
+            "guard_event guard_name=%s verdict=%s tool=<(empty)>",
+            "fabrication_empty_tools",
+            verdict,
+        )
+        reply_chunks[:] = [final_reply]
+        await _rewrite_last_ai_message(agent, config, final_reply)
+    if final_reply:
+        yield _sse({"type": "delta", "role": "assistant", "content": final_reply})
+
+
+def _usage_out(usage_acc: dict[str, int | None]) -> dict[str, int | None]:
+    """全零(无 usage 数据)→ 全 None 形状(落账列语义:未采到 ≠ 0)。"""
+    if any(usage_acc.values()):
+        return usage_acc
+    return {k: None for k in usage_acc}
+
+
 async def _stream_turn(
     session: session_store.SessionState, message: str, is_new: bool, checkpointer: Any = None
 ) -> AsyncIterator[str]:
     """跑一轮:流式吐 SSE。is_new 仅作 SSE session 事件的 created 标记。
 
-    每轮结束在 conversation_log 落一行:
-    - 正常:user_message(问题原文) + reply_summary(回复摘要非全文) + tools/耗时
-    - 异常(error 事件):只存 error_code + 耗时,不存对话内容
+    编排序:锁 → 热生效 → session 事件 → 受闸流消费 → 守卫/尾冲 → 压缩 →
+    落账 → sources/done(或 error)。每轮结束在 conversation_log 落一行:
+    正常存问题原文+回复摘要+tools/耗时;异常只存 error_code+耗时,不存内容。
     落行失败(fail-open)不阻断对话——观测绝不拖垮主流程(ADR-0005)。
-    checkpointer:配置变更后重建 agent 需要(见 web/agent_factory)。
     """
-
-    def sse(payload: dict[str, Any]) -> str:
-        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     # 同会话并发轮次串行化——锁被占用时立即回 busy,
     # 不排队(前端提示「上一条还在回复中」);check/acquire 间无 await,原子。
     if session.turn_lock.locked():
-        yield sse({"type": "error", "code": _ERR_BUSY, "message": "上一条消息还在回复中,请稍候"})
+        yield _sse({"type": "error", "code": _ERR_BUSY, "message": "上一条消息还在回复中,请稍候"})
         return
     await session.turn_lock.acquire()
     try:
@@ -365,27 +493,15 @@ async def _stream_turn(
         messages: list = [HumanMessage(content=message)]
 
         # 首事件 session(带 created 标记新/续传)
-        yield sse({"type": "session", "session_id": session.session_id, "created": is_new})
+        yield _sse({"type": "session", "session_id": session.session_id, "created": is_new})
 
         started = time.monotonic()
-        tools_called: list[str] = []
-        reply_chunks: list[str] = []
+        acc = _TurnAccum()
         # 无工具档缓冲整段回复,流尾过编造守卫后一次性下发
         toolless = not tool_roster(session.identity)
         # 流式 delta 逐块过 PII 掩码器(尾部缓冲抗跨块)
-        pii_masker = None if toolless else ReplyPiiMasker()
+        masker = None if toolless else ReplyPiiMasker()
         error_code: str | None = None
-        # 本轮 KB 引用锚——search_knowledge 结果按序去重,
-        # 轮末随 delta.sources 下发(前端 [n] → source_id+title 映射)
-        sources: list[dict[str, str]] = []
-        _seen_sources: set[str] = set()
-        usage_acc: dict[str, int | None] = {  # 跨 model 步累计(ReAct 多步求和)
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cache_hit_tokens": 0,
-            "cache_miss_tokens": 0,
-        }
-        _last_usage: dict[str, int | None] | None = None
         # 只读查询以来问者本人 JWT 执行(ADR-0006「社团官网层问答助手」):
         # 本轮内 readonly 查询经 _read 走 get_as_user,后端按本人权限判+归因
         async with asker_scope(session.user_token):
@@ -405,10 +521,9 @@ async def _stream_turn(
                     )
                     gate_acquired = True
                 except TimeoutError:
-                    # 闸满不提前 return——闸满也是「一轮失败」，
-                    # 必须走下方统一落账路径，否则资源饱和事件从
-                    # conversation_log 消失(收尾点唯一:正常/错误/超时/
-                    # gate-busy/断连五条路径都落一行)。
+                    # 闸满不提前 return——闸满也是「一轮失败」,必须走统一落账
+                    # 路径,否则资源饱和事件从 conversation_log 消失(收尾点
+                    # 唯一:正常/错误/超时/gate-busy/断连五条路径都落一行)。
                     error_code = _ERR_BUSY
                     logger.warning(
                         "chat turn gate busy session=%s turns=%d concurrency=%d",
@@ -418,65 +533,10 @@ async def _stream_turn(
                     )
                 else:
                     async with asyncio.timeout(max(int(_settings.turn_wall_clock_timeout), 1)):
-                        async for mode, payload in session.agent.astream(  # type: ignore[attr-defined]
-                            {"messages": messages},
-                            config=config,
-                            stream_mode=["messages", "updates"],
+                        async for event in _consume_model_stream(
+                            session.agent, messages, config, masker=masker, acc=acc
                         ):
-                            if mode == "messages":
-                                chunk, _meta = payload
-                                if isinstance(chunk, AIMessageChunk) and chunk.content:
-                                    # 只收文本块;多模态 content(list)跳过文本拼接(回复摘要仅文本)
-                                    text = chunk.content if isinstance(chunk.content, str) else ""
-                                    if text:
-                                        reply_chunks.append(text)
-                                        if pii_masker:
-                                            out = pii_masker.feed(text)
-                                            if out:
-                                                yield sse(
-                                                    {
-                                                        "type": "delta",
-                                                        "role": "assistant",
-                                                        "content": out,
-                                                    }
-                                                )
-                                # usage:只在 usage 终块累计,同值去重防重复计数。
-                                # 两种形状二选一(langchain-openai 1.x 流式 raw
-                                # token_usage 已消失,只剩 usage_metadata;DeepSeek 原始形状
-                                # 保留兼容)。raw 优先(prompt_cache 字段只在原始)。
-                                um = getattr(chunk, "usage_metadata", None)
-                                raw_usage = (chunk.response_metadata or {}).get("token_usage")
-                                usage_payload = raw_usage if raw_usage else um
-                                if um is not None and usage_payload:
-                                    extracted = telemetry.extract_usage(usage_payload)
-                                    if extracted != _last_usage:  # 同值跳过(跨 chunk 累计值重复)
-                                        _last_usage = extracted
-                                        for k in usage_acc:
-                                            v = extracted.get(k)
-                                            cur = usage_acc.get(k) or 0
-                                            if v is not None:
-                                                usage_acc[k] = cur + v
-                            elif mode == "updates":
-                                for _ns, node_update in payload.items():
-                                    if isinstance(node_update, dict):
-                                        for m in node_update.get("messages") or []:
-                                            # 工具调用状态(tool 事件,role=tool)
-                                            if getattr(m, "tool_calls", None):
-                                                for tc in m.tool_calls:
-                                                    tools_called.append(tc.get("name") or "")
-                                                    yield sse(
-                                                        {
-                                                            "type": "tool",
-                                                            "role": "tool",
-                                                            "name": tc.get("name"),
-                                                        }
-                                                    )
-                                            # R4:search_knowledge 的结果收集为引用锚
-                                            if (
-                                                isinstance(m, ToolMessage)
-                                                and getattr(m, "name", "") == "search_knowledge"
-                                            ):
-                                                telemetry.collect_sources(m, sources, _seen_sources)
+                            yield event
             except asyncio.CancelledError:
                 # 客户端断连(CancelledError 非 Exception):中止轮次也要留痕
                 # (partial reply/已调工具不丢失),error_code 记断连中止。
@@ -489,7 +549,7 @@ async def _stream_turn(
                     "chat turn timeout session=%s turns=%d usage=%s",
                     session.session_id,
                     session.turns,
-                    usage_acc,
+                    acc.usage,
                 )
             except Exception as exc:  # noqa: BLE001 — 单轮失败不崩连接,吐 error 事件
                 error_code = _error_code(exc)
@@ -503,43 +563,18 @@ async def _stream_turn(
                 if gate_acquired:
                     gate.release()
 
-        # 单一写入路径:正常(error_code None)/错误/断连三态合一,落一行。
-        # 缓存命中证据:缓存前缀稳定性 hash(system prompt + 角色工具名)。
-        # 同 role 的会话前缀应逐字节稳定;hash 变化 = 前缀失效(命中率不可信)。
-        # 实际 system = 静态正文 + 身份段 + 工具契约(随角色变);
-        # hash 必须基于真实 system,否则"缓存命中证据"失真。同角色会话内
-        # 前缀稳定(身份块同 session 不变),仍可作命中率观察。
         from official_agent.graphs.assistant import build_system_prompt
 
-        # 编造守卫在一切持久化之前——直播(缓冲 delta)、
-        # conversation_log、checkpointer(回看/下轮上下文)三面同用改写文本。
-        # 压缩(_compress_if_needed 会 update_state 重写历史)必须排在守卫
-        # 回写之后,否则会把编造原文一并压进摘要。
         if toolless and error_code is None:
-            from official_agent.security.fabrication_guard import guard_empty_tools_reply
-            from official_agent.security.pii import mask_pii_output
+            async for event in _toolless_guarded_reply(session.agent, config, acc.reply_chunks):
+                yield event
 
-            final_reply, verdict = guard_empty_tools_reply("".join(reply_chunks))
-            # toolless 回复出口同过 PII 掩(与 cli 对称;掩后文本进回写)
-            final_reply, _pii_trace = mask_pii_output(final_reply)
-            if verdict != "clean":
-                logging.getLogger(__name__).warning(
-                    "guard_event guard_name=%s verdict=%s tool=<(empty)>",
-                    "fabrication_empty_tools",
-                    verdict,
-                )
-                reply_chunks = [final_reply]
-                await _rewrite_last_ai_message(session.agent, config, final_reply)
-            if final_reply:
-                yield sse({"type": "delta", "role": "assistant", "content": final_reply})
-
-        # 回复出口 PII 守卫——全部会话适用。流式
-        # delta 经 ReplyPiiMasker 逐块掩(尾部缓冲抗跨块);工具侧 deep 掩为
-        # 主,此处为输出面兜底;命中即 trace(guard_event)。
-        if pii_masker:
-            tail = pii_masker.finish()
+        # 回复出口 PII 守卫——全部会话适用。流式 delta 已逐块掩(尾部缓冲抗
+        # 跨块),此处冲洗尾缓冲;命中即 trace(guard_event)。
+        if masker:
+            tail = masker.finish()
             if tail:
-                yield sse({"type": "delta", "role": "assistant", "content": tail})
+                yield _sse({"type": "delta", "role": "assistant", "content": tail})
 
         # 轮末按需压缩(先压缩后落行,同一行携带 compress_event)。
         # 在 done 事件前执行:失败 fail-open 返回 None,不阻断 done。
@@ -550,43 +585,34 @@ async def _stream_turn(
         role = session.identity.get("role") or "unknown"
         tool_names = list(_ROLE_TOOL_NAMES.get(role, ()))
         p_hash = telemetry.prefix_hash(build_system_prompt(session.identity), tool_names)
-        if any(usage_acc.values()):
-            usage = usage_acc
-        else:
-            usage = {
-                "input_tokens": None,
-                "output_tokens": None,
-                "cache_hit_tokens": None,
-                "cache_miss_tokens": None,
-            }
         telemetry.log_conversation(
             session,
             user_message=message,
-            reply_summary="".join(reply_chunks),
-            tools=tools_called,
+            reply_summary="".join(acc.reply_chunks),
+            tools=acc.tools_called,
             duration_ms=_elapsed_ms(started),
             error_code=error_code,
-            usage=usage,
+            usage=_usage_out(acc.usage),
             prefix_hash=p_hash,
             compress_event=compress_event,
         )
         if error_code is None:
-            if sources:
+            if acc.sources:
                 # R4 契约:delta 上新增可选 sources,不改消息 type 枚举——
                 # 旧消费者收到空 content 追加无感;新前端做 [n] → 来源映射
-                yield sse(
+                yield _sse(
                     {
                         "type": "delta",
                         "role": "assistant",
                         "content": "",
-                        "sources": sources,
+                        "sources": acc.sources,
                     }
                 )
-            yield sse({"type": "done", "session_id": session.session_id})
+            yield _sse({"type": "done", "session_id": session.session_id})
         elif error_code != _ERR_DISCONNECTED:
             # 错误事件统一走稳定文案 + trace_id(原始异常只留服务端日志);
             # 断连无需事件(客户端已不在)。
-            yield sse(_sse_error(error_code))
+            yield _sse(_sse_error(error_code))
     finally:
         session.turn_lock.release()
 
