@@ -9,7 +9,7 @@ Official_Web_Backend(Spring Boot),本仓库只通过其 REST API 交互(服务�
 uv sync                 # 安装依赖(含 dev 组)
 uv run ruff check .     # lint
 uv run pytest           # 单测(确定性代码:tools/、图结构)
-uv run python -m evals  # eval 集(需要模型 API key,CI 中作为门禁)
+uv run python evals/run_evals.py  # eval 集(需要模型 API key,CI 中作为门禁;--help 看全部参数)
 ```
 
 ## 本地 Langfuse(OBS-01)
