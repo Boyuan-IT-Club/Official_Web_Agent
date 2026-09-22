@@ -40,7 +40,7 @@ from official_agent.security.pii import ReplyPiiMasker
 from official_agent.state.threads import create_thread, new_thread_id, resolve_thread
 from official_agent.tools.client import BackendError, BackendUnavailableError
 from official_agent.tools.readonly import asker_scope
-from official_agent.web import agent_factory, session_store
+from official_agent.web import agent_factory, session_store, telemetry
 from official_agent.web.auth import authenticate as _authenticate
 from official_agent.web.auth import require_any as _require_any
 
@@ -448,7 +448,7 @@ async def _stream_turn(
                                 raw_usage = (chunk.response_metadata or {}).get("token_usage")
                                 usage_payload = raw_usage if raw_usage else um
                                 if um is not None and usage_payload:
-                                    extracted = extract_usage(usage_payload)
+                                    extracted = telemetry.extract_usage(usage_payload)
                                     if extracted != _last_usage:  # 同值跳过(跨 chunk 累计值重复)
                                         _last_usage = extracted
                                         for k in usage_acc:
@@ -476,7 +476,7 @@ async def _stream_turn(
                                                 isinstance(m, ToolMessage)
                                                 and getattr(m, "name", "") == "search_knowledge"
                                             ):
-                                                _collect_sources(m, sources, _seen_sources)
+                                                telemetry.collect_sources(m, sources, _seen_sources)
             except asyncio.CancelledError:
                 # 客户端断连(CancelledError 非 Exception):中止轮次也要留痕
                 # (partial reply/已调工具不丢失),error_code 记断连中止。
@@ -549,7 +549,7 @@ async def _stream_turn(
             compress_event = await _compress_if_needed(session, config, message)
         role = session.identity.get("role") or "unknown"
         tool_names = list(_ROLE_TOOL_NAMES.get(role, ()))
-        p_hash = prefix_hash(build_system_prompt(session.identity), tool_names)
+        p_hash = telemetry.prefix_hash(build_system_prompt(session.identity), tool_names)
         if any(usage_acc.values()):
             usage = usage_acc
         else:
@@ -559,7 +559,7 @@ async def _stream_turn(
                 "cache_hit_tokens": None,
                 "cache_miss_tokens": None,
             }
-        _log_conversation(
+        telemetry.log_conversation(
             session,
             user_message=message,
             reply_summary="".join(reply_chunks),
@@ -617,92 +617,9 @@ async def _rewrite_last_ai_message(agent: Any, config: dict, final_reply: str) -
         logging.getLogger(__name__).warning("编造守卫回写 checkpointer 失败(已忽略)", exc_info=True)
 
 
-# fire-and-forget 观测写入任务的强引用集:事件循环只持弱引用,不留在集里的
-# 任务可能在完成前被 GC 中途取消(asyncio 官方文档明确告诫);完成后经回调出集。
-_background_tasks: set[asyncio.Task[None]] = set()
-
-
-def _log_conversation(
-    session: session_store.SessionState,
-    *,
-    user_message: str,
-    reply_summary: str,
-    tools: list[str],
-    duration_ms: int,
-    error_code: str | None = None,
-    usage: dict[str, int | None] | None = None,
-    prefix_hash: str | None = None,
-    compress_event: str | None = None,
-) -> None:
-    """落一行 conversation_log(fail-open,非阻塞)。
-
-    lazy import:web 入口不顶层依赖 psycopg(无 PG 环境可跑服务,
-    观测侧不给主链路加硬依赖,同 app.py lifespan 先例)。
-    fire-and-forget:psycopg 是同步驱动,写入经 to_thread 进线程池,
-    不占事件循环、不阻塞 SSE 流尾(ADR-0005 fail-open)。
-    """
-    from official_agent.state.conversation import write_conversation
-
-    async def _write() -> None:
-        try:
-            await asyncio.to_thread(
-                write_conversation,
-                thread_id=session.session_id,
-                user_id=session.identity.get("user_id"),
-                channel=session.identity.get("source") or "web",
-                user_message=user_message,
-                reply_summary=reply_summary,
-                tools=tools,
-                duration_ms=duration_ms,
-                error_code=error_code,
-                prefix_hash=prefix_hash,
-                compress_event=compress_event,
-                **(usage or {}),
-            )
-        except Exception:  # noqa: BLE001 — 观测写入失败不拖垮对话(ADR-0005)
-            logger.warning("conversation_log 写入失败(已忽略)", exc_info=True)
-
-    task = asyncio.create_task(_write())
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-
-
 def _elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
 
-
-def extract_usage(usage_metadata: dict[str, Any] | None) -> dict[str, int | None]:
-    """从 LLM usage_metadata 提取 token 数(lazy;模块级包装供测试 patch)。"""
-    from official_agent.state.conversation import extract_usage as _impl
-
-    return _impl(usage_metadata)
-
-
-def prefix_hash(system_prompt: str, tool_names: list[str]) -> str:
-    """缓存前缀稳定性 hash(lazy;模块级包装供测试 patch)。"""
-    from official_agent.state.conversation import prefix_hash as _impl
-
-    return _impl(system_prompt, tool_names)
-
-
-def _collect_sources(tool_msg: ToolMessage, sources: list, seen: set) -> None:
-    """search_knowledge 的 ToolMessage → 轮级引用锚([n]→条目,保序去重)。
-
-    内容是工具返回的 JSON;解析失败只丢引用,不影响主回复(#120 降级纪律)。
-    """
-    try:
-        data = (
-            json.loads(tool_msg.content)
-            if isinstance(tool_msg.content, str)
-            else tool_msg.content
-        )
-        for r in (data or {}).get("results") or []:
-            sid = r.get("source_id")
-            if sid and sid not in seen:
-                seen.add(sid)
-                sources.append({"source_id": sid, "title": r.get("title", "")})
-    except Exception:  # noqa: BLE001 — 引用属增强面,失败不拖垮对话
-        logger.warning("search_knowledge sources 收集失败(已忽略)", exc_info=True)
 
 # ── 管理 API:配置热生效 ────────────────────────────────────────
 

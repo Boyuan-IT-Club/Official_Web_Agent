@@ -562,7 +562,10 @@ def test_gate_busy_logs_conversation_and_emits_one_error(
 
     _install(monkeypatch, thread=None)
     logged: list[dict] = []
-    monkeypatch.setattr(routes, "_log_conversation", lambda session, **kw: logged.append(kw))
+    monkeypatch.setattr(
+        "official_agent.web.telemetry.log_conversation",
+        lambda session, **kw: logged.append(kw),
+    )
 
     async def _noop_stream(*_a: object, **_k: object):
         raise AssertionError("闸满不得进入 astream")

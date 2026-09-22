@@ -292,7 +292,9 @@ def test_chat_usage_from_usage_metadata_only(
             pass
 
     logged: list[dict] = []
-    monkeypatch.setattr(routes, "_log_conversation", lambda *a, **k: logged.append(k))
+    monkeypatch.setattr(
+        "official_agent.web.telemetry.log_conversation", lambda *a, **k: logged.append(k)
+    )
     _install_fakes(monkeypatch)
     monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: _UsageAgent())
 
@@ -338,7 +340,9 @@ def test_chat_compresses_long_state_and_logs_event(
 
     updates: list[list] = []
     logged: list[dict] = []
-    monkeypatch.setattr(routes, "_log_conversation", lambda *a, **k: logged.append(k))
+    monkeypatch.setattr(
+        "official_agent.web.telemetry.log_conversation", lambda *a, **k: logged.append(k)
+    )
     _install_fakes(monkeypatch)
     monkeypatch.setattr(
         routes,
@@ -379,7 +383,9 @@ def test_chat_no_compression_under_threshold(
 
     updates: list[list] = []
     logged: list[dict] = []
-    monkeypatch.setattr(routes, "_log_conversation", lambda *a, **k: logged.append(k))
+    monkeypatch.setattr(
+        "official_agent.web.telemetry.log_conversation", lambda *a, **k: logged.append(k)
+    )
     _install_fakes(monkeypatch)
     monkeypatch.setattr(
         routes,
@@ -408,7 +414,9 @@ def test_chat_compression_failure_fail_open(
     record_compression_success()  # 隔离其他用例留下的熔断计数
     updates: list[list] = []
     logged: list[dict] = []
-    monkeypatch.setattr(routes, "_log_conversation", lambda *a, **k: logged.append(k))
+    monkeypatch.setattr(
+        "official_agent.web.telemetry.log_conversation", lambda *a, **k: logged.append(k)
+    )
     _install_fakes(monkeypatch)
     monkeypatch.setattr(
         routes,
@@ -453,14 +461,13 @@ def test_chat_writes_conversation_log_row(
     同步捕获调用以验证「每轮落一行 + 字段齐全」;PII 过滤在数据层
     (test_state_conversation 单测覆盖)。
     """
-    from official_agent.web import routes
 
     logged: list[dict] = []
 
     def _fake_log(*_args, **kwargs):
         logged.append(kwargs)
 
-    monkeypatch.setattr(routes, "_log_conversation", _fake_log)
+    monkeypatch.setattr("official_agent.web.telemetry.log_conversation", _fake_log)
     _install_fakes(monkeypatch)
     with client.stream(
         "POST",
@@ -500,7 +507,7 @@ def test_chat_error_path_logs_error_row(
     def _fake_log(*_args, **kwargs):
         logged.append(kwargs)
 
-    monkeypatch.setattr(routes, "_log_conversation", _fake_log)
+    monkeypatch.setattr("official_agent.web.telemetry.log_conversation", _fake_log)
     monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: _FailingAgent())
     monkeypatch.setattr("official_agent.web.auth.resolve", fake_resolve(auth_ok_data()))
     with client.stream(
@@ -842,11 +849,11 @@ def test_chat_without_kb_tool_has_no_sources_field(
 
 def test_collect_sources_dedupes_and_tolerates_bad_payload() -> None:
     """多轮 search_knowledge 去重保序;坏 JSON 只丢引用不抛。"""
-    from official_agent.web.routes import _collect_sources
+    from official_agent.web.telemetry import collect_sources
 
     sources: list = []
     seen: set = set()
-    _collect_sources(
+    collect_sources(
         ToolMessage(
             content=json.dumps(
                 {
@@ -860,7 +867,7 @@ def test_collect_sources_dedupes_and_tolerates_bad_payload() -> None:
         sources,
         seen,
     )
-    _collect_sources(
+    collect_sources(
         ToolMessage(
             content=json.dumps(
                 {
@@ -881,7 +888,7 @@ def test_collect_sources_dedupes_and_tolerates_bad_payload() -> None:
         {"source_id": "kb_a", "title": "A"},
         {"source_id": "kb_c", "title": "C"},
     ]
-    _collect_sources(
+    collect_sources(
         ToolMessage(content="not-json{", name="search_knowledge", tool_call_id="c3"),
         sources,
         seen,
