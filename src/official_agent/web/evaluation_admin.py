@@ -71,7 +71,8 @@ async def run_evaluation_jobs(
         # DB 侧建 job 失败是服务端故障,别混进下面的"调用方数据错位"
         raise HTTPException(status_code=500, detail="提交初筛任务失败,请稍后重试") from exc
     except RuntimeError as exc:
-        # 权威归属核对失败属调用方数据错位 → 400,不是服务端故障
+        # 权威归属核对失败属调用方数据错位 → 400,不是服务端故障。
+        # str(exc) 是 runner 受控的领域文案(resume_id 错位详情),非内部异常原文
         raise HTTPException(status_code=400, detail=f"简历归属核对失败:{exc}") from exc
     except Exception as exc:  # noqa: BLE001 — 统一 500 固定文案
         raise HTTPException(status_code=500, detail="提交初筛任务失败,请稍后重试") from exc
@@ -213,6 +214,7 @@ async def pick_questions(
             qbank_store.resolve_picks, body.resume_id, body.cycle_id, body.questions
         )
     except LookupError as exc:
+        # resolve_picks 的受控领域文案(指出哪条引用无效),面向管理面 422
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail="查询题库失败,请稍后重试") from exc

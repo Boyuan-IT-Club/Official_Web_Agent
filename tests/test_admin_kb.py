@@ -383,3 +383,22 @@ def test_kb_reembed_reuses_stored_content(
 
     missing = client.post("/api/agent/admin/kb/sources/nope/reembed", headers=_AUTH)
     assert missing.status_code == 404
+
+
+def test_kb_unexpected_error_no_internal_detail(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未预期异常:500 稳定文案,原始异常(可能含内部细节)不出边界。"""
+    from official_agent.web import kb_admin
+
+    _install_resolve(monkeypatch, _kb_admin_identity())
+
+    def _boom(*_a: object, **_k: object):
+        raise RuntimeError("pg connect failed: postgresql://svc:pw@10.0.0.3/official")
+
+    monkeypatch.setattr(kb_admin.kb_store, "list_sources", _boom)
+    resp = client.get("/api/agent/admin/kb/sources", headers=_AUTH)
+    assert resp.status_code == 500
+    detail = resp.json()["detail"]
+    assert detail == "KB 操作失败,请稍后重试"
+    assert "postgresql://" not in detail, "内部细节不得进响应体"

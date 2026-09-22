@@ -128,10 +128,16 @@
   注释已写为什么吞,现在补"留痕"。
 - 验收:三条失败路径在测试中可观测到 warning;降级行为零变化。
 
-**chunk 1.3 管理面错误文案统一(P0-3)**
-- 做法:抽共享安全文案 helper(参考 `routes.py` 的 `_ERR_SAFE_COPY` 模式),kb_admin /
-  evaluation_admin 接入;原始异常进日志,客户端只拿稳定文案。
-- 验收:grep `detail=.*{exc}` 零命中;管理面测试补"错误响应不含原始异常"断言。
+**chunk 1.3 管理面错误文案统一(P0-3,执行中精化了口径)**
+- 精化:按 standards/error-handling.md 三分类,**受控领域文案是对外契约**
+  (KbValidationError/EmbeddingError/LookError 422、runner 归属错位 RuntimeError——
+  消息是面向管理面的错因,含 resume_id 等业务字段,保留并注明);真正泄漏的是
+  **未预期异常的原文**(可能含 SQL/路径)。
+- 做法:kb_admin 兜底分支 `detail=f"...{exc}"` → 稳定文案 + logger.warning(exc_info);
+  两处领域文案站点加契约注释;共享文案 helper 推迟到 Batch 2(拆 admin router 时
+  随模块归位,现在抽是提前抽象)。
+- 验收:grep 确认未预期异常原文不再进任何响应体;kb_admin 兜底分支有测试断言
+  (稳定文案 + 原始异常不出现)。
 
 **chunk 1.4 异常分类与 usage 口径收口(P0-4、P0-5)**
 - 做法:investigate 校验回灌的 except 收窄为 `except ValueError`(对齐评分子图写法);

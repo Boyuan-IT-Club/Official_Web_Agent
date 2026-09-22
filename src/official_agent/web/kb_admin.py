@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import logging
 from dataclasses import asdict
 from typing import Annotated, Any, Literal
 
@@ -70,7 +71,11 @@ def _to_input(body: KbSourceUpsert, identity: ResolvedIdentity) -> kb_store.Sour
 
 
 def _map_store_error(exc: Exception) -> HTTPException:
-    """store/embedding 异常 → HTTP 语义(测试/前端只见状态码+detail)。"""
+    """store/embedding 异常 → HTTP 语义(测试/前端只见状态码+detail)。
+
+    前四类是本仓领域异常,消息即对外契约(面向管理面的受控文案);
+    兜底分支是未预期异常——原文(可能含 SQL/路径)只进日志,不出边界。
+    """
     if isinstance(exc, KbValidationError):
         return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, EmbeddingNotConfiguredError):
@@ -79,7 +84,8 @@ def _map_store_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=502, detail=str(exc))
     if isinstance(exc, KbSchemaError):
         return HTTPException(status_code=500, detail=str(exc))
-    return HTTPException(status_code=500, detail=f"KB 操作失败:{exc}")
+    logging.getLogger(__name__).warning("KB 操作未预期失败", exc_info=exc)
+    return HTTPException(status_code=500, detail="KB 操作失败,请稍后重试")
 
 
 @router.get("/admin/kb/sources")
