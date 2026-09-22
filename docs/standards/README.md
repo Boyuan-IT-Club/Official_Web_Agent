@@ -4,6 +4,27 @@
 > 仓根 `CLAUDE.md` 与工作区根 `CLAUDE.md` 是红线与指针(必读);本目录是它们背后的细则与判据。
 > 每份文档开头标了「何时读」,按环节取用,不必整包读完。
 
+## 上手路径(第一周,从 clone 到第一个 PR)
+
+1. **必读顺序**:仓根 `CLAUDE.md`(红线/命令)→ 本目录 → `docs/design.md`(架构与
+   代码导览)→ 涉及的 ADR(`../docs/adr/`,工作区根)。
+2. **本地起环境**:`uv sync` 装依赖(含 dev 组);`uv run official-agent --help` 确认 CLI 可用。
+3. **日常闸门**:`uv run ruff check .` + `uv run pytest`(全量单测,不碰真 IO)。
+4. **集成档**(改 `state/`、`kb/` 或 SQL 时必须真跑):
+   ```bash
+   docker compose -f deploy/docker-compose.local.yml up -d agent-pg   # pgvector,端口 5433
+   POSTGRES_URL=postgresql://postgres:agent_dev@localhost:5433/official_agent \
+     uv run pytest tests/test_evaluation_state_pg.py tests/test_qbank_state_pg.py \
+                   tests/test_state_pg.py tests/test_kb_integration.py
+   ```
+   (自 SKIP 不是通过;`.env` 已含同样的 POSTGRES_URL。)
+5. **eval 门禁**(改 prompt/模型路由/温度/图结构时必跑):
+   `uv run python evals/run_evals.py --help` 看参数;需模型 API key,基线对比防回归。
+6. **分支与提交**:分支 `feat/` `fix/` `refactor/` `docs/` 前缀;Conventional Commits
+   中文 subject(`<type>(<scope>): <做什么>`),body 写为什么;提交信息引用 issue 编号。
+7. **最小改动闭环**:建分支 → 改 → 闸门全绿 → 提交。规范依据看本目录加载地图;
+   注释红线与自查 grep 见 [comments.md](comments.md)。
+
 ## 加载地图(按环节触发,MUST = 该环节开工前必读)
 
 | 触发(做什么时) | MUST 读 | 按需读 |
@@ -22,16 +43,17 @@
 - `error-handling.md` — 错误三类、分层传播、外部调用(超时/重试三问)、禁兜底红线
 - `python.md` — Python 独有惯用法、易踩坑(含异步陷阱)、LangGraph 要点
 
-## 四层骨架在本仓的落位(近似对应)
+## 四层骨架在本仓的落位(2026-09 结构化重构后)
 
 | 规范层 | 本仓目录 | 说明 |
 |---|---|---|
-| 接口层 | `src/official_agent/web/` | FastAPI 路由:鉴权、SSE 流式、出入参校验 |
+| 接口层 | `src/official_agent/web/` | FastAPI 路由与入口横切:routes(chat/会话)、各 admin 面、auth、session_store、agent_factory、telemetry、app |
 | 应用/编排层 | `src/official_agent/graphs/`、`evals/` | LangGraph 图装配与编排、eval runner |
-| 基础设施层 | `src/official_agent/tools/`、`state/`、`kb/`、`security/` | 后端 REST 客户端、Postgres 状态存储、pgvector 检索、PII/注入守卫 |
-| 领域规则 | (收敛中) | 目前部分规则仍散在 web/graphs 中,新增规则请按 [layering.md](layering.md) 归位,别再往 route 里堆 |
+| 评估域 | `src/official_agent/evaluation/` | 流水线领域逻辑:runner/bundle/explore/graph/judge/tech_stack/llm_common 等 |
+| 基础设施层 | `src/official_agent/tools/`、`state/`、`kb/`、`security/` | 后端 REST 客户端、Postgres 状态面(evaluation 为包)、pgvector 检索、PII/注入守卫 |
 
-依赖应**单向向下**:`web → graphs → tools/state`;领域规则不 import 基础设施实现细节。
+依赖**单向向下**:`web → graphs → evaluation → tools/state/kb/security`;
+领域规则不 import 基础设施实现细节。模块逐个职责见 `docs/design.md` §4 代码导览。
 
 ## 维护原则
 
