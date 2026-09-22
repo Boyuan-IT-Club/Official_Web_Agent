@@ -146,6 +146,17 @@ async def _extract_tech(state: InvestigationState) -> list[dict]:
     return [asdict(item) for item in items]
 
 
+def _attr_payload(found: RepoAttribution) -> dict[str, str]:
+    """RepoAttribution → state 的 attribution 载荷(单一出处,三处共用)。"""
+    return {
+        "owner": found.owner,
+        "name": found.name,
+        "level": found.level,
+        "evidence": found.evidence,
+        "source": found.source,
+    }
+
+
 async def route_node(state: InvestigationState) -> dict:
     """提取仓位置并探测可读性 → 路由;入口瀑布+归属四级。
 
@@ -180,13 +191,7 @@ async def route_node(state: InvestigationState) -> dict:
                     "route": "guided",
                     "repo_owner": target[0],
                     "repo_name": target[1],
-                    "attribution": {
-                        "owner": found.owner,
-                        "name": found.name,
-                        "level": found.level,
-                        "evidence": found.evidence,
-                        "source": found.source,
-                    },
+                    "attribution": _attr_payload(found),
                 }
     if repo is None and login:
         # 瀑布第 2/3 步:绑定名下匹配 / 搜索兜底(第 1 步已被 extract_repo 覆盖)
@@ -219,13 +224,7 @@ async def route_node(state: InvestigationState) -> dict:
             "tech_items": items,
         }
         if found is not None:
-            degraded["attribution"] = {
-                "owner": found.owner,
-                "name": found.name,
-                "level": found.level,
-                "evidence": found.evidence,
-                "source": found.source,
-            }
+            degraded["attribution"] = _attr_payload(found)
         return degraded
     if found is None:
         # 钉住/URL 直配的仓:简历自述来源 → source=url(归属内部自查 commits/PR)
@@ -239,13 +238,7 @@ async def route_node(state: InvestigationState) -> dict:
         "repo_owner": repo[0],
         "repo_name": repo[1],
         "default_branch": str(branch),
-        "attribution": {
-            "owner": found.owner,
-            "name": found.name,
-            "level": found.level,
-            "evidence": found.evidence,
-            "source": found.source,
-        },
+        "attribution": _attr_payload(found),
     }
 
 

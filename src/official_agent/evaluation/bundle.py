@@ -102,6 +102,244 @@ async def _b4_questions(
     return questions
 
 
+def _group_has_evidence(g: dict[str, Any]) -> bool:
+    """该组是否带真实题目(repo 组已 v2:题目在 entry/chains 里,两种形状都认)。"""
+    qbank_v2 = g.get("qbank_v2")
+    if isinstance(qbank_v2, dict):
+        inner = qbank_v2.get("group") or {}
+        return bool(inner.get("entry") or inner.get("chains"))
+    return bool(g.get("questions"))
+
+
+async def _repo_lines(
+    project_text: str, *, resume_id: int, github_token: str
+) -> list[tuple[str, str] | None]:
+    """仓线分线:可读的仓各一条线,读不到的合起来只给一条(钉第一个)。
+
+    可读性在这里一次探清,而不是让每个仓各跑一遍子图、各自发现读不到:
+    仓读不到时材料只剩简历自述,而自述只有一份——逐个仓跑只会得到一堆
+    一模一样的简历题。无仓/有项目文本但无仓 URL → 仍跑一次([None]),
+    让子图内部按简历内容路由。
+    """
+    repo_candidates = extract_repos(project_text)
+    if len(repo_candidates) > MAX_REPO_LINES:
+        logging.getLogger(__name__).warning(
+            "bundle_repo_cap resume_id=%s total=%d kept=%d dropped=%r",
+            resume_id,
+            len(repo_candidates),
+            MAX_REPO_LINES,
+            [f"{o}/{n}" for o, n in repo_candidates[MAX_REPO_LINES:]][:5],
+        )
+        repo_candidates = repo_candidates[:MAX_REPO_LINES]
+    if not repo_candidates:
+        return [None]
+    probe = GitHubClient(token=github_token)
+    readable: list[tuple[str, str]] = []
+    unreadable: list[tuple[str, str]] = []
+    for owner, name in repo_candidates:
+        try:
+            await probe.repo(owner, name)
+        except GitHubUnavailable:
+            unreadable.append((owner, name))
+        else:
+            readable.append((owner, name))
+    return [*readable, *unreadable[:1]]
+
+
+async def _repo_line(
+    pinned: tuple[str, str] | None,
+    *,
+    project_text: str,
+    resume_text: str,
+    github_key: str | None,
+    github_token: str,
+    grade: str,
+    cv_dive_done: bool,
+) -> tuple[dict[str, Any], bool]:
+    """跑一个仓的调查子图,返回 (组, 本线是否走了简历深挖)。"""
+    owner, name = pinned if pinned else ("", "")
+    try:
+        repo_envelope = await ig.run_investigation(
+            project_text,
+            resume_text=resume_text,
+            repo=pinned,
+            github_token=github_token,
+            candidate_login=github_key or "",
+            grade=grade,
+            cv_dive_done=cv_dive_done,
+        )
+    except Exception as exc:  # noqa: BLE001 — 单线失败降级为错误组,不炸 bundle
+        # 仓线失败必须留痕:信封 error 字段只有截断摘要,没有堆栈(对照评测线)
+        logging.getLogger(__name__).warning(
+            "仓线探测失败 repo=%s/%s", owner, name, exc_info=True
+        )
+        return (
+            {
+                "group": "repo",
+                "owner": owner,
+                "repo": f"{owner}/{name}" if pinned else "",
+                "mode": "error",
+                "repo_summary": "",
+                "questions": [],
+                "error": f"{type(exc).__name__}: {exc}"[:300],
+            },
+            False,
+        )
+    became_cv_dive = repo_envelope.get("mode") == "cv_dive"
+    group = {
+        "group": _group_kind(repo_envelope),
+        "owner": owner,
+        "repo": f"{owner}/{name}" if pinned else "",
+        # v2 信封整体嵌套(qbank_v2),不展开——QbankV2 自带
+        # group 键(dict),展开会覆盖 kind 字符串并污染 pick log
+        "qbank_v2": repo_envelope,
+    }
+    return group, became_cv_dive
+
+
+async def _autograding_line(github_key: str, resume_id: int) -> dict[str, Any] | None:
+    """评测线:有评测记录且非满分 → 失败 test 错因追问;失败返回 None。"""
+    if not github_key:
+        return None
+    try:
+        from official_agent.evaluation import autograding as ag
+
+        submission = await ag.fetch_latest_submission(github_key)
+        if not submission or ag.is_full_score(submission):
+            return None
+        failures = ag.extract_failures(submission)
+        if not failures:
+            return None  # 非满分但抽不出失败明细:出题只会诱导编造,略过该线
+        buckets = ag.classify(failures)
+        material = "\n".join(
+            f"[{kind}] {task}/{name}"
+            for kind, items in buckets.items()
+            for task, name in items
+        )
+        ag_questions = await _b4_questions(
+            f"评测失败清单(任务/test):\n{material}",
+            count_min=2,
+            count_max=3,
+            source="autograding-failures",
+        )
+        return {
+            "group": "autograding",
+            "mode": "error_analysis",
+            "repo_summary": f"评测非满分,失败 {len(failures)} 项",
+            "questions": ag_questions,
+            "prompt_version": _prompt_version(),
+        }
+    except Exception as exc:  # noqa: BLE001 — 错因线失败可容忍,只记日志
+        logging.getLogger(__name__).warning(
+            "评测错因线跳过(resume=%s):%s: %s", resume_id, type(exc).__name__, exc
+        )
+        return None
+
+
+async def _awards_line(provider: Any, fields: list, resume_id: int) -> dict[str, Any] | None:
+    """奖项线:verified 的背景卡也进信封(搜索通道到位后面试官有料可读)。
+
+    单个奖项的取材失败跳过该奖项,不拖垮其余奖项与其他线。
+    """
+    awards = extract_awards(fields)
+    award_questions: list[dict] = []
+    award_briefs: list[dict] = []
+    for title in awards[:3]:
+        try:
+            brief = await build_award_brief(provider, title)
+        except Exception as exc:  # noqa: BLE001 — 单奖项失败可容忍,只记日志
+            logging.getLogger(__name__).warning(
+                "奖项线取材跳过(resume=%s,奖项=%s):%s: %s",
+                resume_id,
+                title,
+                type(exc).__name__,
+                exc,
+            )
+            continue
+        award_briefs.append(brief)
+        award_questions.extend(brief.get("questions", []))
+    if not (award_questions or award_briefs):
+        return None
+    return {
+        "group": "awards",
+        "mode": "award_brief",
+        "repo_summary": f"奖项 {len(awards)} 项",
+        "questions": award_questions,
+        "briefs": award_briefs,
+        "prompt_version": _prompt_version(),
+    }
+
+
+async def _fallback_line(fields: list) -> dict[str, Any]:
+    """兜底线:仓线无题、无评测、无奖项 → 基础三维 + 部门技能题组。"""
+    base_qs = base_three_questions()
+    department = next(
+        (f.value for f in fields if "dept" in f.field_key.lower() or "部门" in f.title),
+        "",
+    )
+    skill_qs = await _b4_questions(
+        f"候选部门:{department or '未填'}。候选人材料:\n" + "\n".join(f.value for f in fields),
+        count_min=2,
+        count_max=4,
+    )
+    return {
+        "group": "base_and_skills",
+        "mode": "base_fallback",
+        "repo_summary": "无证据候选,基础三维+部门技能题组",
+        "questions": base_qs + skill_qs,
+        "prompt_version": _prompt_version(),
+    }
+
+
+def _flatten_v2_questions(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """v2 信封展平成扁平题表(entry/chains/reserves;time_minutes 供 suggest_plan)。"""
+    all_questions: list[dict[str, Any]] = []
+    for g in groups:
+        qbank_v2 = g.get("qbank_v2")
+        if not isinstance(qbank_v2, dict):
+            all_questions.extend(g.get("questions", []))
+            continue
+        inner = qbank_v2.get("group") or {}
+        entry = inner.get("entry")
+        if entry:
+            all_questions.append(
+                {
+                    "question": entry.get("question", ""),
+                    "time_minutes": entry.get("time_minutes", 3),
+                }
+            )
+        for chain in inner.get("chains", []):
+            for layer in chain.get("layers", []):
+                all_questions.append({"question": layer.get("question", ""), "time_minutes": 3})
+        for reserve in inner.get("reserves", []):
+            all_questions.append(
+                {
+                    "question": reserve.get("question", ""),
+                    "time_minutes": reserve.get("time_minutes", 3),
+                }
+            )
+    return all_questions
+
+
+def _aggregate_usage(groups: list[dict[str, Any]]) -> dict[str, int | None]:
+    """聚合 repo 组探索/出题用量(其余线 v1 形状无用量面)。"""
+    usage_total: dict[str, int | None] = {
+        "input_tokens": None,
+        "output_tokens": None,
+        "cache_hit_tokens": None,
+        "cache_miss_tokens": None,
+    }
+    for g in groups:
+        qbank_v2 = g.get("qbank_v2") or {}
+        metas = [qbank_v2.get("explore_meta") or {}, qbank_v2.get("generation_usage") or {}]
+        for meta in metas:
+            for k in usage_total:
+                v = meta.get(k)
+                if v is not None:
+                    usage_total[k] = (usage_total[k] or 0) + int(v)
+    return usage_total
+
+
 async def run_bundle(
     fields: list,
     *,
@@ -128,233 +366,41 @@ async def run_bundle(
     project_text = _project_text(fields)
     resume_text = _resume_text(fields)
 
-    # 仓线。多仓:项目文本里每个 GitHub 仓各深挖一次,产出独立
-    # repo group(带 owner/repo 标识),不再只挖第一个。单线失败降级为空错误组,
-    # 不炸整条 bundle。
-    #
-    # 可读性在这里一次探清,而不是让每个仓各跑一遍子图、各自发现读不到:
-    # 仓读不到时材料只剩简历自述,而自述只有一份——逐个仓跑只会得到一堆
-    # 一模一样的简历题。所以先分两类,可读的仓各一条深挖线,读不到的仓合起来
-    # 只出一条简历线(把其中第一个钉给它:子图发现读不到,自然回退到简历深挖)。
-    # 无仓/有项目文本但无仓 URL → 仍跑一次,让子图内部按简历内容路由。
-    repo_candidates = extract_repos(project_text)
-    if len(repo_candidates) > MAX_REPO_LINES:
-        logging.getLogger(__name__).warning(
-            "bundle_repo_cap resume_id=%s total=%d kept=%d dropped=%r",
-            resume_id,
-            len(repo_candidates),
-            MAX_REPO_LINES,
-            [f"{o}/{n}" for o, n in repo_candidates[MAX_REPO_LINES:]][:5],
-        )
-        repo_candidates = repo_candidates[:MAX_REPO_LINES]
-    lines: list[tuple[str, str] | None]
-    if repo_candidates:
-        probe = GitHubClient(token=github_token)
-        readable: list[tuple[str, str]] = []
-        unreadable: list[tuple[str, str]] = []
-        for owner, name in repo_candidates:
-            try:
-                await probe.repo(owner, name)
-            except GitHubUnavailable:
-                unreadable.append((owner, name))
-            else:
-                readable.append((owner, name))
-        lines = [*readable, *unreadable[:1]]
-    else:
-        lines = [None]
-
-    # 简历深挖全局只出一条线,由上面的分线保证;这个标记是兜底:可读的仓若在
-    # 子图内探测时恰好也读不到(限流等瞬时故障),它会回退到简历深挖,而那时
-    # 简历线不该再挖第二遍。
+    # 仓线。多仓:项目文本里每个 GitHub 仓各深挖一次,产出独立 repo group;
+    # 单线失败降级为空错误组,不炸整条 bundle。简历深挖全局只出一条线,
+    # 由分线保证;cv_dive_done 是兜底:可读的仓若在子图内探测时恰好也读不到
+    # (限流等瞬时故障),它会回退到简历深挖,而那时简历线不该再挖第二遍。
     cv_dive_done = False
-    for pinned in lines:
-        owner, name = pinned if pinned else ("", "")
-        try:
-            repo_envelope = await ig.run_investigation(
-                project_text,
-                resume_text=resume_text,
-                repo=pinned,
-                github_token=github_token,
-                candidate_login=github_key or "",
-                grade=grade,
-                cv_dive_done=cv_dive_done,
-            )
-            cv_dive_done = cv_dive_done or repo_envelope.get("mode") == "cv_dive"
-            groups.append(
-                {
-                    "group": _group_kind(repo_envelope),
-                    "owner": owner,
-                    "repo": f"{owner}/{name}" if pinned else "",
-                    # v2 信封整体嵌套(qbank_v2),不展开——QbankV2 自带
-                    # group 键(dict),展开会覆盖 kind 字符串并污染 pick log
-                    "qbank_v2": repo_envelope,
-                }
-            )
-        except Exception as exc:  # noqa: BLE001
-            # 仓线失败必须留痕:信封 error 字段只有截断摘要,没有堆栈(对照下方评测线)
-            logging.getLogger(__name__).warning(
-                "仓线探测失败 repo=%s/%s", owner, name, exc_info=True
-            )
-            groups.append(
-                {
-                    "group": "repo",
-                    "owner": owner,
-                    "repo": f"{owner}/{name}" if pinned else "",
-                    "mode": "error",
-                    "repo_summary": "",
-                    "questions": [],
-                    "error": f"{type(exc).__name__}: {exc}"[:300],
-                }
-            )
-
-    # 评测线。单条证据线的失败只损失该线,不炸整条 bundle(与仓线同语义):
-    # 生产曾因服务账号缺 evaluation:view,403 从这里一路炸穿,整份候选人
-    # 零题库(job succeeded + qbank_status=failed)——错因线本就是锦上添花。
-    if github_key:
-        try:
-            from official_agent.evaluation import autograding as ag
-
-            submission = await ag.fetch_latest_submission(github_key)
-            if submission and not ag.is_full_score(submission):
-                failures = ag.extract_failures(submission)
-                if not failures:
-                    pass  # 非满分但抽不出失败明细:出题只会诱导编造,略过该线
-                else:
-                    buckets = ag.classify(failures)
-                    material = "\n".join(
-                        f"[{kind}] {task}/{name}"
-                        for kind, items in buckets.items()
-                        for task, name in items
-                    )
-                    ag_questions = await _b4_questions(
-                        f"评测失败清单(任务/test):\n{material}",
-                        count_min=2,
-                        count_max=3,
-                        source="autograding-failures",
-                    )
-                    groups.append(
-                        {
-                            "group": "autograding",
-                            "mode": "error_analysis",
-                            "repo_summary": f"评测非满分,失败 {len(failures)} 项",
-                            "questions": ag_questions,
-                            "prompt_version": _prompt_version(),
-                        }
-                    )
-        except Exception as exc:  # noqa: BLE001 — 错因线失败可容忍,只记日志
-            logging.getLogger(__name__).warning(
-                "评测错因线跳过(resume=%s):%s: %s", resume_id, type(exc).__name__, exc
-            )
-
-    # 奖项线:verified 的背景卡也进信封(搜索通道到位后面试官有料可读)。
-    # 单个奖项的取材失败跳过该奖项,不拖垮其余奖项与其他线。
-    awards = extract_awards(fields)
-    award_questions: list[dict] = []
-    award_briefs: list[dict] = []
-    for title in awards[:3]:
-        try:
-            brief = await build_award_brief(provider, title)
-        except Exception as exc:  # noqa: BLE001 — 单奖项失败可容忍,只记日志
-            logging.getLogger(__name__).warning(
-                "奖项线取材跳过(resume=%s,奖项=%s):%s: %s",
-                resume_id,
-                title,
-                type(exc).__name__,
-                exc,
-            )
-            continue
-        award_briefs.append(brief)
-        award_questions.extend(brief.get("questions", []))
-    if award_questions or award_briefs:
-        groups.append(
-            {
-                "group": "awards",
-                "mode": "award_brief",
-                "repo_summary": f"奖项 {len(awards)} 项",
-                "questions": award_questions,
-                "briefs": award_briefs,
-                "prompt_version": _prompt_version(),
-            }
+    for pinned in await _repo_lines(project_text, resume_id=resume_id, github_token=github_token):
+        group, became_cv_dive = await _repo_line(
+            pinned,
+            project_text=project_text,
+            resume_text=resume_text,
+            github_key=github_key,
+            github_token=github_token,
+            grade=grade,
+            cv_dive_done=cv_dive_done,
         )
+        cv_dive_done = cv_dive_done or became_cv_dive
+        groups.append(group)
 
-    # 兜底线:仓线无题、无评测、无奖项 → 基础三维 + 部门技能题组。
-    # repo 组已 v2(题目在 group.entry/chains 里),证据判定两种形状都认
-    def _group_has_evidence(g: dict[str, Any]) -> bool:
-        qbank_v2 = g.get("qbank_v2")
-        if isinstance(qbank_v2, dict):
-            inner = qbank_v2.get("group") or {}
-            return bool(inner.get("entry") or inner.get("chains"))
-        return bool(g.get("questions"))
+    autograding_group = await _autograding_line(github_key, resume_id)
+    if autograding_group is not None:
+        groups.append(autograding_group)
 
-    evidence_present = any(_group_has_evidence(g) for g in groups)
-    if not evidence_present:
-        base_qs = base_three_questions()
-        department = next(
-            (f.value for f in fields if "dept" in f.field_key.lower() or "部门" in f.title),
-            "",
-        )
-        skill_qs = await _b4_questions(
-            f"候选部门:{department or '未填'}。候选人材料:\n" + "\n".join(f.value for f in fields),
-            count_min=2,
-            count_max=4,
-        )
-        groups.append(
-            {
-                "group": "base_and_skills",
-                "mode": "base_fallback",
-                "repo_summary": "无证据候选,基础三维+部门技能题组",
-                "questions": base_qs + skill_qs,
-                "prompt_version": _prompt_version(),
-            }
-        )
+    awards_group = await _awards_line(provider, fields, resume_id)
+    if awards_group is not None:
+        groups.append(awards_group)
 
-    all_questions: list[dict[str, Any]] = []
-    for g in groups:
-        qbank_v2 = g.get("qbank_v2")
-        if isinstance(qbank_v2, dict):
-            # repo v2 组:题目收集为 dict(带 time_minutes,suggest_plan 需要)
-            inner = qbank_v2.get("group") or {}
-            entry = inner.get("entry")
-            if entry:
-                all_questions.append(
-                    {
-                        "question": entry.get("question", ""),
-                        "time_minutes": entry.get("time_minutes", 3),
-                    }
-                )
-            for chain in inner.get("chains", []):
-                for layer in chain.get("layers", []):
-                    all_questions.append({"question": layer.get("question", ""), "time_minutes": 3})
-            for reserve in inner.get("reserves", []):
-                all_questions.append(
-                    {
-                        "question": reserve.get("question", ""),
-                        "time_minutes": reserve.get("time_minutes", 3),
-                    }
-                )
-        else:
-            all_questions.extend(g.get("questions", []))
-    # 聚合 repo 组探索/出题用量(其余线 v1 形状无用量面)
-    usage_total: dict[str, int | None] = {
-        "input_tokens": None,
-        "output_tokens": None,
-        "cache_hit_tokens": None,
-        "cache_miss_tokens": None,
-    }
-    for g in groups:
-        qbank_v2 = g.get("qbank_v2") or {}
-        metas = [qbank_v2.get("explore_meta") or {}, qbank_v2.get("generation_usage") or {}]
-        for meta in metas:
-            for k in usage_total:
-                v = meta.get(k)
-                if v is not None:
-                    usage_total[k] = (usage_total[k] or 0) + int(v)
-    envelope = {
+    if not any(_group_has_evidence(g) for g in groups):
+        groups.append(await _fallback_line(fields))
+
+    all_questions = _flatten_v2_questions(groups)
+    return {
         "schema_name": "evaluation_qbank/v2",
         "groups": groups,
         "suggested_plan": suggest_plan(all_questions, budget_minutes=15),
         "total_questions": len(all_questions),
-        "explore_usage_total": usage_total,
+        "explore_usage_total": _aggregate_usage(groups),
         "prompt_version": _prompt_version(),
     }
-    return envelope

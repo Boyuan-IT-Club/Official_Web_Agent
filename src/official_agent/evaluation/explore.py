@@ -125,6 +125,73 @@ def build_explore_tools(client: GitHubClient, owner: str, name: str) -> list:
     ]
 
 
+async def _run_tool_calls(
+    tool_calls: list,
+    tools_by_name: dict[str, Any],
+    messages: list,
+    dossier: Dossier,
+    *,
+    start: float,
+    turn: int,
+) -> tuple[list[str], int]:
+    """执行一批工具调用:硬闸逐次判定,写 dossier 并回 ToolMessage。
+
+    返回 (本批写入的槽位, 执行后的轮数)。轮数/墙钟硬闸触发时提前收批,
+    触发原因写进 dossier.degrade_reason。
+    """
+    written_slots: list[str] = []
+    for tc in tool_calls:
+        # 硬闸:轮数 = LLM+工具调用累计,逐次判定(一批并行
+        # 工具调用不得突破 80 上限);墙钟同样覆盖工具执行
+        if turn >= MAX_TURNS:
+            dossier.degraded = True
+            dossier.degrade_reason = dossier.degrade_reason or f"轮数 {MAX_TURNS} 触顶"
+            break
+        remaining = MAX_WALL_SECONDS - (time.monotonic() - start)
+        if remaining <= 0:
+            dossier.degraded = True
+            dossier.degrade_reason = dossier.degrade_reason or "墙钟 300s 触顶"
+            break
+        turn += 1
+        tool_name = tc.get("name") or ""
+        tool = tools_by_name.get(tool_name)
+        payload = None  # 预绑定:首调用即炸时 isinstance 判定不炸
+        if tool is None:
+            observation = f"未知工具 {tool_name}"
+        else:
+            try:
+                payload = await asyncio.wait_for(
+                    tool.coroutine(**(tc.get("args") or {})),
+                    timeout=max(remaining, 1.0),
+                )
+                observation = _observation_text(tool_name, payload)
+            except TimeoutError:
+                dossier.degraded = True
+                dossier.degrade_reason = dossier.degrade_reason or "墙钟 300s 触顶"
+                break
+            except GitHubUnavailable as exc:
+                observation = f"工具不可用(降级信号): {exc}"
+            except Exception as exc:  # noqa: BLE001 — 单工具炸不炸整轮
+                observation = f"工具执行异常: {type(exc).__name__}: {exc}"
+        if tool_name == "list_files" and isinstance(payload, tuple):
+            dossier.paths, dossier.paths_truncated = payload
+        slots = _SLOT_BY_TOOL.get(tool_name, ())
+        # 逐槽写入(any 会短路,多槽元组实际只进首槽)。
+        # add 返回「是否写入」,直接采用——子串反推会把「容量满丢弃」
+        # 误判成已写入(同文观察已在槽里时)。
+        if observation:
+            written_slots.extend(slot for slot in slots if dossier.add(slot, observation))
+        # OpenAI 序纪律:ToolMessage 必须紧跟 assistant tool_calls 连续出现,
+        # 中间不得插入其他角色消息(真机 400 实测)。
+        # 模型面的工具返回过注入守卫(数据区标签+扫描);dossier
+        # 仍存原始证据(出题材料不被标注污染)。
+        guarded, _trace = guard_tool_result(tool_name, observation[:2000] or "(空结果)")
+        messages.append(
+            ToolMessage(guarded, tool_call_id=tc.get("id") or "", name=tool_name)
+        )
+    return written_slots, turn
+
+
 async def explore_repo(
     *,
     project_text: str,
@@ -203,62 +270,9 @@ async def explore_repo(
             tool_calls = getattr(response, "tool_calls", None) or []
             if not tool_calls:
                 break  # 材料自认充分,正常终止
-            written_slots: list[str] = []
-            for tc in tool_calls:
-                # 硬闸:轮数 = LLM+工具调用累计,逐次判定(一批并行
-                # 工具调用不得突破 80 上限);墙钟同样覆盖工具执行
-                if turn >= MAX_TURNS:
-                    dossier.degraded = True
-                    dossier.degrade_reason = dossier.degrade_reason or f"轮数 {MAX_TURNS} 触顶"
-                    break
-                remaining = MAX_WALL_SECONDS - (time.monotonic() - start)
-                if remaining <= 0:
-                    dossier.degraded = True
-                    dossier.degrade_reason = dossier.degrade_reason or "墙钟 300s 触顶"
-                    break
-                turn += 1
-                tool_name = tc.get("name") or ""
-                tool = tools_by_name.get(tool_name)
-                payload = None  # 预绑定:首调用即炸时 isinstance 判定不炸
-                if tool is None:
-                    observation = f"未知工具 {tool_name}"
-                else:
-                    try:
-                        payload = await asyncio.wait_for(
-                            tool.coroutine(**(tc.get("args") or {})),
-                            timeout=max(remaining, 1.0),
-                        )
-                        observation = _observation_text(tool_name, payload)
-                    except TimeoutError:
-                        dossier.degraded = True
-                        dossier.degrade_reason = dossier.degrade_reason or "墙钟 300s 触顶"
-                        break
-                    except GitHubUnavailable as exc:
-                        observation = f"工具不可用(降级信号): {exc}"
-                    except Exception as exc:  # noqa: BLE001 — 单工具炸不炸整轮
-                        observation = f"工具执行异常: {type(exc).__name__}: {exc}"
-                if tool_name == "list_files" and isinstance(payload, tuple):
-                    dossier.paths, dossier.paths_truncated = payload
-                slots = _SLOT_BY_TOOL.get(tool_name, ())
-                # 逐槽写入(any 会短路,多槽元组实际只进首槽)。
-                # add 返回「是否写入」,直接采用——子串反推会把「容量满丢弃」
-                # 误判成已写入(同文观察已在槽里时)。
-                if observation:
-                    written_slots.extend(
-                        slot for slot in slots if dossier.add(slot, observation)
-                    )
-                # OpenAI 序纪律:ToolMessage 必须紧跟 assistant tool_calls 连续出现,
-                # 中间不得插入其他角色消息(真机 400 实测)。
-                # 模型面的工具返回过注入守卫(数据区标签+扫描);dossier
-                # 仍存原始证据(出题材料不被标注污染)。
-                guarded, _trace = guard_tool_result(tool_name, observation[:2000] or "(空结果)")
-                messages.append(
-                    ToolMessage(
-                        guarded,
-                        tool_call_id=tc.get("id") or "",
-                        name=tool_name,
-                    )
-                )
+            written_slots, turn = await _run_tool_calls(
+                tool_calls, tools_by_name, messages, dossier, start=start, turn=turn
+            )
             # 轮尾单条 user 消息承载观察回执+步数计数(追加不改写)
             receipt = (
                 f"观察已写入 {'/'.join(written_slots)}"
