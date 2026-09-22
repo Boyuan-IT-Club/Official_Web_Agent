@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from official_agent.evaluation import runner as eval_runner
+from official_agent.evaluation.scoring import ai_level
 from official_agent.graphs.identity import ResolvedIdentity
 from official_agent.state import audit, evaluation
 from official_agent.state import qbank as qbank_store
@@ -29,6 +30,25 @@ _require_resume_audit = _require_any("resume:audit")
 # 按钮显隐用同一权限码,双侧拒绝语义一致。Backend 侧简历状态 6 写入同样验
 # 此码(服务账号)。
 _require_evaluation_run = _require_any("evaluation:run")
+
+# AI 评分分级可见:具体分数仅 evaluation:score:view(仅超管)可见,
+# 其余角色只见三档等级(优秀/良好/合格)。权限码由后端种子授予(V47)。
+_SCORE_VIEW_PERMISSION = "evaluation:score:view"
+
+
+def _can_view_score(identity: ResolvedIdentity) -> bool:
+    return _SCORE_VIEW_PERMISSION in (identity.get("permission_codes") or [])
+
+
+def _attach_level_and_mask(row: dict[str, Any], *, can_view: bool) -> dict[str, Any]:
+    """就地补 ai_level(所有角色都带,前端免二次判);无 view 权限时置空具体分数。"""
+    row["ai_level"] = ai_level(row.get("total"))
+    if not can_view:
+        row["total"] = None
+        card = row.get("card")
+        if isinstance(card, dict) and "total" in card:
+            card["total"] = None
+    return row
 
 
 class RunBody(BaseModel):
@@ -242,7 +262,7 @@ class RejectBody(BaseModel):
 
 @router.get("/admin/evaluation/queue")
 async def evaluation_queue(
-    _: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
+    identity: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
     cycle_id: int,
     queue: str = "all",
     limit: int = 200,
@@ -263,6 +283,10 @@ async def evaluation_queue(
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail="查询队列失败,请稍后重试") from exc
+    can_view = _can_view_score(identity)
+    for item in items:
+        # 评分分级可见:等级人人可见,具体分数仅 view 权限
+        _attach_level_and_mask(item, can_view=can_view)
     return {
         "items": items,
         "total": len(items),
@@ -285,6 +309,8 @@ async def get_scorecard_for_review(
     row = await asyncio.to_thread(evaluation.latest_scorecard, resume_id, cycle_id)
     if row is None:
         raise HTTPException(status_code=404, detail="该候选暂无评分卡")
+    # 评分分级可见:卡内具体分数(card.total 与顶层 total)仅 view 权限可见
+    _attach_level_and_mask(row, can_view=_can_view_score(identity))
     return row
 
 
