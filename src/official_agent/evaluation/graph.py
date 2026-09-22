@@ -227,18 +227,18 @@ async def llm_score(state: EvaluationState, config: RunnableConfig | None = None
         sources = [str(f.get("value", "")) for f in state["fields"]]
         result: ScorecardOutput | None = None
         last_err: ValueError | None = None
-        llm_usage = None
+        llm_usage: dict[str, int | None] | None = None
         corrective = ""
         for _attempt in range(2):
             resp = await model.ainvoke(
                 [HumanMessage(content=prompt_text + corrective)],
                 config=config,
             )
-            um = getattr(resp, "usage_metadata", None)
-            if um:
-                from official_agent.state.conversation import extract_usage
+            from official_agent.state.conversation import usage_from_response
 
-                llm_usage = extract_usage(um)
+            got = usage_from_response(resp)
+            if got is not None:
+                llm_usage = got
             raw = resp.content
             if isinstance(raw, list):  # 思考模型可能回块列表:只拼 text 块
                 raw = "".join(b.get("text", "") for b in raw if isinstance(b, dict))

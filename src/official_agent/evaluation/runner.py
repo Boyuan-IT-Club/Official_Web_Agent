@@ -30,6 +30,15 @@ from official_agent.tools.readonly import get_backend_client
 _MAX_CONCURRENCY = 4
 
 
+class SubmissionDataError(RuntimeError):
+    """调用方请求与后端权威数据错位/缺失(预检与执行期校验共用)。
+
+    继承 RuntimeError 保持既有 except 兼容。语义上是「调用方数据错位」
+    (管理面 → 400),不是服务端故障(→ 500),也不是可重试的瞬时故障;
+    消息是受控领域文案(resume_id 错位详情),可直达管理面。
+    """
+
+
 @dataclass(frozen=True)
 class TriggerItem:
     """初筛触发项。只认 resume_id 一个事实源。
@@ -152,7 +161,7 @@ async def fetch_scoring_fields(user_id: int, cycle_id: int) -> tuple[int, list[F
     resume_id = int(data.get("resumeId") or 0)
     if resume_id <= 0:
         # 缺 resumeId 静默落 0 会产生查不到的幽灵卡
-        raise RuntimeError("后端响应缺 resumeId,拒绝评分")
+        raise SubmissionDataError("后端响应缺 resumeId,拒绝评分")
     simple_fields = list(data.get("simpleFields") or [])
     fields = [
         FieldText(
@@ -183,13 +192,13 @@ async def fetch_resume_authority(resume_id: int) -> dict:
     data = await client.get(f"/api/resumes/admin/by-resume/{resume_id}")
     resume_id_back = int(data.get("resumeId") or 0)
     if resume_id_back != resume_id:
-        raise RuntimeError(
+        raise SubmissionDataError(
             f"简历权威归属不一致:请求 resume_id={resume_id},后端返回 {resume_id_back}——"
             "拒绝执行,防错位操作"
         )
     user_id = int(data.get("userId") or 0)
     if user_id <= 0:
-        raise RuntimeError(f"后端未返回简历 {resume_id} 的归属 user_id,拒绝执行")
+        raise SubmissionDataError(f"后端未返回简历 {resume_id} 的归属 user_id,拒绝执行")
     return {
         "resume_id": resume_id,
         "user_id": user_id,
@@ -365,7 +374,7 @@ class EvaluationRunner:
                 # 硬断言:后端按 user_id+cycle 派生出的简历必须就是本 job
                 # 的简历;不一致说明数据错位,立即失败,绝不带病继续。
                 if fetched_resume_id != resume_id:
-                    raise RuntimeError(
+                    raise SubmissionDataError(
                         f"简历归属错位:job resume_id={resume_id},"
                         f"后端按 user_id={job['user_id']} 返回 {fetched_resume_id}——拒绝评分"
                     )

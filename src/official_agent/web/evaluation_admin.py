@@ -70,9 +70,9 @@ async def run_evaluation_jobs(
     except evaluation.JobStoreError as exc:
         # DB 侧建 job 失败是服务端故障,别混进下面的"调用方数据错位"
         raise HTTPException(status_code=500, detail="提交初筛任务失败,请稍后重试") from exc
-    except RuntimeError as exc:
-        # 权威归属核对失败属调用方数据错位 → 400,不是服务端故障。
-        # str(exc) 是 runner 受控的领域文案(resume_id 错位详情),非内部异常原文
+    except eval_runner.SubmissionDataError as exc:
+        # 调用方数据错位(领域异常)→ 400;其余 RuntimeError 等意外异常
+        # 落到下面的兜底 500——不再被误判成调用方问题
         raise HTTPException(status_code=400, detail=f"简历归属核对失败:{exc}") from exc
     except Exception as exc:  # noqa: BLE001 — 统一 500 固定文案
         raise HTTPException(status_code=500, detail="提交初筛任务失败,请稍后重试") from exc

@@ -377,7 +377,7 @@ async def generate_node(state: InvestigationState) -> dict:
         # 三档答案齐备、主题出自材料、题量硬顶)会偶发不过。这些错误对模型是
         # 可自纠的,直接进 error 态会让整份简历一道题都拿不到 —— 故照评分轨
         # 的先例,把校验错误回灌、子图内重试一次,两次仍不合规才翻 error。
-        from official_agent.state.conversation import extract_usage
+        from official_agent.state.conversation import usage_from_response
 
         gen_usage: dict[str, Any] = {}
         group = None
@@ -385,10 +385,9 @@ async def generate_node(state: InvestigationState) -> dict:
         last_err: Exception | None = None
         for _attempt in range(2):
             resp = await model.ainvoke([HumanMessage(content=prompt_text + corrective)])
-            gen_usage = extract_usage(
-                (getattr(resp, "response_metadata", None) or {}).get("token_usage")
-                or getattr(resp, "usage_metadata", None)
-            )
+            got = usage_from_response(resp)
+            if got is not None:
+                gen_usage = got
             raw = resp.content
             if isinstance(raw, list):
                 raw = "".join(b.get("text", "") for b in raw if isinstance(b, dict))
@@ -424,7 +423,10 @@ async def generate_node(state: InvestigationState) -> dict:
                 else:
                     group = _guided_group(group_payload, dossier_text)
                 break
-            except Exception as exc:  # noqa: BLE001 — 回灌错误让模型自纠
+            except ValueError as exc:
+                # 只回灌校验错误让模型自纠;程序缺陷(AttributeError/KeyError 等)
+                # 必须翻节点错误暴露,不能伪装成「模型不合规」。校验机器全部
+                # 抛 ValueError(json 解析/schema 校验/题量硬顶),见本文件各 raise。
                 last_err = exc
                 # 防御纵深:exc 会嵌入模型产出的 theme/question(与简历同源,可含
                 # 注入 payload)。纠正段落位于数据区**之外**,直接插 exc 会把它抬成
