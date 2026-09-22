@@ -105,8 +105,9 @@
 ### 3.4 基线快照(本文定稿时,重构起点)
 
 - `uv run ruff check .`:全绿。
-- `uv run pytest`:**693 passed / 33 skipped**(skip 全部为集成档缺 pgvector 容器的自 SKIP),
-  2 条无害 warning(`RunnableConfig` 类型标注)。之后任何 chunk 的基线都必须不低于此。
+- `uv run pytest`:定稿时 **693 passed / 33 skipped**(skip 全部为集成档缺 pgvector
+  容器的自 SKIP);Batch 1 完成后 **697 passed / 33 skipped**(净增 4 条测试)。
+  之后任何 chunk 的基线都必须不低于此。
 
 ---
 
@@ -280,12 +281,12 @@
 
 | Chunk | 内容 | 状态 | 备注 |
 |---|---|---|---|
-| 1.1 | 异步阻塞修复 | 待办 | |
-| 1.2 | 吞异常补日志 | 待办 | |
-| 1.3 | 管理面错误文案 | 待办 | |
-| 1.4 | 异常分类 + usage 口径 | 待办 | |
-| 1.5 | 死代码清理 | 待办 | |
-| 1.6 | eval 命令文档修正 | 待办 | |
+| 1.1 | 异步阻塞修复 | 完成 | 1b81958;AST 验收脚本:async 内零直调同步 store |
+| 1.2 | 吞异常补日志 | 完成 | 61e4a41;+2 条可观测性测试 |
+| 1.3 | 管理面错误文案 | 完成 | a387d42;口径精化见 §4 chunk 1.3,+1 测试 |
+| 1.4 | 异常分类 + usage 口径 | 完成 | 3c4fde6;SubmissionDataError 领域异常,+1 分流测试 |
+| 1.5 | 死代码清理 | 完成 | b378203;assert→if/raise 等 4 项 |
+| 1.6 | eval 命令文档修正 | 完成 | faab00b;实测 run_evals.py --help 可用 |
 | 2.0 | 主链路特征测试 | 待办 | Batch 2 前置 |
 | 2.1 | 共享鉴权模块 | 待办 | |
 | 2.2 | 会话存储抽取 | 待办 | 依赖 2.0 |
