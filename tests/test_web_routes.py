@@ -534,7 +534,9 @@ def test_chat_rebuilds_agent_after_config_change(
         return _FakeAgent()
 
     monkeypatch.setattr(routes, "build_assistant_agent", _counting_build)
-    monkeypatch.setattr(routes, "_config_fingerprint", lambda: "fp-1")
+    monkeypatch.setattr(
+        "official_agent.web.agent_factory.config_fingerprint", lambda: "fp-1"
+    )
 
     # 第一轮:新建 session,agent 构建 1 次
     with client.stream(
@@ -548,7 +550,9 @@ def test_chat_rebuilds_agent_after_config_change(
     assert len(builds) == 1
 
     # 配置变化(指纹变)→ 下一轮重建
-    monkeypatch.setattr(routes, "_config_fingerprint", lambda: "fp-2")
+    monkeypatch.setattr(
+        "official_agent.web.agent_factory.config_fingerprint", lambda: "fp-2"
+    )
     with client.stream(
         "POST",
         "/api/agent/chat",
@@ -606,7 +610,9 @@ def test_stream_turn_busy_when_lock_held(client: TestClient) -> None:
             return None
 
     session = session_store.SessionState("web:u7:busyt1", identity, "tok", _HangAgent())
-    session.applied_config_fingerprint = routes._config_fingerprint()
+    from official_agent.web.agent_factory import config_fingerprint
+
+    session.applied_config_fingerprint = config_fingerprint()
 
     async def run():
         async with session.turn_lock:  # 模拟另一轮正在执行
@@ -898,7 +904,9 @@ def test_chat_thread_creation_failure_degrades_and_logs(
         raise RuntimeError("pg down")
 
     monkeypatch.setattr(routes, "create_thread", _boom)
-    monkeypatch.setattr(routes, "_config_fingerprint", lambda: "fp-degraded")
+    monkeypatch.setattr(
+        "official_agent.web.agent_factory.config_fingerprint", lambda: "fp-degraded"
+    )
 
     with (
         caplog.at_level(logging.WARNING),

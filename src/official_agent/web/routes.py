@@ -40,7 +40,7 @@ from official_agent.security.pii import ReplyPiiMasker
 from official_agent.state.threads import create_thread, new_thread_id, resolve_thread
 from official_agent.tools.client import BackendError, BackendUnavailableError
 from official_agent.tools.readonly import asker_scope
-from official_agent.web import session_store
+from official_agent.web import agent_factory, session_store
 from official_agent.web.auth import authenticate as _authenticate
 from official_agent.web.auth import require_any as _require_any
 
@@ -120,7 +120,9 @@ async def _get_or_create_session(
                 identity, user_token=user_token, checkpointer=checkpointer
             )
             session = session_store.SessionState(session_id, identity, user_token, agent)
-            session.applied_config_fingerprint = await asyncio.to_thread(_config_fingerprint)
+            session.applied_config_fingerprint = await asyncio.to_thread(
+                agent_factory.config_fingerprint
+            )
             session_store.sessions[session_id] = session
             session_store.last_access[session_id] = now
             session_store.evict_locked(now)
@@ -143,8 +145,10 @@ async def _get_or_create_session(
         checkpointer = getattr(request.app.state, "checkpointer", None)
         agent = build_assistant_agent(identity, user_token=user_token, checkpointer=checkpointer)
         session = session_store.SessionState(session_id, identity, user_token, agent)
-        # 新建即记录当前配置指纹,避免首轮 _ensure_fresh_agent_config 误重建
-        session.applied_config_fingerprint = await asyncio.to_thread(_config_fingerprint)
+        # 新建即记录当前配置指纹,避免首轮热生效比对误重建
+        session.applied_config_fingerprint = await asyncio.to_thread(
+            agent_factory.config_fingerprint
+        )
         session_store.sessions[session_id] = session
         session_store.last_access[session_id] = now
         session_store.evict_locked(now)
@@ -256,36 +260,6 @@ def _error_code(exc: Exception) -> str:
     return _ERR_UNKNOWN
 
 
-def _config_fingerprint() -> str:
-    """当前生效配置(HOT_KEYS 值)的指纹;配置变更即变化。"""
-    from official_agent.config import HOT_KEYS, get_effective_settings
-
-    settings = get_effective_settings()
-    return repr(tuple((k, getattr(settings, k, None)) for k in sorted(HOT_KEYS)))
-
-
-async def _ensure_fresh_agent_config(
-    session: session_store.SessionState, checkpointer: Any
-) -> None:
-    """配置热生效:比对配置指纹,变了则重建 session 的 agent。
-
-    PUT /admin/config 只失效 get_settings 缓存;活跃会话的 agent 是进程内
-    复用的(见模块 docstring),不重建就一直用旧 model/provider。此处每轮
-    比对指纹,发现变化即用新配置重建 agent(身份/token 不变)。
-    指纹读取走线程池:get_effective_settings 每次直连 PG,不能占事件循环。
-    """
-    try:
-        current = await asyncio.to_thread(_config_fingerprint)
-    except Exception:  # noqa: BLE001 — PG 不可用 → 指纹取 env(不重建)
-        return
-    if session.applied_config_fingerprint == current:
-        return
-    session.agent = build_assistant_agent(
-        session.identity, user_token=session.user_token, checkpointer=checkpointer
-    )
-    session.applied_config_fingerprint = current
-
-
 async def _compress_if_needed(
     session: session_store.SessionState, config: dict, user_query: str
 ) -> str | None:
@@ -352,7 +326,7 @@ async def _stream_turn(
     - 正常:user_message(问题原文) + reply_summary(回复摘要非全文) + tools/耗时
     - 异常(error 事件):只存 error_code + 耗时,不存对话内容
     落行失败(fail-open)不阻断对话——观测绝不拖垮主流程(ADR-0005)。
-    checkpointer:配置变更后重建 agent 需要(见 _ensure_fresh_agent_config)。
+    checkpointer:配置变更后重建 agent 需要(见 web/agent_factory)。
     """
 
     def sse(payload: dict[str, Any]) -> str:
@@ -366,7 +340,9 @@ async def _stream_turn(
     await session.turn_lock.acquire()
     try:
         # 配置热生效:配置指纹变了 → 重建 agent(新 model/provider 立即作用于本轮)
-        await _ensure_fresh_agent_config(session, checkpointer)
+        await agent_factory.ensure_fresh_agent(
+            session, checkpointer=checkpointer, build_agent=build_assistant_agent
+        )
         # 轮计数(1 起),压缩事件「触发轮」留痕用
         session.turns += 1
 
