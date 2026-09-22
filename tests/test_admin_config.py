@@ -87,10 +87,12 @@ def test_admin_config_get_echoes_masked(
 ) -> None:
     """GET: 低敏项实值 + 高敏项掩码回显(已配置/未配置+末4位)。"""
     from official_agent.config import get_settings
-    from official_agent.web import routes
 
     _install_resolve(monkeypatch, _admin_identity())
-    monkeypatch.setattr(routes, "get_all_config", lambda: {"model_strong": "deepseek-v4-flash"})
+    monkeypatch.setattr(
+        "official_agent.web.config_admin.get_all_config",
+        lambda: {"model_strong": "deepseek-v4-flash"},
+    )
     # 高敏 env: LLM_API_KEY 假设已配置(先清 get_settings 缓存让新 env 生效)
     monkeypatch.setenv("LLM_API_KEY", "sk-test1234567890abcdef")
     get_settings.cache_clear()
@@ -108,7 +110,6 @@ def test_admin_config_put_applies_hot_reload(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """PUT 改低敏项 → 落库 + 热生效(get_settings 缓存失效)。"""
-    from official_agent.web import routes
 
     _install_resolve(monkeypatch, _admin_identity())
     applied: list[dict] = []
@@ -119,8 +120,8 @@ def test_admin_config_put_applies_hot_reload(
     def _invalidate() -> None:
         pass
 
-    monkeypatch.setattr(routes, "set_config", _fake_set)
-    monkeypatch.setattr(routes, "invalidate_settings_cache", _invalidate)
+    monkeypatch.setattr("official_agent.web.config_admin.set_config", _fake_set)
+    monkeypatch.setattr("official_agent.web.config_admin.invalidate_settings_cache", _invalidate)
     resp = client.put(
         "/api/agent/admin/config",
         json={"model_strong": "claude-sonnet-5"},
