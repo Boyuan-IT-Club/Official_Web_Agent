@@ -106,8 +106,8 @@
 
 - `uv run ruff check .`:全绿。
 - `uv run pytest`:定稿时 **693 passed / 33 skipped**(skip 全部为集成档缺 pgvector
-  容器的自 SKIP);Batch 1 完成后 697;Batch 2 完成后 **700 passed / 33 skipped**
-  (净增 7 条测试)。之后任何 chunk 的基线都必须不低于此。
+  容器的自 SKIP);Batch 1 后 697;Batch 2/3 后 **700 passed / 33 skipped**(净增 7 条)。
+  之后任何 chunk 的基线都必须不低于此。
 
 ---
 
@@ -295,9 +295,9 @@
 | 2.5 | 配置管理面拆分 | 完成 | a5ae58d;config_admin.py 独立 router |
 | 2.6 | _stream_turn 拆解 | 完成 | e34d864;编排 + 六小件,事件序列测试零改动通过 |
 | 2.7 | chat 入参 Pydantic 化 | 完成 | 0cd172d;畸形 body 500→422,400 契约保持 |
-| 3.1 | state/evaluation 拆分 | 待办 | |
-| 3.2 | 评估大函数拆解 | 待办 | |
-| 3.3 | 重复与常量收口 | 待办 | |
+| 3.1 | state/evaluation 拆分 | 完成 | 853cb4a;五模块包 + psycopg_pool,集成档真容器全绿,池复用可观测(5 次签出 ≤2 连接) |
+| 3.2 | 评估大函数拆解 | 完成 | 898f44f;run_bundle 251→63、_execute_job 218→107、explore_repo 169→108 |
+| 3.3 | 重复与常量收口 | 完成 | llm_common.py 单一出处:invoke_with_retry(两处回灌循环)/content_text(4 处内联)/prompt_version(4 份复制)/温度定档;墙钟与 stale 阈值具名 |
 | 4.1 | 上下文泄漏改写 | 待办 | 范围含 docs 与 CLAUDE.md |
 | 4.2 | 日志四律落地 | 待办 | |
 | 4.3 | 统一错误模型 | 待办 | |

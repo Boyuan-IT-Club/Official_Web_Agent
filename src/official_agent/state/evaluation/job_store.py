@@ -18,6 +18,8 @@ from official_agent.state.evaluation import _connection, bootstrap
 _MAX_ATTEMPTS = 3
 # 评审队列/job 列表单页上限:防单次请求拖回整周期
 _MAX_PAGE = 500
+# 僵 job 判定的默认时限(分钟):刚提交的任务可能仍在跑,超时限才回 pending
+_STALE_DEFAULT_MINUTES = 10
 
 _BOOTSTRAP_KEY = "job"
 
@@ -411,7 +413,9 @@ def requeue_failed(cycle_id: int) -> list[int]:
     return [int(r["job_id"]) for r in rows]
 
 
-def requeue_stale(cycle_id: int, *, older_than_minutes: int = 10) -> list[int]:
+def requeue_stale(
+    cycle_id: int, *, older_than_minutes: int = _STALE_DEFAULT_MINUTES
+) -> list[int]:
     """残留恢复(进程重启后 pending/running 僵 job):超过时限才回 pending。
 
     时限防误伤:刚提交的 pending/running 有活任务在跑,重入队会双跑。
@@ -426,7 +430,9 @@ def requeue_stale(cycle_id: int, *, older_than_minutes: int = 10) -> list[int]:
     return [int(r["job_id"]) for r in rows]
 
 
-def requeue_stale_all_cycles(*, older_than_minutes: int = 10) -> list[dict[str, Any]]:
+def requeue_stale_all_cycles(
+    *, older_than_minutes: int = _STALE_DEFAULT_MINUTES
+) -> list[dict[str, Any]]:
     """启动自动恢复:不限周期,把超时限的僵 job 全部回 pending。
 
     返回 job_id + cycle_id 供派发;attempts 达上限的落 failed 交人工。

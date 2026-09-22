@@ -21,12 +21,15 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from official_agent.evaluation.dossier import SLOT_NAMES, Dossier
 from official_agent.evaluation.github_client import GitHubClient, GitHubUnavailable
+from official_agent.evaluation.llm_common import TEMPERATURE_GENERATION
 from official_agent.security.injection_guard import guard_tool_result, wrap_data_zone
 from official_agent.state.conversation import usage_from_response
 
 #: 预算闸
 MAX_TURNS = 80
 MAX_WALL_SECONDS = 300
+# 降级文案引用同一常量:改墙钟上限后文案不会撒谎
+_WALL_CLOCK_TEXT = f"墙钟 {MAX_WALL_SECONDS}s 触顶"
 
 #: 工具观察 → dossier 槽位(确定性映射;同观察逐槽全写,不做短路)
 _S = {name: name for name in SLOT_NAMES}  # 槽名单源(与 schema.CATEGORY 同步)
@@ -150,7 +153,7 @@ async def _run_tool_calls(
         remaining = MAX_WALL_SECONDS - (time.monotonic() - start)
         if remaining <= 0:
             dossier.degraded = True
-            dossier.degrade_reason = dossier.degrade_reason or "墙钟 300s 触顶"
+            dossier.degrade_reason = dossier.degrade_reason or _WALL_CLOCK_TEXT
             break
         turn += 1
         tool_name = tc.get("name") or ""
@@ -167,7 +170,7 @@ async def _run_tool_calls(
                 observation = _observation_text(tool_name, payload)
             except TimeoutError:
                 dossier.degraded = True
-                dossier.degrade_reason = dossier.degrade_reason or "墙钟 300s 触顶"
+                dossier.degrade_reason = dossier.degrade_reason or _WALL_CLOCK_TEXT
                 break
             except GitHubUnavailable as exc:
                 observation = f"工具不可用(降级信号): {exc}"
@@ -247,7 +250,7 @@ async def explore_repo(
             elapsed = time.monotonic() - start
             if elapsed >= MAX_WALL_SECONDS:
                 dossier.degraded = True
-                dossier.degrade_reason = dossier.degrade_reason or "墙钟 300s 触顶"
+                dossier.degrade_reason = dossier.degrade_reason or _WALL_CLOCK_TEXT
                 break
             if dossier.degraded:  # dossier 40K 已触顶(add 里标记)
                 break
@@ -325,7 +328,7 @@ async def run_explore(
     from official_agent.graphs.assistant import build_model
 
     settings = get_effective_settings()
-    model = build_model(settings, temperature=0.2)
+    model = build_model(settings, temperature=TEMPERATURE_GENERATION)
     client = GitHubClient(base_url=github_base, token=github_token)
     return await explore_repo(
         project_text=project_text,

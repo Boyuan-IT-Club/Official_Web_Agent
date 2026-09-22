@@ -23,9 +23,14 @@ from official_agent.evaluation.awards import (
 from official_agent.evaluation.github_client import GitHubClient, GitHubUnavailable
 from official_agent.evaluation.graph import _extract_json
 from official_agent.evaluation.investigate import extract_repos
+from official_agent.evaluation.llm_common import (
+    TEMPERATURE_GENERATION,
+    content_text,
+    prompt_version,
+)
 from official_agent.evaluation.schema import QuestionSet
 from official_agent.graphs.assistant import build_model
-from official_agent.prompt_loader import load_prompt, load_prompt_meta
+from official_agent.prompt_loader import load_prompt
 from official_agent.security.injection_guard import wrap_data_zone
 
 PROMPT_FILE = "evaluation/b4.md"
@@ -37,7 +42,7 @@ MAX_REPO_LINES = 5
 
 
 def _prompt_version() -> str:
-    return load_prompt_meta(PROMPT_FILE).get("version", "unknown")
+    return prompt_version(PROMPT_FILE)
 
 
 def _project_text(fields: list) -> str:
@@ -82,7 +87,7 @@ async def _b4_questions(
     同一条红线)。
     """
     settings = get_effective_settings()
-    model = build_model(settings, temperature=0.2)
+    model = build_model(settings, temperature=TEMPERATURE_GENERATION)
     prompt_text = (
         load_prompt(PROMPT_FILE)
         + "\n\n---\n\n材料:\n"
@@ -91,11 +96,7 @@ async def _b4_questions(
         + "\n只输出符合 schema 的 JSON 对象,不要任何其他文字或代码围栏。"
     )
     resp = await model.ainvoke([HumanMessage(content=prompt_text)])
-    raw = resp.content
-    if isinstance(raw, list):
-        raw = "".join(b.get("text", "") for b in raw if isinstance(b, dict))
-    content = raw if isinstance(raw, str) else str(raw)
-    qs = QuestionSet.model_validate_json(_extract_json(content))
+    qs = QuestionSet.model_validate_json(_extract_json(content_text(resp)))
     questions = [q.model_dump() for q in qs.questions]
     if not count_min <= len(questions) <= count_max:
         raise ValueError(f"题数越界:{len(questions)}")

@@ -7,19 +7,20 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 from typing import Any
 
 from langchain_core.messages import HumanMessage
 
 from official_agent.evaluation.graph import _extract_json
+from official_agent.evaluation.llm_common import content_text, prompt_version
 from official_agent.evaluation.schema import JudgeReport
-from official_agent.prompt_loader import load_prompt, load_prompt_meta
+from official_agent.prompt_loader import load_prompt
 
 PROMPT_FILE = "evaluation/judge.md"
 
 
-def judge_prompt_version() -> str:
-    return load_prompt_meta(PROMPT_FILE).get("version", "unknown")
+judge_prompt_version = partial(prompt_version, PROMPT_FILE)
 
 
 async def judge_qbank(
@@ -37,11 +38,7 @@ async def judge_qbank(
         + json.dumps(group_payload, ensure_ascii=False)
     )
     resp = await model.ainvoke([HumanMessage(content=prompt_text)])
-    raw = resp.content
-    if isinstance(raw, list):
-        raw = "".join(b.get("text", "") for b in raw if isinstance(b, dict))
-    text = raw if isinstance(raw, str) else str(raw)
-    report = JudgeReport.model_validate_json(_extract_json(text))
+    report = JudgeReport.model_validate_json(_extract_json(content_text(resp)))
     out = report.model_dump()
     out["prompt_version"] = judge_prompt_version()
     return out
