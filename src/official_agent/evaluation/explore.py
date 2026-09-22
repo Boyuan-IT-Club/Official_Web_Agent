@@ -240,15 +240,13 @@ async def explore_repo(
                 if tool_name == "list_files" and isinstance(payload, tuple):
                     dossier.paths, dossier.paths_truncated = payload
                 slots = _SLOT_BY_TOOL.get(tool_name, ())
-                # 逐槽写入(any 会短路,多槽元组实际只进首槽)
-                written = [dossier.add(slot, observation) for slot in slots] if observation else []
-                if written:
-                    hit = [
-                        slot
-                        for slot in slots
-                        if slot in dossier.slots and observation in dossier.slots[slot]
-                    ]
-                    written_slots.extend(hit)
+                # 逐槽写入(any 会短路,多槽元组实际只进首槽)。
+                # add 返回「是否写入」,直接采用——子串反推会把「容量满丢弃」
+                # 误判成已写入(同文观察已在槽里时)。
+                if observation:
+                    written_slots.extend(
+                        slot for slot in slots if dossier.add(slot, observation)
+                    )
                 # OpenAI 序纪律:ToolMessage 必须紧跟 assistant tool_calls 连续出现,
                 # 中间不得插入其他角色消息(真机 400 实测)。
                 # 模型面的工具返回过注入守卫(数据区标签+扫描);dossier
@@ -326,5 +324,8 @@ async def run_explore(
     )
 
 
-# slot 名单的静态自检(防 SLOT_NAMES 演化时映射表漏更)
-assert all(slot in SLOT_NAMES for slots in _SLOT_BY_TOOL.values() for slot in slots)
+# slot 名单的静态自检(防 SLOT_NAMES 演化时映射表漏更)。
+# 不用 assert:python -O 会剥离模块级 assert,防线静默消失。
+_bad_slots = {s for slots in _SLOT_BY_TOOL.values() for s in slots} - set(SLOT_NAMES)
+if _bad_slots:
+    raise RuntimeError(f"工具槽位映射含未知槽位: {sorted(_bad_slots)}")

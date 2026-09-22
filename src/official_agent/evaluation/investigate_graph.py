@@ -395,7 +395,6 @@ async def generate_node(state: InvestigationState) -> dict:
             try:
                 group_payload: dict[str, Any] = json.loads(_extract_json(content))
                 repo_summary = str(group_payload.get("repo_summary", ""))
-                deep = bool(deep)
                 if deep or cv:
                     # 两条路径共用同一台校验机器;区别只在 no_repo:简历没有仓,
                     # 题面若带仓内路径,那必然是模型的臆造。

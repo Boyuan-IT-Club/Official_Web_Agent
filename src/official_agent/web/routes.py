@@ -19,7 +19,6 @@ import logging
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -46,9 +45,6 @@ from official_agent.tools.readonly import asker_scope
 router = APIRouter()
 
 logger = logging.getLogger(__name__)
-
-# 会话列表排序兜底:agent_threads.created_at 表级 NOT NULL,测试替身可能给 None
-_SORT_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 class _SessionState:
