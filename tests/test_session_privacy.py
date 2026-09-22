@@ -168,7 +168,7 @@ def test_delete_session_rejects_non_owner(client: TestClient, monkeypatch) -> No
 def test_chat_rejected_while_session_deleting(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#194 复审:删除进行中(已登记 _deleting_sessions)→ 续聊必须 409。
+    """删除进行中(已登记 deleting)→ 续聊必须 409。
 
     回归防护:旧实现只查 turn_lock 且会话不在内存时查不到——重启/LRU 淘汰后
     携原 session_id 续聊会重建新对象+新锁,与磁盘清理并发读写同一 checkpoint
@@ -192,7 +192,7 @@ def test_chat_rejected_while_session_deleting(
 def test_delete_holds_registration_then_releases_on_failure(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#194 复审:删除清理进行中该会话一直登记(续聊被 409 挡住),失败后撤
+    """删除清理进行中该会话一直登记(续聊被 409 挡住),失败后撤
     登记(可重试)。回归防护:仅查 turn_lock 的旧实现看不到磁盘清理窗口。"""
     async def _resolve(*_a: object, **_k: object) -> dict:
         return _identity(7)

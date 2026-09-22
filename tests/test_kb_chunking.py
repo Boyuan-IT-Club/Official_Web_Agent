@@ -1,4 +1,4 @@
-"""RAG #134 R1:结构分块纯逻辑单测(无 IO)。"""
+"""KB 结构分块纯逻辑单测(无 IO)。"""
 
 from official_agent.kb.chunking import MAX_CHUNK_CHARS, embed_text, split_doc, split_faq
 

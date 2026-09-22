@@ -1,4 +1,4 @@
-"""KB 数据面(RAG #134 R1):知识条目 CRUD 与向量检索。
+"""KB 数据面:知识条目 CRUD 与向量检索。
 
 - SQL 同步(threads.py 先例:mock 解耦单测,真库往返走集成档);
   异步入口用 asyncio.to_thread 包装,不阻塞事件循环
@@ -26,7 +26,7 @@ _SOURCE_COLUMNS = (
 
 
 class KbValidationError(ValueError):
-    """条目内容不满足入库要求(R2 映射 400)。"""
+    """条目内容不满足入库要求(管理面映射为 400)。"""
 
 
 @dataclass(frozen=True)

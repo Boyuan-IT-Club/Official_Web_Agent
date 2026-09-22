@@ -26,8 +26,8 @@ class Settings(BaseSettings):
     model_light: str = "claude-haiku-4-5-20251001"  # 降档预留;当前无消费方
     model_strong: str = "claude-sonnet-5"
 
-    # Embedding(RAG KB #134):独立配置组,与 build_model 平行,不塞 llm_base_url
-    # 也不入 HOT_KEYS(SEC-01:key 不入库;HOT_KEYS 是对话模型路由的接缝)。
+    # Embedding:独立配置组,与 build_model 平行,不塞 llm_base_url——
+    # 密钥只存 env 不入库,HOT_KEYS 仅收对话模型路由的键。
     # Anthropic 不提供 embedding → OpenAI-compatible 托管中文模型
     # (Qwen3-Embedding-0.6B / BGE-M3 等);具体 provider/model 落 kb_meta,
     # 换模型 = 全量 reindex + meta 版本 bump(禁跨模型向量混排)。

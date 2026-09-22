@@ -1,4 +1,4 @@
-"""RAG #134 R2:/admin/kb* 管理 API 测试(test_admin_conversations.py 先例)。
+"""/admin/kb* 管理 API 测试(test_admin_conversations.py 先例)。
 
 TestClient + monkeypatch:resolve 装 admin(kb:manage)/无权身份;
 kb_store 函数被 monkeypatch(不真连 PG;真库往返在 test_kb_integration.py)。
@@ -117,7 +117,7 @@ def test_kb_rejects_candidate(
 def test_kb_rejects_monitor_without_kb_manage(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """权限分离:agent:monitor 不含 kb:manage(#121)。"""
+    """权限分离:agent:monitor 不含 kb:manage(两码独立授予)。"""
     _install_resolve(monkeypatch, _monitor_only_identity())
     resp = client.get("/api/agent/admin/kb/sources", headers=_AUTH)
     assert resp.status_code == 403

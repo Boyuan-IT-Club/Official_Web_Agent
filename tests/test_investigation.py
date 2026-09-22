@@ -991,7 +991,7 @@ async def test_strong_claim_techs_get_chains_weak_ones_do_not(monkeypatch) -> No
 async def test_all_techs_as_chains_over_guidance_accepted(monkeypatch) -> None:
     """每个技术都开链、超过指导配额 → **照收**:数量上限不再拦截。
 
-    生产复盘(#207 followup):FlowGuard 组 5 条链被整组扔掉,材料再好
+    生产复盘:FlowGuard 组 5 条链曾被整组扔掉,材料再好
     也归零。数量超出只由 prompt 指导,校验器放行,面试官自己挑题。"""
     names = ["Python", "PyTorch", "ResNet", "CNN", "YOLO"]
     resume = f"技术栈:\n{'、'.join(names)}\n项目经验:\n用 PyTorch 做了检测"
@@ -1108,7 +1108,7 @@ async def test_generate_retries_once_on_validation_error(monkeypatch) -> None:
 
     首次故意给一条**编造主题**的链(简历里没有 Kafka,内容闸门必拦),
     第二次给合规输出;应产出合规题组而非报错。数量超限(原先是 5 条链)
-    在 #207 followup 后已不算错误,连重试都不需要——直接照收。
+    按现行出题纪律已不算错误,连重试都不需要——直接照收。
     """
     bad = _multi_tech_payload(["T0", "Kafka"])  # Kafka 不在简历 → 防编造拦截
     resumes = "技术栈:\nT0、T1"
@@ -1202,7 +1202,7 @@ def test_chain_layer_count_out_of_range_rejected() -> None:
 
 
 def test_more_than_guidance_chains_accepted() -> None:
-    """链数超指导配额 → schema 照收(数量上限已撤,#207 followup)。"""
+    """链数超指导配额 → schema 照收(数量上限已撤,超配额仅提示不拦)。"""
     from official_agent.evaluation.schema import QuestionGroupV2
 
     payload = json.loads(_multi_tech_payload([f"T{i}" for i in range(7)]))
@@ -1358,7 +1358,7 @@ def test_chain_layer_extra_field_stripped_and_saved() -> None:
     """链层多写一个键(如模型把出处塞进 `evidence_note`)→ 剥键照收。
 
     历史教训反转:真实简历上实测过模型会给链层加出处字段,旧契约
-    (extra=forbid + 靠 prompt 避免)在生产两次撞死(最近一次 #166:
+    (extra=forbid + 靠 prompt 避免)在生产两次撞死(最近一次:
     备选混进 expected_signal,两次重试全败、整组归零)。prompt 写清楚
     挡不住偶发 slip——多余键剥掉、题目保存,质量闸门在内容校验一侧。"""
     payload = json.loads(_multi_tech_payload(["Python", "PyTorch"]))

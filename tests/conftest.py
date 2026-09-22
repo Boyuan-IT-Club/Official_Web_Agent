@@ -1,13 +1,13 @@
 """web 路由测试的 PG 隔离:`create_app()` 路径不得打真 PG。
 
-背景(#194 同类问题再现):Web 测试用 TestClient + monkeypatch 假造库交互,
+背景(会话删除期间误续聊的同型问题):Web 测试用 TestClient + monkeypatch 假造库交互,
 但 `create_app()` 走到两条会真连 PG 的路径,本机有没有 PG 会改变断言结果
 (无 PG → 503 / 有 PG → 200),即同一提交在 CI 与开发机结论不同:
 
 1. lifespan 自举与启动恢复,按失败语义分两类:
    a. 第一个 try(`app.py:40-55`)里的 `ensure_*` 系列建表 + 评测 job 表自举
       (`ensure_evaluation_job_ready`)。无 PG 时抛错 → 该 `except` 把
-      `app.state.checkpointer` 置 None → 恢复路径按 #194 P1 返 503。
+      `app.state.checkpointer` 置 None → 恢复路径按 fail-closed 返 503。
    b. 其后**独立**的 fail-open try(`app.py:60-67`)里的残留 job 全量扫回
       (`get_runner().recover_stale_on_startup`),以及每 6h 一轮的挂起载荷
       TTL 清理(`purge_expired_interrupts`,`app.py:99-106`)。失败只记

@@ -1,4 +1,4 @@
-"""KB 结构分块(RAG #134;选型依据 docs/research/rag-kb-survey.md,#119 拍板)。
+"""KB 结构分块(选型依据 docs/research/rag-kb-survey.md)。
 
 - FAQ 对 = 1 chunk(Q/A 拼接);自由正文按 Markdown 标题层级切
 - 超长段落按句末标点细分,单 chunk 硬上限 MAX_CHUNK_CHARS

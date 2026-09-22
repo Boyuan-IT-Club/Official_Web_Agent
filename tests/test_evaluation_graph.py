@@ -426,7 +426,7 @@ async def test_extra_key_triggers_corrective_retry() -> None:
 
 @pytest.mark.asyncio
 async def test_corrective_error_text_stays_inside_data_zone() -> None:
-    """#163 防御纵深:校验错误回灌时,其中的注入 payload 不得落到数据区外。
+    """防御纵深:校验错误回灌时,其中的注入 payload 不得落到数据区外。
 
     ve 会嵌入模型产出的 d.evidence(与简历同源);若原文裸插纠正段,payload
     就从 `</data>` 之后进入指令区。这里断言它只在数据区内。

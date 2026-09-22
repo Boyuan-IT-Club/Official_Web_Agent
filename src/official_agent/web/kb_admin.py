@@ -1,7 +1,7 @@
-"""KB 管理 API(RAG #134 R2):/api/agent/admin/kb* —— 知识条目维护面。
+"""KB 管理 API:/api/agent/admin/kb* —— 知识条目维护面。
 
-- 权限:独立权限码 ``kb:manage``(#121:与 agent:monitor 分离,可单独授权
-  某管理员管知识库;Backend V41 起种子落地,R5 代理转发同码校验)
+- 权限:独立权限码 ``kb:manage``,与 agent:monitor 分离,可单独授权
+  某管理员管知识库(后端 V41 起种子落地;nginx 代理转发同码校验)
 - 创建/更新即入库重嵌(分块+embedding 单事务);「重嵌」端点按已存内容
   重建向量——换 embedding 模型后逐条补齐用
 - store 层同步 psycopg,路由内一律 asyncio.to_thread,不阻塞事件循环

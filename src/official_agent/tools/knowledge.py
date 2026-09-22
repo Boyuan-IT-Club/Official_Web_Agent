@@ -1,10 +1,10 @@
-"""知识库检索工具(RAG #134 R3):search_knowledge——客服的社团/部门/FAQ 只读检索。
+"""知识库检索工具:search_knowledge——客服的社团/部门/FAQ 只读检索。
 
 docstring 契约(ADR-0003):写「何时用」+ 边界,docstring 即模型看到的工具描述。
 
-降级契约(#120):0 命中/服务不可用/EMBED 未配置都不抛异常——返回结构化
+降级契约:0 命中/服务不可用/EMBED 未配置都不抛异常——返回结构化
 状态由模型转述(查不到明说/引导官网),检索故障不阻塞对话。
-引用锚是 source_id+title(条目级,#118);snippet 截断只供作答参考。
+引用锚是 source_id+title(条目级);snippet 截断只供作答参考。
 """
 
 from typing import Any
@@ -39,7 +39,7 @@ async def search_knowledge(query: str) -> dict[str, Any]:
         hits = await kb_store.search(query, top_k=_TOP_K)
     except EmbeddingError:
         return dict(_UNAVAILABLE)
-    except Exception:  # noqa: BLE001 — 检索失败同降级,不阻塞对话(#120)
+    except Exception:  # noqa: BLE001 — 检索失败同降级,不阻塞对话
         return dict(_UNAVAILABLE)
     if not hits:
         return {

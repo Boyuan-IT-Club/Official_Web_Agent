@@ -75,7 +75,7 @@ async def _get_or_create_session(
     """
     now = time.monotonic()
     async with session_store.lock:
-        # #194 复审:删除中的会话一律拒绝——先于内存命中/档案恢复两条分支。
+        # 删除中的会话一律拒绝——先于内存命中/档案恢复两条分支。
         # 删除端在持锁登记后立刻放锁去做磁盘清理;此处若放行,新轮次会与
         # 清理并发读写同一 checkpoint thread(要么复活已删数据,要么读到半删状态)。
         if session_id and session_id in session_store.deleting:
@@ -610,7 +610,7 @@ async def _stream_turn(
         )
         if error_code is None:
             if acc.sources:
-                # R4 契约:delta 上新增可选 sources,不改消息 type 枚举——
+                # 引用锚契约:delta 上新增可选 sources,不改消息 type 枚举——
                 # 旧消费者收到空 content 追加无感;新前端做 [n] → 来源映射
                 yield _sse(
                     {

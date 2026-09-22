@@ -12,14 +12,14 @@ uv run pytest           # 单测(确定性代码:tools/、图结构)
 uv run python evals/run_evals.py  # eval 集(需要模型 API key,CI 中作为门禁;--help 看全部参数)
 ```
 
-## 本地 Langfuse(OBS-01)
+## 本地 Langfuse
 
 ```bash
 cd deploy/langfuse && docker compose up -d   # web: http://127.0.0.1:3001
 ```
 
 凭证在 `deploy/langfuse/.env`(gitignore,模板 `.env.example`);同目录 PG 暴露
-127.0.0.1:5432,checkpointer/审计(MEM-01/SEC-03)复用该实例。trace 接线:
+127.0.0.1:5432,checkpointer 与审计日志复用该实例。trace 接线:
 `from official_agent.observability import langfuse_callbacks`——fail-open,未配置自动降级。
 
 ## 架构要点

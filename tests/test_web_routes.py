@@ -776,7 +776,7 @@ def test_guard_rewrite_persists_to_checkpointer(
     assert "没有可用的数据查询权限" in seen_messages[1].content
 
 
-# ── RAG #134 R4:delta.sources 引用映射(契约 #90 扩展) ──────────────────
+# ── delta.sources 引用映射(SSE 契约扩展) ──────────────────
 
 
 class _KbAgent:
@@ -824,7 +824,7 @@ def test_chat_emits_sources_on_final_delta(
     with_sources = [e for e in events if e.get("sources")]
     assert len(with_sources) == 1
     src_event = with_sources[0]
-    assert src_event["type"] == "delta"  # 不改消息 type 枚举(#90)
+    assert src_event["type"] == "delta"  # 不改消息 type 枚举
     assert src_event["content"] == ""  # 空内容,旧消费者无感
     assert src_event["sources"] == [
         {"source_id": "kb_a", "title": "技术部介绍"},

@@ -69,7 +69,7 @@ def identity_of(role: str) -> ResolvedIdentity:
 def test_assemble_admin_gets_all_readonly_tools() -> None:
     tools = assemble_tools(identity_of("admin"))
     names = {getattr(t, "__name__", "") for t in tools}
-    assert len(tools) == 10  # RAG #134 R3:+search_knowledge
+    assert len(tools) == 10  # 知识库上线后:+search_knowledge
     assert "get_open_cycle" in names and "get_candidate_card" in names
     assert "search_knowledge" in names
 
@@ -81,14 +81,14 @@ def test_assemble_member_public_query_face() -> None:
         "search_resumes",
         "get_recruit_statistics",
         "find_available_sessions",
-        "search_knowledge",  # RAG #134 R3
+        "search_knowledge",
     }
 
 
 def test_assemble_candidate_gets_open_cycle_and_my_interview() -> None:
     """候选入口:能取当前周期 + 查本人面试(后者绑定用户令牌)。
 
-    RAG #134 R3(#120):候选人另装配 search_knowledge——社团/部门/FAQ
+    候选人另装配 search_knowledge——社团/部门/FAQ
     公开知识问答;个人数据仍只走绑定令牌的两个工具。
     """
     tools = assemble_tools(identity_of("candidate"), user_token="tok")

@@ -1,4 +1,4 @@
-"""RAG #134 R1:embedding 客户端单测(respx 拦 HTTP,不连真实端点)。"""
+"""embedding 客户端单测(respx 拦 HTTP,不连真实端点)。"""
 
 
 import httpx

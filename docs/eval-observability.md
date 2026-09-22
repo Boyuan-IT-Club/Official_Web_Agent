@@ -1,4 +1,4 @@
-# 初筛评测线可观测性 Runbook(#183)
+# 初筛评测线可观测性 Runbook
 
 一次 AI 初筛(job)在四个观测面共享同一个 **job 级 correlation id**(W3C
 32-hex trace id,由 `observability.eval_job_trace_id(job_id)` 从 job_id
