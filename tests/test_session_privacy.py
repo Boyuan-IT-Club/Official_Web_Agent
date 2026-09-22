@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import HumanMessage
 
-from official_agent.web import routes
+from official_agent.web import session_store
 from official_agent.web.app import create_app
 
 
@@ -25,13 +25,13 @@ async def _fake_checkpointer() -> AsyncIterator[None]:
 
 @pytest.fixture(autouse=True)
 def _reset_registry():
-    routes._sessions.clear()
-    routes._sessions_last_access.clear()
-    routes._deleting_sessions.clear()
+    session_store.sessions.clear()
+    session_store.last_access.clear()
+    session_store.deleting.clear()
     yield
-    routes._sessions.clear()
-    routes._sessions_last_access.clear()
-    routes._deleting_sessions.clear()
+    session_store.sessions.clear()
+    session_store.last_access.clear()
+    session_store.deleting.clear()
 
 
 @pytest.fixture
@@ -178,7 +178,7 @@ def test_chat_rejected_while_session_deleting(
 
     monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
     # 会话不在内存(模拟重启后),但删除端已登记 → 必须拒绝,而非走恢复路径
-    routes._deleting_sessions.add("web:u7:inflight01")
+    session_store.deleting.add("web:u7:inflight01")
 
     resp = client.post(
         "/api/agent/chat",
@@ -212,7 +212,7 @@ def test_delete_holds_registration_then_releases_on_failure(
     seen: list[bool] = []
 
     def _observe_then_boom(_tid: str) -> int:
-        seen.append("web:u7:fail01" in routes._deleting_sessions)
+        seen.append("web:u7:fail01" in session_store.deleting)
         raise RuntimeError("PG 抖动")
 
     monkeypatch.setattr(pg_mod, "purge_thread_checkpoints", _observe_then_boom)
@@ -224,7 +224,7 @@ def test_delete_holds_registration_then_releases_on_failure(
     assert resp.status_code == 500
     assert seen == [True], "清理窗口内该会话必须在删除登记中(check 与清理之间无缝隙)"
     # 失败后撤登记 → 同一会话可再试(不是永久 409)
-    assert "web:u7:fail01" not in routes._deleting_sessions
+    assert "web:u7:fail01" not in session_store.deleting
 
 
 def test_admin_transcript_read_is_audited(

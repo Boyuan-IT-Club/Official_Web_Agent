@@ -591,7 +591,7 @@ def test_stream_turn_busy_when_lock_held(client: TestClient) -> None:
     import asyncio
     import json as jsonlib
 
-    from official_agent.web import routes
+    from official_agent.web import routes, session_store
 
     identity = auth_ok_data()
     calls: list = []
@@ -605,7 +605,7 @@ def test_stream_turn_busy_when_lock_held(client: TestClient) -> None:
         async def aget_state(self, config):
             return None
 
-    session = routes._SessionState("web:u7:busyt1", identity, "tok", _HangAgent())
+    session = session_store.SessionState("web:u7:busyt1", identity, "tok", _HangAgent())
     session.applied_config_fingerprint = routes._config_fingerprint()
 
     async def run():

@@ -17,7 +17,6 @@ import asyncio
 import json
 import logging
 import time
-from collections import OrderedDict
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
@@ -41,6 +40,7 @@ from official_agent.security.pii import ReplyPiiMasker
 from official_agent.state.threads import create_thread, new_thread_id, resolve_thread
 from official_agent.tools.client import BackendError, BackendUnavailableError
 from official_agent.tools.readonly import asker_scope
+from official_agent.web import session_store
 from official_agent.web.auth import authenticate as _authenticate
 from official_agent.web.auth import require_any as _require_any
 
@@ -48,84 +48,10 @@ router = APIRouter()
 
 logger = logging.getLogger(__name__)
 
-
-class _SessionState:
-    """一个会话的运行时状态:装配好的 agent + 身份 + 用户 JWT。
-
-    checkpointer(记忆)是共享的(进程级,thread_id 隔离);这里只存每个会话
-    不能共享的东西:绑定该用户 token 的 agent(见模块 docstring)。
-    """
-
-    def __init__(
-        self,
-        session_id: str,
-        identity: ResolvedIdentity,
-        user_token: str,
-        agent: Any,
-    ) -> None:
-        self.session_id = session_id
-        self.identity = identity
-        self.user_token = user_token
-        self.agent = agent
-        # 配置热生效:agent 装配时的配置指纹(HOT_KEYS 值哈希)。
-        # PUT /admin/config 后下一轮比对发现不同 → 重建 agent 用新配置。
-        self.applied_config_fingerprint: str | None = None
-        # 轮计数(1 起),压缩事件留痕「触发轮」用
-        self.turns = 0
-        # 同会话并发轮次串行化——_stream_turn 全程持有,
-        # 第二个并发请求按 SSE 错误码契约立即回 busy(不入队;单 worker 下即全部防线)
-        self.turn_lock = asyncio.Lock()
-
-
-# 会话注册表:session_id → 运行时状态。进程内存,单 worker 语义(多副本部署下
-# 不得依赖进程内表做权限判断——恢复走 PG 档案 resolve_thread)。
-# 有界 TTL+LRU——超容/空闲过期只淘汰运行时对象;会话档案与 checkpoint
-# 在 PG,淘汰后携原 session_id 重入会走 resolve_thread 恢复路径,上下文不丢。
-_sessions: OrderedDict[str, _SessionState] = OrderedDict()
-# #194 复审:正在删除的 session_id 集合——删除期间拒绝新轮次。
-# 仅靠 turn_lock 不够:会话不在内存(重启/LRU 淘汰)时,续传路径会为同一
-# thread_id 重建**新对象 + 新锁**,旧锁的检查对它无效。删除开始即在此登记,
-# _get_or_create_session 两条分支(内存命中/档案恢复)都先查它。
-_deleting_sessions: set[str] = set()
-_sessions_last_access: dict[str, float] = {}
-_sessions_lock = asyncio.Lock()
-
 # 恢复拒绝的统一文案:不存在/跨属主/已终结不区分(防会话枚举翻看)
 _SESSION_RESUME_REJECT = "会话不存在、已结束或无权访问"
 
 
-def _evict_sessions_locked(now: float) -> None:
-    """TTL+LRU 淘汰(调用方持 _sessions_lock)。只删运行时,不碰 PG。
-
-    在途轮次(turn_lock 被持)一律不淘汰。
-    淘汰执行中的 _SessionState 会让同一 session_id 的下一个请求在内存
-    未命中,走 resolve_thread 恢复路径重建出一个**新对象 + 新锁**,两个
-    agent 随后并发写同一 checkpoint thread(旧对象还在 astream 里)。
-    容量不足且全部在途时宁可不淘汰,留待轮末下一次调用再清。
-    """
-    from official_agent.config import get_settings
-
-    settings = get_settings()
-    ttl = max(int(settings.session_registry_ttl_seconds), 1)
-    cap = max(int(settings.session_registry_max), 1)
-
-    def _evictable(sid: str) -> bool:
-        state = _sessions.get(sid)
-        return state is not None and not state.turn_lock.locked()
-
-    expired = [
-        sid for sid, ts in _sessions_last_access.items() if now - ts > ttl and _evictable(sid)
-    ]
-    for sid in expired:
-        _sessions.pop(sid, None)
-        _sessions_last_access.pop(sid, None)
-    # LRU:从最旧开始挑可淘汰项,在途的跳过(不阻断其余淘汰)
-    while len(_sessions) > cap:
-        victim = next((sid for sid in _sessions if _evictable(sid)), None)
-        if victim is None:  # 全部在途:本轮放弃淘汰,不制造双锁
-            break
-        _sessions.pop(victim, None)
-        _sessions_last_access.pop(victim, None)
 
 
 async def _get_or_create_session(
@@ -133,7 +59,7 @@ async def _get_or_create_session(
     identity: ResolvedIdentity,
     user_token: str,
     session_id: str | None,
-) -> tuple[_SessionState, bool]:
+) -> tuple[session_store.SessionState, bool]:
     """取会话;无则(或未给)新建并建档。同一 session_id 只能被同 user 续传。
 
     返回 (session, is_new):is_new=True 表示本会话是进程内新建(首轮须注身份前缀),
@@ -146,14 +72,14 @@ async def _get_or_create_session(
     跨属主/已终结/不存在统一 404,档案校验故障 503 fail-closed——绝不静默换新会话。
     """
     now = time.monotonic()
-    async with _sessions_lock:
+    async with session_store.lock:
         # #194 复审:删除中的会话一律拒绝——先于内存命中/档案恢复两条分支。
         # 删除端在持锁登记后立刻放锁去做磁盘清理;此处若放行,新轮次会与
         # 清理并发读写同一 checkpoint thread(要么复活已删数据,要么读到半删状态)。
-        if session_id and session_id in _deleting_sessions:
+        if session_id and session_id in session_store.deleting:
             raise HTTPException(status_code=409, detail="会话正在删除中")
-        if session_id and session_id in _sessions:
-            existing = _sessions[session_id]
+        if session_id and session_id in session_store.sessions:
+            existing = session_store.sessions[session_id]
             if existing.identity.get("user_id") != identity.get("user_id"):
                 raise HTTPException(status_code=403, detail="无权访问该会话")
             # 续传但 token 变了(官网 JWT 轮换/过期重登):重建 agent 绑定新 token,
@@ -165,8 +91,8 @@ async def _get_or_create_session(
                 )
                 existing.user_token = user_token
                 existing.identity = identity
-            _sessions.move_to_end(session_id)
-            _sessions_last_access[session_id] = now
+            session_store.sessions.move_to_end(session_id)
+            session_store.last_access[session_id] = now
             return existing, False
 
         user_id = identity.get("user_id")
@@ -193,17 +119,17 @@ async def _get_or_create_session(
             agent = build_assistant_agent(
                 identity, user_token=user_token, checkpointer=checkpointer
             )
-            session = _SessionState(session_id, identity, user_token, agent)
+            session = session_store.SessionState(session_id, identity, user_token, agent)
             session.applied_config_fingerprint = await asyncio.to_thread(_config_fingerprint)
-            _sessions[session_id] = session
-            _sessions_last_access[session_id] = now
-            _evict_sessions_locked(now)
+            session_store.sessions[session_id] = session
+            session_store.last_access[session_id] = now
+            session_store.evict_locked(now)
             return session, False
 
         # thread_id:建档优先;PG 不可用降级随机 thread_id(保隔离,不持久化)
         try:
             if user_id is not None:
-                # psycopg 是同步驱动,建档不能在事件循环上直跑(此处还持 _sessions_lock)
+                # psycopg 是同步驱动,建档不能在事件循环上直跑(此处还持 session_store.lock)
                 rec = await asyncio.to_thread(create_thread, "web", user_id, subject="web-chat")
                 session_id = rec.thread_id
             else:
@@ -216,12 +142,12 @@ async def _get_or_create_session(
         # checkpointer:进程级共享(app lifespan 建立,fail-open)。thread_id 隔离会话。
         checkpointer = getattr(request.app.state, "checkpointer", None)
         agent = build_assistant_agent(identity, user_token=user_token, checkpointer=checkpointer)
-        session = _SessionState(session_id, identity, user_token, agent)
+        session = session_store.SessionState(session_id, identity, user_token, agent)
         # 新建即记录当前配置指纹,避免首轮 _ensure_fresh_agent_config 误重建
         session.applied_config_fingerprint = await asyncio.to_thread(_config_fingerprint)
-        _sessions[session_id] = session
-        _sessions_last_access[session_id] = now
-        _evict_sessions_locked(now)
+        session_store.sessions[session_id] = session
+        session_store.last_access[session_id] = now
+        session_store.evict_locked(now)
         return session, True
 
 
@@ -338,7 +264,9 @@ def _config_fingerprint() -> str:
     return repr(tuple((k, getattr(settings, k, None)) for k in sorted(HOT_KEYS)))
 
 
-async def _ensure_fresh_agent_config(session: _SessionState, checkpointer: Any) -> None:
+async def _ensure_fresh_agent_config(
+    session: session_store.SessionState, checkpointer: Any
+) -> None:
     """配置热生效:比对配置指纹,变了则重建 session 的 agent。
 
     PUT /admin/config 只失效 get_settings 缓存;活跃会话的 agent 是进程内
@@ -358,7 +286,9 @@ async def _ensure_fresh_agent_config(session: _SessionState, checkpointer: Any) 
     session.applied_config_fingerprint = current
 
 
-async def _compress_if_needed(session: _SessionState, config: dict, user_query: str) -> str | None:
+async def _compress_if_needed(
+    session: session_store.SessionState, config: dict, user_query: str
+) -> str | None:
     """轮末检查会话 token,超阈值则压缩回写 checkpoint。
 
     回写 = update_state 产生 checkpoint **新版本**(先 REMOVE_ALL_MESSAGES
@@ -414,7 +344,7 @@ async def _compress_if_needed(session: _SessionState, config: dict, user_query: 
 
 
 async def _stream_turn(
-    session: _SessionState, message: str, is_new: bool, checkpointer: Any = None
+    session: session_store.SessionState, message: str, is_new: bool, checkpointer: Any = None
 ) -> AsyncIterator[str]:
     """跑一轮:流式吐 SSE。is_new 仅作 SSE session 事件的 created 标记。
 
@@ -717,7 +647,7 @@ _background_tasks: set[asyncio.Task[None]] = set()
 
 
 def _log_conversation(
-    session: _SessionState,
+    session: session_store.SessionState,
     *,
     user_message: str,
     reply_summary: str,
@@ -1088,17 +1018,17 @@ async def delete_my_session(
     user_id = identity.get("user_id")
     if user_id is None or await asyncio.to_thread(resolve_thread, thread_id, user_id) is None:
         raise HTTPException(status_code=404, detail="会话不存在")
-    # 整段删除持"_deleting_sessions"登记——check 与清理之间不再有窗口。
+    # 整段删除持"session_store.deleting"登记——check 与清理之间不再有窗口。
     # 只在持锁时登记,顺带确认没有在途轮次(在途 generator 会复活已清数据)。
-    # 登记后即放锁:清理走线程池,不能让 _sessions_lock 被磁盘 IO 长占
+    # 登记后即放锁:清理走线程池,不能让 session_store.lock 被磁盘 IO 长占
     # (其余会话读走同一把锁)。
-    async with _sessions_lock:
-        inflight = _sessions.get(thread_id)
+    async with session_store.lock:
+        inflight = session_store.sessions.get(thread_id)
         if inflight is not None and inflight.turn_lock.locked():
             raise HTTPException(status_code=409, detail="会话正在回复中,请稍后再删除")
-        if thread_id in _deleting_sessions:
+        if thread_id in session_store.deleting:
             raise HTTPException(status_code=409, detail="会话正在删除中")
-        _deleting_sessions.add(thread_id)
+        session_store.deleting.add(thread_id)
     try:
         # 顺序:先清数据面(checkpoint/对话日志),档案行最后——部分失败时
         # 会话仍可重试删除,不产生"档案已删、数据面成孤儿"的死状态。
@@ -1114,13 +1044,13 @@ async def delete_my_session(
         )
         if not deleted:
             raise HTTPException(status_code=404, detail="会话不存在")
-        async with _sessions_lock:
-            _sessions.pop(thread_id, None)
-            _sessions_last_access.pop(thread_id, None)
+        async with session_store.lock:
+            session_store.sessions.pop(thread_id, None)
+            session_store.last_access.pop(thread_id, None)
     finally:
         # 无论成败都撤登记:失败路径要让用户能重试删除
-        async with _sessions_lock:
-            _deleting_sessions.discard(thread_id)
+        async with session_store.lock:
+            session_store.deleting.discard(thread_id)
     return Response(status_code=204)
 
 

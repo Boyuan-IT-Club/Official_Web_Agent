@@ -21,7 +21,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 
 from official_agent.state.threads import ThreadRecord
-from official_agent.web import routes
+from official_agent.web import routes, session_store
 from official_agent.web.app import create_app
 
 
@@ -48,13 +48,13 @@ def _thread(tid: str, owner: int = 7, status: str = "active") -> ThreadRecord:
 
 @pytest.fixture(autouse=True)
 def _reset_registry():
-    routes._sessions.clear()
-    routes._sessions_last_access.clear()
-    routes._deleting_sessions.clear()
+    session_store.sessions.clear()
+    session_store.last_access.clear()
+    session_store.deleting.clear()
     yield
-    routes._sessions.clear()
-    routes._sessions_last_access.clear()
-    routes._deleting_sessions.clear()
+    session_store.sessions.clear()
+    session_store.last_access.clear()
+    session_store.deleting.clear()
 
 
 @pytest.fixture
@@ -121,7 +121,7 @@ def test_resume_after_restart_reuses_same_thread(
     )
     assert resp.status_code == 200
     assert created == [], "恢复路径不得新建 thread"
-    assert "web:u7:abcd1234" in routes._sessions
+    assert "web:u7:abcd1234" in session_store.sessions
     events = _sse_events(resp)
     session_event = next(e for e in events if e.get("type") == "session" or "session" in e)
     assert session_event.get("session_id") == "web:u7:abcd1234"
@@ -158,12 +158,12 @@ def test_resume_fail_closed_when_registry_check_errors(
         headers={"Authorization": "Bearer tok"},
     )
     assert resp.status_code == 503
-    assert "web:u7:abcd1234" not in routes._sessions, "校验失败不得把新会话顶替建档"
+    assert "web:u7:abcd1234" not in session_store.sessions, "校验失败不得把新会话顶替建档"
 
 
-def _state_stub(session_id: str) -> routes._SessionState:
+def _state_stub(session_id: str) -> session_store.SessionState:
     """_SessionState 替身:淘汰逻辑现在读 turn_lock,不能拿 object() 充数。"""
-    return routes._SessionState(session_id, _identity(), "tok", object())
+    return session_store.SessionState(session_id, _identity(), "tok", object())
 
 
 def test_registry_ttls_idle_and_cap(monkeypatch) -> None:
@@ -178,15 +178,15 @@ def test_registry_ttls_idle_and_cap(monkeypatch) -> None:
     now = _time.monotonic()
     for i in range(5):
         sid = f"web:u7:s{i}"
-        routes._sessions[sid] = _state_stub(sid)  # 运行时对象替身
-        routes._sessions_last_access[sid] = now - (100 if i < 2 else 0)
-    routes._evict_sessions_locked(now)
+        session_store.sessions[sid] = _state_stub(sid)  # 运行时对象替身
+        session_store.last_access[sid] = now - (100 if i < 2 else 0)
+    session_store.evict_locked(now)
     # s0/s1 空闲超 TTL 被淘汰
-    assert "web:u7:s0" not in routes._sessions
-    assert "web:u7:s1" not in routes._sessions
+    assert "web:u7:s0" not in session_store.sessions
+    assert "web:u7:s1" not in session_store.sessions
     # 容量 3:剩 3 条(s2/s3/s4)
-    assert len(routes._sessions) == 3
-    assert set(routes._sessions) == {"web:u7:s2", "web:u7:s3", "web:u7:s4"}
+    assert len(session_store.sessions) == 3
+    assert set(session_store.sessions) == {"web:u7:s2", "web:u7:s3", "web:u7:s4"}
 
 
 def test_registry_lru_touch_keeps_recent(monkeypatch) -> None:
@@ -201,18 +201,18 @@ def test_registry_lru_touch_keeps_recent(monkeypatch) -> None:
 
     now = _time.monotonic()
     for sid in ("web:u7:old", "web:u7:new"):
-        routes._sessions[sid] = _state_stub(sid)
-        routes._sessions_last_access[sid] = now
+        session_store.sessions[sid] = _state_stub(sid)
+        session_store.last_access[sid] = now
     # 访问 old(移到 LRU 尾)
-    routes._sessions.move_to_end("web:u7:old")
-    routes._sessions_last_access["web:u7:old"] = now + 1
+    session_store.sessions.move_to_end("web:u7:old")
+    session_store.last_access["web:u7:old"] = now + 1
     # 插入第三条 → 超 2 容量 → LRU 头(new 未被访问)被淘汰
-    routes._sessions["web:u7:third"] = _state_stub("web:u7:third")
-    routes._sessions_last_access["web:u7:third"] = now + 2
-    routes._evict_sessions_locked(now + 2)
-    assert "web:u7:old" in routes._sessions
-    assert "web:u7:third" in routes._sessions
-    assert "web:u7:new" not in routes._sessions
+    session_store.sessions["web:u7:third"] = _state_stub("web:u7:third")
+    session_store.last_access["web:u7:third"] = now + 2
+    session_store.evict_locked(now + 2)
+    assert "web:u7:old" in session_store.sessions
+    assert "web:u7:third" in session_store.sessions
+    assert "web:u7:new" not in session_store.sessions
 
 
 # ── 真 PG 档案层:resolve_thread 属主/状态往返 ──
@@ -487,13 +487,13 @@ def test_evict_skips_inflight_turn(monkeypatch) -> None:
     now = _time.monotonic()
     busy = _state_stub("web:u7:busy")
     busy.turn_lock = _HeldLock()  # type: ignore[assignment]
-    routes._sessions["web:u7:busy"] = busy
-    routes._sessions_last_access["web:u7:busy"] = now - 1000  # 早已过 TTL
+    session_store.sessions["web:u7:busy"] = busy
+    session_store.last_access["web:u7:busy"] = now - 1000  # 早已过 TTL
 
-    routes._evict_sessions_locked(now)
+    session_store.evict_locked(now)
 
-    assert "web:u7:busy" in routes._sessions, "在途会话被淘汰会让两个 agent 并发写同一 thread"
-    assert routes._sessions["web:u7:busy"] is busy
+    assert "web:u7:busy" in session_store.sessions, "在途会话被淘汰会让两个 agent 并发写同一 thread"
+    assert session_store.sessions["web:u7:busy"] is busy
 
 
 def test_evict_skips_inflight_but_still_evicts_idle(monkeypatch) -> None:
@@ -509,16 +509,16 @@ def test_evict_skips_inflight_but_still_evicts_idle(monkeypatch) -> None:
     now = _time.monotonic()
     busy = _state_stub("web:u7:busy")
     busy.turn_lock = _HeldLock()  # type: ignore[assignment]
-    routes._sessions["web:u7:busy"] = busy
-    routes._sessions_last_access["web:u7:busy"] = now
+    session_store.sessions["web:u7:busy"] = busy
+    session_store.last_access["web:u7:busy"] = now
     for sid in ("web:u7:a", "web:u7:b"):
-        routes._sessions[sid] = _state_stub(sid)
-        routes._sessions_last_access[sid] = now
+        session_store.sessions[sid] = _state_stub(sid)
+        session_store.last_access[sid] = now
 
-    routes._evict_sessions_locked(now)
+    session_store.evict_locked(now)
 
-    assert "web:u7:busy" in routes._sessions
-    assert len(routes._sessions) <= 2, "空闲条目应被淘汰到容量内"
+    assert "web:u7:busy" in session_store.sessions
+    assert len(session_store.sessions) <= 2, "空闲条目应被淘汰到容量内"
 
 
 def test_resume_without_checkpointer_is_503(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -548,7 +548,7 @@ def test_resume_without_checkpointer_is_503(monkeypatch: pytest.MonkeyPatch) -> 
     with pytest.raises(HTTPException) as exc:
         _asyncio.run(_run())
     assert exc.value.status_code == 503
-    assert "web:u7:abcd1234" not in routes._sessions, "不得构建无 checkpointer 的恢复会话"
+    assert "web:u7:abcd1234" not in session_store.sessions, "不得构建无 checkpointer 的恢复会话"
 
 
 def test_gate_busy_logs_conversation_and_emits_one_error(
