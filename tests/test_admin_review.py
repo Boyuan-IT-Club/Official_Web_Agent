@@ -461,9 +461,13 @@ def test_scorecard_masks_card_total_without_view_permission(
     )
     body = resp.json()
     assert body["total"] is None
-    assert body["card"]["total"] is None
+    assert "total" not in body["card"]
     assert body["ai_level"] == "良好"
-    assert body["card"]["traits"][0]["met"] is True, "定性内容(特质判定)不受影响"
+    # 无 view 权限时 traits/met_count/volume_ceiling 全部剥离——
+    # met 组合可经 trait_score 确定性反推精确分数,任一留存即击穿分级
+    assert "traits" not in body["card"]
+    assert "met_count" not in body["card"]
+    assert "volume_ceiling" not in body["card"]
 
 
 def test_scorecard_shows_total_with_view_permission(

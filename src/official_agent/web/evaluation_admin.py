@@ -41,13 +41,21 @@ def _can_view_score(identity: ResolvedIdentity) -> bool:
 
 
 def _attach_level_and_mask(row: dict[str, Any], *, can_view: bool) -> dict[str, Any]:
-    """就地补 ai_level(所有角色都带,前端免二次判);无 view 权限时置空具体分数。"""
+    """就地补 ai_level(所有角色都带);无 view 权限时剥离全部可反推分数的字段。
+
+    total 可由 traits[].met 组合经 trait_score 确定性精确重建(scoring 权重表
+    公开),volume_ceiling 是卡内自带的封顶值,met_count 直接给出 15 分宽分段
+    ——三者任一留存都等于没藏。最小投影只保留定性内容(summary/态度/引文)。
+    """
     row["ai_level"] = ai_level(row.get("total"))
     if not can_view:
         row["total"] = None
         card = row.get("card")
-        if isinstance(card, dict) and "total" in card:
-            card["total"] = None
+        if isinstance(card, dict):
+            card.pop("total", None)
+            card.pop("met_count", None)
+            card.pop("volume_ceiling", None)
+            card.pop("traits", None)
     return row
 
 

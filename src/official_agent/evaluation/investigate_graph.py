@@ -371,7 +371,15 @@ async def generate_node(state: InvestigationState) -> dict:
         # 的先例,把校验错误回灌、子图内重试一次,两次仍不合规才翻 error。
 
         def _parse(content: str) -> tuple[str, dict[str, Any]]:
-            group_payload: dict[str, Any] = json.loads(_extract_json(content))
+            try:
+                group_payload: dict[str, Any] = json.loads(_extract_json(content))
+                return _parse_group(group_payload)
+            except (TypeError, AttributeError, KeyError) as exc:
+                # 校验器对畸形形状(如 "chains": null)会抛非 ValueError;归一为
+                # ValueError 才能进回灌自纠,否则一次模型手滑就整线失败
+                raise ValueError(f"输出形状不合规:{type(exc).__name__}: {exc}") from exc
+
+        def _parse_group(group_payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             repo_summary = str(group_payload.get("repo_summary", ""))
             if deep or cv:
                 # 两条路径共用同一台校验机器;区别只在 no_repo:简历没有仓,

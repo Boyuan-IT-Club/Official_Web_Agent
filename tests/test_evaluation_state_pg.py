@@ -32,6 +32,7 @@ pytestmark = pytest.mark.skipif(not pg_available(), reason="需要真 PostgreSQL
 def _bootstrap_tables():
     """建表一次,先于所有用例(含用例里 DELETE 清场的那一步)。"""
     previous = point_settings_at_pg()
+    ev_store.reset_pool()
     try:
         ev_store.ensure_evaluation_scorecard_ready()
         ev_store.ensure_evaluation_job_ready()

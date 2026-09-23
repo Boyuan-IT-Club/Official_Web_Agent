@@ -230,7 +230,15 @@ async def llm_score(state: EvaluationState, config: RunnableConfig | None = None
         )
         sources = [str(f.get("value", "")) for f in state["fields"]]
         def _parse(content: str) -> ScorecardOutput:
-            result = ScorecardOutput.model_validate_json(_extract_json(content))
+            try:
+                return _validate_scorecard(_extract_json(content))
+            except (TypeError, AttributeError, KeyError) as exc:
+                # 校验器对畸形形状(如 "traits": null)抛非 ValueError;归一后
+                # 才能进回灌自纠,否则模型一次手滑整线失败
+                raise ValueError(f"输出形状不合规:{type(exc).__name__}: {exc}") from exc
+
+        def _validate_scorecard(content: str) -> ScorecardOutput:
+            result = ScorecardOutput.model_validate_json(content)
             got = [t.trait for t in result.traits]
             # 特质集必须与清单一致:漏项会让达成数偏低(冤判),多项会让
             # 分母变大。用 Counter 差而非 set 差,重复项才报得出来。

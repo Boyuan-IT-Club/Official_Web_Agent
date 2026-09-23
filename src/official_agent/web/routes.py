@@ -227,17 +227,24 @@ _MAX_MESSAGE_CHARS = 2000
 
 # 全局活跃模型调用并发闸(跨用户资源保护;进程内,数值待定)
 _model_gate: asyncio.Semaphore | None = None
+_model_gate_lock = asyncio.Lock()
 
 
 async def _get_model_gate() -> asyncio.Semaphore:
     global _model_gate
     if _model_gate is None:
-        from official_agent.config import get_effective_settings
+        # 初始化含 await(to_thread 读配置),必须持锁:否则首批并发轮次
+        # 各建各的 Semaphore,K 个并发把全局并发上限放大 K 倍,击穿闸
+        async with _model_gate_lock:
+            if _model_gate is None:
+                from official_agent.config import get_effective_settings
 
-        # get_effective_settings 每次直连 PG 读 agent_config(无缓存),不能占事件循环;
-        # 闸建好后进程内复用,不再触库
-        settings = await asyncio.to_thread(get_effective_settings)
-        _model_gate = asyncio.Semaphore(max(int(settings.model_call_global_concurrency), 1))
+                # get_effective_settings 每次直连 PG 读 agent_config(无缓存),
+                # 不能占事件循环;闸建好后进程内复用,不再触库
+                settings = await asyncio.to_thread(get_effective_settings)
+                _model_gate = asyncio.Semaphore(
+                    max(int(settings.model_call_global_concurrency), 1)
+                )
     return _model_gate
 
 
@@ -379,9 +386,10 @@ def _accumulate_usage(
     extracted = telemetry.extract_usage(usage_payload)
     if extracted == last_usage:
         return last_usage
-    for k, v in extracted.items():
+    for k in usage_acc:  # 白名单键:未知键混入会经 write_conversation(**usage) 炸落账
+        v = extracted.get(k)
         if v is not None:
-            usage_acc[k] = (usage_acc.get(k) or 0) + v
+            usage_acc[k] = (usage_acc[k] or 0) + v
     return extracted
 
 

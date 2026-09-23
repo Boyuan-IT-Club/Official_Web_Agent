@@ -75,7 +75,7 @@ def _install_resolve(monkeypatch: pytest.MonkeyPatch, identity: dict) -> None:
     async def _resolve(*_a: object, **_k: object) -> dict:
         return identity
 
-    # kb_admin 复用 routes._authenticate → 其内部 resolve 查找在 routes 模块全局
+    # kb_admin 的鉴权走 web/auth.authenticate → 其内部 resolve 查找在 auth 模块全局
     monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
 
 
