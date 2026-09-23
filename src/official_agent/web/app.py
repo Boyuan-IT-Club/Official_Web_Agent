@@ -18,7 +18,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from official_agent.config import get_settings
@@ -49,7 +49,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             ensure_audit_table()
             # 评测三表(scorecard / qbank / job)的自举全在这里:建表 DDL
             # 即使 no-op 也持表锁,留在数据路径上会把读写串行化
-            # (见 state/evaluation.py 顶部的自举注释)。job 表还要去重
+            # (自举注释现居 state/evaluation/bootstrap.py)。job 表还要去重
             # legacy 重复活跃行 + 建部分唯一索引,必须先于下面的启动恢复。
             from official_agent.state.evaluation import (
                 ensure_evaluation_job_ready,
@@ -61,6 +61,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             ensure_qbank_ready()
             ensure_evaluation_job_ready()
         except Exception:  # noqa: BLE001 — PG 未起/配置错 → 降级(fail-open,ADR-0005)
+            # 降级必须留痕:配置错误与 PG 未起症状相同(/health degraded),靠这条日志区分
+            logging.getLogger(__name__).warning(
+                "启动建表自举失败,降级为无 checkpointer(记忆/落账不可用)", exc_info=True
+            )
             app.state.checkpointer = None
         # 启动自动恢复:进程重启后,PG 里残留的 pending/running job
         # 由 lifespan 全量扫回并重派(超 10 分钟 + attempts 未满;达上限的
@@ -147,10 +151,37 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    @app.middleware("http")
+    async def _request_trace_id(request: Request, call_next):
+        """入口置请求级 trace id,响应头 X-Request-Id 回传。
+
+        入站 X-Request-Id 优先(上游/网关串联),否则随机;值统一归一为
+        W3C 32-hex,此后日志(TraceIdFilter)、出站后端请求 traceparent、
+        审计 trace_id 共用同一 id——一次请求全线可按 id 串成一条线。
+        """
+        import secrets
+
+        from official_agent.observability import (
+            reset_turn_trace_id,
+            set_turn_trace_id,
+            to_w3c_trace_id,
+        )
+
+        rid = to_w3c_trace_id(request.headers.get("x-request-id") or secrets.token_hex(16))
+        token = set_turn_trace_id(rid)
+        try:
+            response = await call_next(request)
+        finally:
+            reset_turn_trace_id(token)
+        response.headers["X-Request-Id"] = rid
+        return response
+
     from official_agent.web import routes
+    from official_agent.web.config_admin import router as config_admin_router
     from official_agent.web.kb_admin import router as kb_admin_router
 
     app.include_router(routes.router, prefix="/api/agent")
+    app.include_router(config_admin_router, prefix="/api/agent")
     app.include_router(kb_admin_router, prefix="/api/agent")
 
     from official_agent.web.evaluation_admin import router as evaluation_admin_router

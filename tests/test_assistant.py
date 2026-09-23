@@ -69,7 +69,7 @@ def identity_of(role: str) -> ResolvedIdentity:
 def test_assemble_admin_gets_all_readonly_tools() -> None:
     tools = assemble_tools(identity_of("admin"))
     names = {getattr(t, "__name__", "") for t in tools}
-    assert len(tools) == 10  # RAG #134 R3:+search_knowledge
+    assert len(tools) == 10  # 知识库上线后:+search_knowledge
     assert "get_open_cycle" in names and "get_candidate_card" in names
     assert "search_knowledge" in names
 
@@ -81,14 +81,14 @@ def test_assemble_member_public_query_face() -> None:
         "search_resumes",
         "get_recruit_statistics",
         "find_available_sessions",
-        "search_knowledge",  # RAG #134 R3
+        "search_knowledge",
     }
 
 
 def test_assemble_candidate_gets_open_cycle_and_my_interview() -> None:
     """候选入口:能取当前周期 + 查本人面试(后者绑定用户令牌)。
 
-    RAG #134 R3(#120):候选人另装配 search_knowledge——社团/部门/FAQ
+    候选人另装配 search_knowledge——社团/部门/FAQ
     公开知识问答;个人数据仍只走绑定令牌的两个工具。
     """
     tools = assemble_tools(identity_of("candidate"), user_token="tok")
@@ -367,3 +367,50 @@ def test_tool_roster_matches_assembly() -> None:
     for role in ("admin", "member", "candidate", "unknown"):
         identity = identity_of(role)
         assert len(tool_roster(identity)) == len(assemble_tools(identity))
+
+
+def test_no_role_assembles_score_tools():
+    """客服 agent 任何角色都不得装配触达评分数据的工具(AI 评分分级可见的硬保证)。
+
+    AI 评分只存在于 state/evaluation(agent PG),唯一的对外出口是
+    web/evaluation_admin 管理面(本身有 evaluation:score:view 分级);
+    装配层是第一道闸:工具名出现 score/scorecard/qbank/evaluation 即违规。
+    """
+    import re
+
+    from official_agent.graphs.assistant import _ROLE_TOOL_NAMES
+
+    forbidden = re.compile(r"score|scorecard|qbank|evaluation", re.I)
+    for role, names in _ROLE_TOOL_NAMES.items():
+        leaked = [n for n in names if forbidden.search(n)]
+        assert leaked == [], f"{role} 角色装配了评分类工具: {leaked}"
+
+    # 装配产物与声明一致(assemble_tools 是装配的唯一出口)
+    from official_agent.graphs.assistant import assemble_tools
+
+    for role in ("admin", "candidate"):
+        tools = assemble_tools(identity_of(role), user_token="t")
+        bound = {getattr(t, "__name__", getattr(t, "name", "")) for t in tools}
+        leaked = [n for n in bound if forbidden.search(n)]
+        assert leaked == [], f"{role} 装配产物含评分类工具: {leaked}"
+
+
+def test_assistant_surface_never_imports_evaluation_store():
+    """tripwire:tools 与 assistant 编排层禁止 import 评分存储模块。
+
+    AI 评分数据(state.evaluation)的唯一合法消费方是 web 管理面与
+    evaluation 域自身;客服工具层/编排层一旦 import 即视为越界。
+    """
+    import pathlib
+
+    roots = [
+        pathlib.Path("src/official_agent/tools"),
+        pathlib.Path("src/official_agent/graphs/assistant"),
+    ]
+    offenders = []
+    for root in roots:
+        for f in root.rglob("*.py"):
+            text = f.read_text(encoding="utf-8")
+            if "official_agent.state.evaluation" in text or "state import evaluation" in text:
+                offenders.append(str(f))
+    assert offenders == [], f"评分存储被客服面引用: {offenders}"

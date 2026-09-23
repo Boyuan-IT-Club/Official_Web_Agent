@@ -44,12 +44,11 @@ def _identity(codes: list[str]) -> dict:
 
 
 def _install_resolve(monkeypatch: pytest.MonkeyPatch, codes: list[str]) -> None:
-    from official_agent.web import routes
 
     async def _resolve(*_a: object, **_k: object) -> dict:
         return _identity(codes)
 
-    monkeypatch.setattr(routes, "resolve", _resolve)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
 
 
 _AUTH = {"Authorization": "Bearer reviewer-jwt"}
@@ -95,7 +94,9 @@ def test_queue_zero_filter_queries_hard_zero(
 
             return _Cur()
 
-    monkeypatch.setattr(ea.evaluation, "_conn", lambda: _Conn())
+    monkeypatch.setattr(
+        "official_agent.state.evaluation._connection._conn", lambda: _Conn()
+    )
     resp = client.get("/api/agent/admin/evaluation/queue?cycle_id=2026&queue=zero", headers=_AUTH)
     assert resp.status_code == 200
     # 内层 cycle + user_id 归属 + 历史决策标记,三处都按周期限定;末尾是分页
@@ -358,3 +359,144 @@ def test_reject_marks_rejected(client: TestClient, monkeypatch: pytest.MonkeyPat
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "rejected"
+
+
+# ── 评分分级可见(evaluation:score:view)──────────────────────
+
+
+def test_queue_masks_numeric_score_without_view_permission(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """评分分级可见:无 evaluation:score:view → total 置空,只给三档 ai_level。"""
+    _install_resolve(monkeypatch, ["resume:audit"])
+    rows = [
+        {
+            "resume_id": rid,
+            "card_version": 1,
+            "status": "draft",
+            "hard_zero": False,
+            "total": total,
+            "prompt_version": "v1",
+            "created_at": None,
+        }
+        for rid, total in [(1, 82.0), (2, 50.0), (3, 0.0)]
+    ]
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+
+            class _Cur:
+                fetchall = lambda self: rows  # noqa: E731
+
+            return _Cur()
+
+    monkeypatch.setattr(
+        "official_agent.state.evaluation._connection._conn", lambda: _Conn()
+    )
+    resp = client.get("/api/agent/admin/evaluation/queue?cycle_id=2026", headers=_AUTH)
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert [i["total"] for i in items] == [None] * 3, "具体分数不得出 API"
+    assert [i["ai_level"] for i in items] == ["优秀", "良好", "合格"]
+
+
+def test_queue_shows_score_with_view_permission(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """持 evaluation:score:view(仅超管)→ 具体分数照常返回,ai_level 仍带。"""
+    _install_resolve(monkeypatch, ["resume:audit", "evaluation:score:view"])
+
+    class _Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+
+            class _Cur:
+                fetchall = lambda self: [  # noqa: E731
+                    {
+                        "resume_id": 1,
+                        "card_version": 1,
+                        "status": "draft",
+                        "hard_zero": False,
+                        "total": 82.0,
+                        "prompt_version": "v1",
+                        "created_at": None,
+                    }
+                ]
+
+            return _Cur()
+
+    monkeypatch.setattr(
+        "official_agent.state.evaluation._connection._conn", lambda: _Conn()
+    )
+    resp = client.get("/api/agent/admin/evaluation/queue?cycle_id=2026", headers=_AUTH)
+    item = resp.json()["items"][0]
+    assert item["total"] == 82.0
+    assert item["ai_level"] == "优秀"
+
+
+def test_scorecard_masks_card_total_without_view_permission(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """维卡同理:无 view 权限 → 顶层 total 与 card.total 都置空,补 ai_level。"""
+    _install_resolve(monkeypatch, ["interview:evaluate"])
+    card = {"total": 66.0, "traits": [{"trait": "责任心", "met": True}]}
+    monkeypatch.setattr(
+        ea.evaluation,
+        "latest_scorecard",
+        lambda r, c: {"card_version": 1, "card": card, "total": 66.0, "status": "draft"},
+    )
+    resp = client.get(
+        "/api/agent/admin/evaluation/scorecard?resume_id=9&cycle_id=2026", headers=_AUTH
+    )
+    body = resp.json()
+    assert body["total"] is None
+    assert "total" not in body["card"]
+    assert body["ai_level"] == "良好"
+    # 无 view 权限时 traits/met_count/volume_ceiling 全部剥离——
+    # met 组合可经 trait_score 确定性反推精确分数,任一留存即击穿分级
+    assert "traits" not in body["card"]
+    assert "met_count" not in body["card"]
+    assert "volume_ceiling" not in body["card"]
+
+
+def test_scorecard_shows_total_with_view_permission(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """持 evaluation:score:view → 维卡具体分数照常返回。"""
+    _install_resolve(monkeypatch, ["interview:evaluate", "evaluation:score:view"])
+    monkeypatch.setattr(
+        ea.evaluation,
+        "latest_scorecard",
+        lambda r, c: {"card_version": 1, "card": {"total": 66.0}, "total": 66.0, "status": "draft"},
+    )
+    resp = client.get(
+        "/api/agent/admin/evaluation/scorecard?resume_id=9&cycle_id=2026", headers=_AUTH
+    )
+    body = resp.json()
+    assert body["total"] == 66.0
+    assert body["card"]["total"] == 66.0
+    assert body["ai_level"] == "良好"
+
+
+def test_ai_level_boundaries() -> None:
+    """三档边界:优秀 [75,100],良好 [35,75),合格 [0,35);无分 → None。"""
+    from official_agent.evaluation.scoring import ai_level
+
+    assert ai_level(100) == "优秀"
+    assert ai_level(75) == "优秀"
+    assert ai_level(74.9) == "良好"
+    assert ai_level(35) == "良好"
+    assert ai_level(34.9) == "合格"
+    assert ai_level(0) == "合格"
+    assert ai_level(None) is None

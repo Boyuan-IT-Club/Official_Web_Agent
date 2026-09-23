@@ -42,12 +42,11 @@ def _identity(codes: list[str]) -> dict:
 
 
 def _install_resolve(monkeypatch: pytest.MonkeyPatch, identity: dict) -> None:
-    from official_agent.web import routes
 
     async def _resolve(*_a: object, **_k: object) -> dict:
         return identity
 
-    monkeypatch.setattr(routes, "resolve", _resolve)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
 
 
 _AUTH = {"Authorization": "Bearer tok"}
@@ -185,14 +184,15 @@ def test_evaluation_run_db_failure_is_500_not_400(
 def test_evaluation_run_authority_mismatch_is_still_400(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """调用方数据错位仍是 400——两类 RuntimeError 必须分得开。"""
+    """调用方数据错位(领域异常)→ 400;意外异常不得被误判成 400(另见 500 测试)。"""
+    from official_agent.evaluation.runner import SubmissionDataError
     from official_agent.web import evaluation_admin as ea
 
     _install_resolve(monkeypatch, _identity(["evaluation:run"]))
 
     class _FakeRunner:
         async def submit(self, *_a: object, **_k: object) -> list[int]:
-            raise RuntimeError("简历权威归属不一致")
+            raise SubmissionDataError("简历权威归属不一致")
 
     monkeypatch.setattr(ea.eval_runner, "get_runner", lambda: _FakeRunner())
     resp = client.post(
@@ -202,3 +202,25 @@ def test_evaluation_run_authority_mismatch_is_still_400(
     )
     assert resp.status_code == 400
     assert "归属核对" in resp.json()["detail"]
+
+
+def test_evaluation_run_unexpected_runtimeerror_is_500(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """意外 RuntimeError(程序缺陷/后端意外)不冒充调用方错位 → 500 固定文案。"""
+    from official_agent.web import evaluation_admin as ea
+
+    _install_resolve(monkeypatch, _identity(["evaluation:run"]))
+
+    class _FakeRunner:
+        async def submit(self, *_a: object, **_k: object) -> list[int]:
+            raise RuntimeError("dictionary changed size during iteration")
+
+    monkeypatch.setattr(ea.eval_runner, "get_runner", lambda: _FakeRunner())
+    resp = client.post(
+        "/api/agent/admin/evaluation/run",
+        headers=_AUTH,
+        json={"cycle_id": 2026, "items": [{"resume_id": 11}]},
+    )
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "提交初筛任务失败,请稍后重试"

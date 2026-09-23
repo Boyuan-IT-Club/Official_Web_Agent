@@ -1,7 +1,7 @@
-"""RAG #134 R3:search_knowledge 工具 + 角色装配测试。
+"""search_knowledge 工具 + 角色装配测试。
 
-- 工具行为:ok 结构/0 命中/服务不可用全部**不抛异常**(#120 降级契约)
-- 装配(#120):candidate/member/admin 给 search_knowledge;unknown(访客)不给
+- 工具行为:ok 结构/0 命中/服务不可用全部**不抛异常**(降级契约)
+- 装配:candidate/member/admin 给 search_knowledge;unknown(访客)不给
 """
 
 from unittest.mock import patch
@@ -49,7 +49,7 @@ async def test_search_knowledge_not_found(monkeypatch) -> None:
 
 
 async def test_search_knowledge_embedding_error_degrades(monkeypatch) -> None:
-    """EMBED 未配置/端点失败 → unavailable,不抛异常外层(#120)。"""
+    """EMBED 未配置/端点失败 → unavailable,不抛异常外层(降级契约)。"""
 
     async def _boom(query, **kw):
         raise EmbeddingError("embedding 未配置")
@@ -81,7 +81,7 @@ async def test_search_knowledge_passes_topk(monkeypatch) -> None:
     assert seen["top_k"] == knowledge._TOP_K
 
 
-# ── 角色装配(#120:访客不给) ──────────────────────────────
+# ── 角色装配(访客不给) ──────────────────────────────
 
 
 @pytest.mark.parametrize("role", ["admin", "member", "candidate"])

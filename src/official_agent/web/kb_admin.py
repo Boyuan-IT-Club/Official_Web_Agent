@@ -1,17 +1,18 @@
-"""KB 管理 API(RAG #134 R2):/api/agent/admin/kb* —— 知识条目维护面。
+"""KB 管理 API:/api/agent/admin/kb* —— 知识条目维护面。
 
-- 权限:独立权限码 ``kb:manage``(#121:与 agent:monitor 分离,可单独授权
-  某管理员管知识库;Backend V41 起种子落地,R5 代理转发同码校验)
+- 权限:独立权限码 ``kb:manage``,与 agent:monitor 分离,可单独授权
+  某管理员管知识库(后端 V41 起种子落地;nginx 代理转发同码校验)
 - 创建/更新即入库重嵌(分块+embedding 单事务);「重嵌」端点按已存内容
   重建向量——换 embedding 模型后逐条补齐用
 - store 层同步 psycopg,路由内一律 asyncio.to_thread,不阻塞事件循环
 """
 
 import asyncio
+import logging
 from dataclasses import asdict
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from official_agent.graphs.identity import ResolvedIdentity
@@ -19,20 +20,12 @@ from official_agent.kb import store as kb_store
 from official_agent.kb.embedding import EmbeddingError, EmbeddingNotConfiguredError
 from official_agent.kb.schema import KbSchemaError
 from official_agent.kb.store import KbValidationError
-from official_agent.web.routes import _authenticate
+from official_agent.web.auth import require_any as _require_any
 
 router = APIRouter()
 
-
-async def _require_kb_manage(
-    request: Request, authorization: Annotated[str | None, Header()] = None
-):
-    """KB 管理 API 认证:官网 JWT → resolve → permission_codes 含 kb:manage。"""
-    identity, _ = await _authenticate(request, authorization)
-    codes = identity.get("permission_codes") or []
-    if "kb:manage" not in codes:
-        raise HTTPException(status_code=403, detail="需要 kb:manage 权限")
-    return identity
+# KB 管理 API 认证:官网 JWT → resolve → permission_codes 含 kb:manage
+_require_kb_manage = _require_any("kb:manage")
 
 
 class KbSourceUpsert(BaseModel):
@@ -70,7 +63,11 @@ def _to_input(body: KbSourceUpsert, identity: ResolvedIdentity) -> kb_store.Sour
 
 
 def _map_store_error(exc: Exception) -> HTTPException:
-    """store/embedding 异常 → HTTP 语义(测试/前端只见状态码+detail)。"""
+    """store/embedding 异常 → HTTP 语义(测试/前端只见状态码+detail)。
+
+    前四类是本仓领域异常,消息即对外契约(面向管理面的受控文案);
+    兜底分支是未预期异常——原文(可能含 SQL/路径)只进日志,不出边界。
+    """
     if isinstance(exc, KbValidationError):
         return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, EmbeddingNotConfiguredError):
@@ -79,7 +76,8 @@ def _map_store_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=502, detail=str(exc))
     if isinstance(exc, KbSchemaError):
         return HTTPException(status_code=500, detail=str(exc))
-    return HTTPException(status_code=500, detail=f"KB 操作失败:{exc}")
+    logging.getLogger(__name__).warning("KB 操作未预期失败", exc_info=exc)
+    return HTTPException(status_code=500, detail="KB 操作失败,请稍后重试")
 
 
 @router.get("/admin/kb/sources")

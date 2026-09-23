@@ -9,20 +9,22 @@ Official_Web_Backend(Spring Boot),本仓库只通过其 REST API 交互(服务�
 uv sync                 # 安装依赖(含 dev 组)
 uv run ruff check .     # lint
 uv run pytest           # 单测(确定性代码:tools/、图结构)
-uv run python -m evals  # eval 集(需要模型 API key,CI 中作为门禁)
+uv run python evals/run_evals.py  # eval 集(需要模型 API key,CI 中作为门禁;--help 看全部参数)
 ```
 
-## 本地 Langfuse(OBS-01)
+## 本地 Langfuse
 
 ```bash
 cd deploy/langfuse && docker compose up -d   # web: http://127.0.0.1:3001
 ```
 
 凭证在 `deploy/langfuse/.env`(gitignore,模板 `.env.example`);同目录 PG 暴露
-127.0.0.1:5432,checkpointer/审计(MEM-01/SEC-03)复用该实例。trace 接线:
+127.0.0.1:5432,checkpointer 与审计日志复用该实例。trace 接线:
 `from official_agent.observability import langfuse_callbacks`——fail-open,未配置自动降级。
 
 ## 架构要点
+
+代码架构详解(分层/包结构/设计模式/业务流程图):`docs/architecture.md`。
 
 - `tools/` 是确定性层:后端 API 的语义化封装,全部可单测;工具粒度对齐意图而非接口,
   返回做投影裁剪,错误信息必须可行动;agent 进程内直连函数,MCP 仅对外(ADR-0003)
@@ -46,6 +48,16 @@ cd deploy/langfuse && docker compose up -d   # web: http://127.0.0.1:3001
 
 Issues 按模块编号:INF(基础设施)/ TOOL(工具层)/ GRA(编排)/ EVA(评估流水线)/
 COP(Copilot)/ MEM(记忆)/ SEC(安全)/ OBS(观测评估)。提交信息引用编号。
+
+## 工程规范
+
+分层/设计原则/注释/日志/错误处理等细则在 `docs/standards/`(入口
+`docs/standards/README.md` 的加载地图);写代码/重构前必读其中的
+comments.md 与 readability.md。**注释里禁止 issue 号与迭代代号**(如 `#134`、
+`GRA-04`、`R1/R2/R3`)——判据:读者能否仅凭本仓查到该标识。
+
+分期重构计划在 `docs/refactor-roadmap.md`:重构开工前读对应 chunk,
+完成后回写其 §6 进度表;chunk 闸门(测试/eval 基线)见该文 §3。
 
 ## Agent skills
 

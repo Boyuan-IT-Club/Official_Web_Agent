@@ -1,4 +1,4 @@
-"""RAG #134 R1:KB 数据面单测——mock 连接验证 SQL/参数/映射(threads.py 先例)。
+"""KB 数据面单测——mock 连接验证 SQL/参数/映射(threads.py 先例)。
 
 真库往返(向量相似度/HNSW/级联)由 test_kb_integration.py 集成档覆盖。
 """

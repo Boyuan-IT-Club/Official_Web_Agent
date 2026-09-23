@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import HumanMessage
 
-from official_agent.web import routes
+from official_agent.web import session_store
 from official_agent.web.app import create_app
 
 
@@ -25,13 +25,13 @@ async def _fake_checkpointer() -> AsyncIterator[None]:
 
 @pytest.fixture(autouse=True)
 def _reset_registry():
-    routes._sessions.clear()
-    routes._sessions_last_access.clear()
-    routes._deleting_sessions.clear()
+    session_store.sessions.clear()
+    session_store.last_access.clear()
+    session_store.deleting.clear()
     yield
-    routes._sessions.clear()
-    routes._sessions_last_access.clear()
-    routes._deleting_sessions.clear()
+    session_store.sessions.clear()
+    session_store.last_access.clear()
+    session_store.deleting.clear()
 
 
 @pytest.fixture
@@ -110,7 +110,7 @@ def test_delete_session_purges_all_store_faces(
     async def _resolve(*_a: object, **_k: object) -> dict:
         return _identity(7)
 
-    monkeypatch.setattr(routes, "resolve", _resolve)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
 
     import official_agent.state.threads as thread_store_mod
 
@@ -154,7 +154,7 @@ def test_delete_session_rejects_non_owner(client: TestClient, monkeypatch) -> No
     async def _resolve(*_a: object, **_k: object) -> dict:
         return _identity(7)
 
-    monkeypatch.setattr(routes, "resolve", _resolve)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
     import official_agent.state.threads as thread_store_mod
 
     monkeypatch.setattr(thread_store_mod, "resolve_thread", lambda tid, uid: None)
@@ -168,7 +168,7 @@ def test_delete_session_rejects_non_owner(client: TestClient, monkeypatch) -> No
 def test_chat_rejected_while_session_deleting(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#194 复审:删除进行中(已登记 _deleting_sessions)→ 续聊必须 409。
+    """删除进行中(已登记 deleting)→ 续聊必须 409。
 
     回归防护:旧实现只查 turn_lock 且会话不在内存时查不到——重启/LRU 淘汰后
     携原 session_id 续聊会重建新对象+新锁,与磁盘清理并发读写同一 checkpoint
@@ -176,9 +176,9 @@ def test_chat_rejected_while_session_deleting(
     async def _resolve(*_a: object, **_k: object) -> dict:
         return _identity(7)
 
-    monkeypatch.setattr(routes, "resolve", _resolve)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
     # 会话不在内存(模拟重启后),但删除端已登记 → 必须拒绝,而非走恢复路径
-    routes._deleting_sessions.add("web:u7:inflight01")
+    session_store.deleting.add("web:u7:inflight01")
 
     resp = client.post(
         "/api/agent/chat",
@@ -192,12 +192,12 @@ def test_chat_rejected_while_session_deleting(
 def test_delete_holds_registration_then_releases_on_failure(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#194 复审:删除清理进行中该会话一直登记(续聊被 409 挡住),失败后撤
+    """删除清理进行中该会话一直登记(续聊被 409 挡住),失败后撤
     登记(可重试)。回归防护:仅查 turn_lock 的旧实现看不到磁盘清理窗口。"""
     async def _resolve(*_a: object, **_k: object) -> dict:
         return _identity(7)
 
-    monkeypatch.setattr(routes, "resolve", _resolve)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
     import official_agent.state.threads as thread_store_mod
 
     rec = type("Rec", (), {"thread_id": "web:u7:fail01", "owner_user_id": 7, "status": "active"})()
@@ -212,7 +212,7 @@ def test_delete_holds_registration_then_releases_on_failure(
     seen: list[bool] = []
 
     def _observe_then_boom(_tid: str) -> int:
-        seen.append("web:u7:fail01" in routes._deleting_sessions)
+        seen.append("web:u7:fail01" in session_store.deleting)
         raise RuntimeError("PG 抖动")
 
     monkeypatch.setattr(pg_mod, "purge_thread_checkpoints", _observe_then_boom)
@@ -224,7 +224,7 @@ def test_delete_holds_registration_then_releases_on_failure(
     assert resp.status_code == 500
     assert seen == [True], "清理窗口内该会话必须在删除登记中(check 与清理之间无缝隙)"
     # 失败后撤登记 → 同一会话可再试(不是永久 409)
-    assert "web:u7:fail01" not in routes._deleting_sessions
+    assert "web:u7:fail01" not in session_store.deleting
 
 
 def test_admin_transcript_read_is_audited(
@@ -236,7 +236,7 @@ def test_admin_transcript_read_is_audited(
     async def _resolve(*_a: object, **_k: object) -> dict:
         return _identity(9, monitor=True)
 
-    monkeypatch.setattr(r, "resolve", _resolve)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
     rec = type("Rec", (), {"thread_id": "web:u7:abc", "owner_user_id": 7, "status": "active"})()
 
     def _get_thread(tid):

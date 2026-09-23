@@ -1,10 +1,10 @@
-"""KB 表自举(RAG #134):幂等 DDL 进仓库,新环境可自举(L-1 先例)。
+"""KB 表自举:幂等 DDL 进仓库,新环境可自举(state/threads.py 同风格)。
 
 - CREATE EXTENSION vector 需超级用户(容器内 postgres 即是);镜像不带
   pgvector 时给出可操作的报错(本地 compose 已换 pgvector/pgvector:pg17)
-- 内容模型(#118):kb_source 共享来源层;kb_faq/kb_doc 两张内容表;
+- 内容模型:kb_source 共享来源层;kb_faq/kb_doc 两张内容表;
   kb_chunks 向量块;kb_meta 单行记 embed_model/dim/version
-- 禁跨模型向量混排(#119):meta 与配置的 model/dim 不一致 → 清空
+- 禁跨模型向量混排:meta 与配置的 model/dim 不一致 → 清空
   chunks + 版本 bump + 列维度 ALTER,等调用方全量 reindex
 """
 
@@ -106,7 +106,7 @@ def ensure_kb_schema(
             )
             """
         )
-        # HNSW cosine(#119 起步参数默认);向量列为空表时建索引瞬时完成
+        # HNSW cosine(起步参数默认);向量列为空表时建索引瞬时完成
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_kb_chunks_hnsw "
             "ON kb_chunks USING hnsw (embedding vector_cosine_ops)"

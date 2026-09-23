@@ -1,6 +1,6 @@
 ---
 name: compression-summarizer
-description: 会话压缩摘要提示词(M6 #114;ContextAware + [T#] 引用,占位符 {query}/{numbered} 由代码填充)
+description: 会话压缩摘要提示词(摘要感知原始提问并以 [T#] 引用回原消息;占位符 {query}/{numbered} 由代码填充)
 model: strong
 ---
 

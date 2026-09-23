@@ -10,42 +10,53 @@ import logging
 import secrets
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from official_agent.evaluation import runner as eval_runner
+from official_agent.evaluation.scoring import ai_level
 from official_agent.graphs.identity import ResolvedIdentity
 from official_agent.state import audit, evaluation
 from official_agent.state import qbank as qbank_store
-from official_agent.web.routes import _authenticate
+from official_agent.web.auth import require_any as _require_any
 
 router = APIRouter()
 
+# 初筛管理认证:JWT → resolve → permission_codes 含 resume:audit
+_require_resume_audit = _require_any("resume:audit")
 
-async def _require_resume_audit(
-    request: Request, authorization: Annotated[str | None, Header()] = None
-):
-    """初筛管理认证:JWT → resolve → permission_codes 含 resume:audit。"""
-    identity, _ = await _authenticate(request, authorization)
-    codes = identity.get("permission_codes") or []
-    if "resume:audit" not in codes:
-        raise HTTPException(status_code=403, detail="需要 resume:audit 权限")
-    return identity
+# 初筛执行权:与 resume:audit(查看权)解耦的独立权限码。触发/重试 AI 初筛
+# 必须持 evaluation:run(仅超管与管理员授予;面试官/普通审核员不持有);前端
+# 按钮显隐用同一权限码,双侧拒绝语义一致。Backend 侧简历状态 6 写入同样验
+# 此码(服务账号)。
+_require_evaluation_run = _require_any("evaluation:run")
+
+# AI 评分分级可见:具体分数仅 evaluation:score:view(仅超管)可见,
+# 其余角色只见三档等级(优秀/良好/合格)。权限码由后端种子授予(V47)。
+_SCORE_VIEW_PERMISSION = "evaluation:score:view"
 
 
-async def _require_evaluation_run(
-    request: Request, authorization: Annotated[str | None, Header()] = None
-):
-    """初筛执行权:与 resume:audit(查看权)解耦的独立权限码。
+def _can_view_score(identity: ResolvedIdentity) -> bool:
+    return _SCORE_VIEW_PERMISSION in (identity.get("permission_codes") or [])
 
-    触发/重试 AI 初筛必须持 evaluation:run(后端 V46:仅超管与管理员
-    授予;面试官/普通审核员不持有);前端按钮显隐用同一权限码,双侧
-    拒绝语义一致。Backend 侧简历状态 6 写入同样验此码(服务账号)。"""
-    identity, _ = await _authenticate(request, authorization)
-    codes = identity.get("permission_codes") or []
-    if "evaluation:run" not in codes:
-        raise HTTPException(status_code=403, detail="需要 evaluation:run 权限")
-    return identity
+
+def _attach_level_and_mask(row: dict[str, Any], *, can_view: bool) -> dict[str, Any]:
+    """就地补 ai_level(所有角色都带);无 view 权限时剥离全部可反推分数的字段。
+
+    total 可由 traits[].met 组合经 trait_score 确定性精确重建(scoring 权重表
+    公开),volume_ceiling 是卡内自带的封顶值,met_count 直接给出 15 分宽分段
+    ——三者任一留存都等于没藏。最小投影只保留定性内容(summary/态度/引文)。
+    """
+    row["ai_level"] = ai_level(row.get("total"))
+    if not can_view:
+        row["total"] = None
+        card = row.get("card")
+        if isinstance(card, dict):
+            card.pop("total", None)
+            card.pop("met_count", None)
+            card.pop("volume_ceiling", None)
+            card.pop("traits", None)
+    return row
 
 
 class RunBody(BaseModel):
@@ -70,8 +81,9 @@ async def run_evaluation_jobs(
     except evaluation.JobStoreError as exc:
         # DB 侧建 job 失败是服务端故障,别混进下面的"调用方数据错位"
         raise HTTPException(status_code=500, detail="提交初筛任务失败,请稍后重试") from exc
-    except RuntimeError as exc:
-        # 权威归属核对失败属调用方数据错位 → 400,不是服务端故障
+    except eval_runner.SubmissionDataError as exc:
+        # 调用方数据错位(领域异常)→ 400;其余 RuntimeError 等意外异常
+        # 落到下面的兜底 500——不再被误判成调用方问题
         raise HTTPException(status_code=400, detail=f"简历归属核对失败:{exc}") from exc
     except Exception as exc:  # noqa: BLE001 — 统一 500 固定文案
         raise HTTPException(status_code=500, detail="提交初筛任务失败,请稍后重试") from exc
@@ -117,19 +129,6 @@ async def retry_failed_jobs(
 
 
 # ── 预置题库(/admin/evaluation/qbank):面试官挑题面 ──
-
-
-def _require_any(*codes: str):
-    """任一权限码通过即放行(qbank 面:面试官 interview:evaluate / 评审 resume:audit)。"""
-
-    async def _dep(request: Request, authorization: Annotated[str | None, Header()] = None):
-        identity, _ = await _authenticate(request, authorization)
-        owned = identity.get("permission_codes") or []
-        if not any(c in owned for c in codes):
-            raise HTTPException(status_code=403, detail=f"需要 {' 或 '.join(codes)} 权限")
-        return identity
-
-    return _dep
 
 
 class PickBody(BaseModel):
@@ -213,6 +212,7 @@ async def pick_questions(
             qbank_store.resolve_picks, body.resume_id, body.cycle_id, body.questions
         )
     except LookupError as exc:
+        # resolve_picks 的受控领域文案(指出哪条引用无效),面向管理面 422
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail="查询题库失败,请稍后重试") from exc
@@ -270,7 +270,7 @@ class RejectBody(BaseModel):
 
 @router.get("/admin/evaluation/queue")
 async def evaluation_queue(
-    _: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
+    identity: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
     cycle_id: int,
     queue: str = "all",
     limit: int = 200,
@@ -291,6 +291,10 @@ async def evaluation_queue(
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail="查询队列失败,请稍后重试") from exc
+    can_view = _can_view_score(identity)
+    for item in items:
+        # 评分分级可见:等级人人可见,具体分数仅 view 权限
+        _attach_level_and_mask(item, can_view=can_view)
     return {
         "items": items,
         "total": len(items),
@@ -313,6 +317,8 @@ async def get_scorecard_for_review(
     row = await asyncio.to_thread(evaluation.latest_scorecard, resume_id, cycle_id)
     if row is None:
         raise HTTPException(status_code=404, detail="该候选暂无评分卡")
+    # 评分分级可见:卡内具体分数(card.total 与顶层 total)仅 view 权限可见
+    _attach_level_and_mask(row, can_view=_can_view_score(identity))
     return row
 
 

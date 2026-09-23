@@ -198,3 +198,18 @@ def weighted_total(scores: dict[str, int], weights: dict[str, float]) -> float:
         num += score * w
         den += w
     return round(num / den, 1) if den else 0.0
+
+
+def ai_level(total: float | None) -> str | None:
+    """AI 参考总分 → 三档等级(对外展示用;具体分数仅 evaluation:score:view 可见)。
+
+    档位边界:优秀 [75,100],良好 [35,75),合格 [0,35)。
+    total 为 None(无分)→ None。
+    """
+    if total is None:
+        return None
+    if total >= 75:
+        return "优秀"
+    if total >= 35:
+        return "良好"
+    return "合格"

@@ -137,7 +137,7 @@ class BackendClient:
             return _interpret(resp)
         except _AuthExpired:
             # body 业务码过期(1001-1003/2004/2006)与 HTTP 401 同文案,不泄漏内部信号
-            raise BackendError("用户令牌无效或已过期,需用户重新登录后重试") from None
+            raise BackendAuthError("用户令牌无效或已过期,需用户重新登录后重试") from None
 
     async def put_as_user(
         self, path: str, json: dict[str, Any] | None = None, user_token: str = ""
@@ -165,7 +165,7 @@ class BackendClient:
         try:
             return _interpret(resp)
         except _AuthExpired:
-            raise BackendError("用户令牌无效或已过期,需用户重新登录后重试") from None
+            raise BackendAuthError("用户令牌无效或已过期,需用户重新登录后重试") from None
 
     async def login(self) -> str:
         """服务账号登录并缓存 token。凭证错误抛 BackendAuthError。"""
@@ -241,7 +241,7 @@ class BackendClient:
                     method, path, params=params, json=json, token=token, headers=headers
                 )
             except _AuthExpired:
-                raise BackendError(
+                raise BackendAuthError(
                     "重新登录后请求仍被拒,服务账号可能被禁用或后端鉴权异常"
                 ) from None
 

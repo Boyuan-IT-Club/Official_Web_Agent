@@ -21,7 +21,9 @@ def _mock_conn(fetchone=None, fetchall=None, rowcount=1):
 def test_save_scorecard_version_increments(monkeypatch) -> None:
     """重跑版本递增:版本 = 现存最大+1,旧版保留。"""
     conn = _mock_conn(fetchone={"v": 2})
-    monkeypatch.setattr(evaluation, "_conn", lambda: conn)
+    monkeypatch.setattr(
+        "official_agent.state.evaluation._connection._conn", lambda: conn
+    )
     version = evaluation.save_scorecard(
         {"total": 71.5, "hard_zero": False},
         resume_id=9,
@@ -47,7 +49,9 @@ def test_set_status_rejects_unknown_status() -> None:
 
 def test_set_status_scoped_by_version(monkeypatch) -> None:
     conn = _mock_conn(rowcount=1)
-    monkeypatch.setattr(evaluation, "_conn", lambda: conn)
+    monkeypatch.setattr(
+        "official_agent.state.evaluation._connection._conn", lambda: conn
+    )
     assert evaluation.set_scorecard_status(9, 2026, 2, "adopted") is True
     sql, params = conn.execute.call_args.args
     assert "status = %s" in sql

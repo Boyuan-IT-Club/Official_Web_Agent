@@ -1,8 +1,9 @@
 # 设计方案
 
-> v0.2 · 2026-08-25。v0.1(2026-08-21)为初始设计;本版已并入 PR #66 架构评审的全部采纳决议
-> (ADR-0003~0007 与 12 条端点漂移修正)。与 ADR 冲突时以 ADR 为准;工具↔端点映射以
-> 后端仓库 `openapi.yaml` 为唯一真实来源。
+> v0.3 · 2026-09(结构化重构后)。v0.1(2026-08-21)初始设计,v0.2(2026-08-25)并入
+> 架构评审决议;本版更新为**当前形态**:补代码导览与关键流程,里程碑规划(M1~M6)与
+> 谈判清单等过程内容移入 `docs/archive/` 与 ADR。与 ADR 冲突时以 ADR 为准;工具↔端点
+> 映射以后端仓库 `openapi.yaml` 为唯一真实来源。
 
 ## 1. 愿景与目标
 
@@ -16,7 +17,7 @@ agent 工程实践:ReAct 工具调用、状态机编排、human-in-the-loop、�
 - 落地三个能力模块(A 对话助理 / B 评估流水线 / C 面试官 Copilot),共用一套工具层与
   状态设施,而非三个孤立脚本
 - 与后端**完全解耦**:只通过 REST API + 最小权限服务账号 + `X-On-Behalf-Of` 代理身份
-  (ADR-0006)交互,不触碰数据库
+  (ADR-0006)交互,不触碰后端数据库
 - 写操作一律经 LangGraph `interrupt` 人工确认,令牌=interrupt 恢复凭证(操作指纹绑定、
   一次性,ADR-0005);agent 只加速流程、不替人拍板
 - 从第一个 PR 起就有 trace(Langfuse)和 eval 集,质量可回归、变更可门禁
@@ -25,7 +26,7 @@ agent 工程实践:ReAct 工具调用、状态机编排、human-in-the-loop、�
 **非目标**
 
 - **不做自动录取决策**——评估流水线输出是"辅助初筛参考",最终决定永远由人做
-- 不改造后端核心业务逻辑;不接管排期分配算法(方案B)
+- 不改造后端核心业务逻辑;不接管排期分配算法
 - 第一期候选人侧只读
 - 不用 LangChain 经典 Chain/AgentExecutor;编排全部走 LangGraph,langchain-core 只作
   model/tool 接口层
@@ -35,144 +36,120 @@ agent 工程实践:ReAct 工具调用、状态机编排、human-in-the-loop、�
 三者是一条价值链:**B 产出的候选人摘要与定制面试题,在 C 中被面试官消费;C 产出的评价
 回流后端评价看板;A 是管理员触发 B、查看进度与数据的对话入口。**
 
-### A · 招新对话助理
-
-| 角色 | 典型请求 | 能力边界 |
+| 模块 | 入口(ADR-0003:各入口直连,无统一意图路由) | 形态 |
 |---|---|---|
-| 候选人 | "我的面试安排在什么时候?""简历什么状态?" | 只读 + RAG 问答;仅能查自己 |
-| 管理员 | "明天下午还有空场次吗?""待处理的改期列一下""把李四调剂到周六上午" | 读全量;写操作经 interrupt 确认 |
-| 管理员 | "生成本周投递与面试进度周报" | 多工具取数 + 报告合成 |
-
-**入口**(ADR-0003):CLI(M1,开发调试)→ 官网 SSE + 管理端对话面板(M5,含确认/拒绝
-上行端点,#8)。**飞书入口(INF-05..07)保留为 M3 一等入口**(2026-08-31 拍板:
-管理员在飞书群 @ 机器人查数据、卡片确认写操作;TOOL-08 多维表格写回随之保留,
-EVA-08 报告推送依赖它)。
-
-**形态**(ADR-0003):无意图分类。身份解析(确定性)→ 按角色装配工具集(SEC-02)→
-ReAct 单循环;"意图"由模型选工具隐式表达。
-
-### B · 简历评估流水线
-
-输入一个招募周期的待筛简历,对每份产出:结构化摘要(技能/项目/佐证标注)、分部门量规
-评分(每维度必须附引用简历原文的"依据",schema 见 #69)、3~5 个定制面试题。
-
-**触发**(共识,#34):流水线本体=graph + 调度队列;触发面=对话遥控器工具
-(`trigger_evaluation` / `get_evaluation_progress`)+ 管理端"开始审核"按钮 + cron,
-全部汇入同一队列。**对话是遥控器,不是流水线本身。**
-
-**写回**:批量写回走评审确认语义(与对话令牌是两套机制,不可互替,ADR-0005);
-维度分+依据的落库通道在 SEC-01 谈判清单内(#52),谈判前落 agent 侧 Postgres + 飞书表格。
-
-### C · 面试官 Copilot
-
-宿主:**官网管理端面试页**(界面即路由,直连 copilot 三态图;不经 A 前门)。
-
-1. **面试前**:候选人卡片(评价看板简历 + B 的摘要与面试题)——`get_candidate_card`
-   依赖 X-On-Behalf-Of 落地(服务账号直调会被场次绑定校验拒绝)
-2. **面试中**:速记 → 低延迟追问建议(零工具调用保证速度)
-3. **面试后**:速记按评价维度归纳成评价表草稿,面试官确认后提交
-
-**C+ 语音模式**(M6,#43~45):流式 ASR(说话人分离、静默窗口触发)替换速记输入源,
-图与追问逻辑复用;录音知情同意与留存策略(COP-08)**先行**于 ASR 接入;转写是新的
-不可信输入面。
+| **A · 招新对话助理** | 官网 SSE(`/api/agent/chat`,已上线);CLI(`official-agent` 命令,开发调试);飞书(规划,未接入) | 身份解析 → 按角色装配工具集 → ReAct 单循环;写操作经 interrupt 指纹令牌 |
+| **B · 简历评估流水线** | 管理面 `/admin/evaluation`(触发/重试/评审);启动自动恢复 | job 状态机 → 评分子图(评分+批判回炉)→ 出题 bundle → 落库/评审队列 |
+| **C · 面试官 Copilot** | 官网管理端面试页(规划中) | 卡片 / 速记追问建议 / 评价草稿三态 |
 
 ## 3. 总体架构
 
 ```
-A:CLI / 官网 SSE(飞书悬置) ─→ 身份解析 → 按角色装配工具集 → ReAct 单循环
-B:调度队列(遥控器工具/按钮/cron)─→ evaluation 图(批处理)
-C:官网管理端面试页 ─→ copilot 三态图
-                  │
-     工具层 tools/(进程内直连 Python 函数;MCP Server 仅对外暴露,已降级为维护态)
-                  │
-     后端 REST(服务账号 JWT + X-On-Behalf-Of)
-     Postgres(checkpointer / pgvector / 审计) · Langfuse(trace,fail-open)
+A:官网 SSE(web/routes)· CLI ─┐
+B:管理面(admin 面)· 启动恢复 ─┼→ graphs/(LangGraph 编排)
+C:管理端面试页(规划)      ─┘        │
+                                tools/(后端 REST 语义化封装,进程内直连;
+                                MCP Server 仅对外暴露,维护态)
+                                    │
+                    state/(Postgres 状态面)· kb/(pgvector 知识库)
+                                    │
+    后端 REST(服务账号 JWT + X-On-Behalf-Of 代理身份)
+    Postgres(checkpointer / 状态表 / pgvector / 审计) · Langfuse(trace,fail-open)
 ```
 
 关键决策(详见对应 ADR):
 
 - **入口各自直连,无统一意图路由**(ADR-0003)
-- **工具进程内直连**;MCP 纯对外给 Claude Code 等挂载(ADR-0003)。**入口决策(2026-09-01):一等入口=飞书(M3)+官网(M5),MCP 不作为用户入口**——已实现(TOOL-02)但降级为维护态:仅当出现「外部 AI 客户端需接招新数据」的真实需求时再激活
+- **工具进程内直连**;MCP 纯对外给 Claude Code 等挂载(ADR-0003),不作用户入口
 - **上下文四段组装 + 双 cache 断点**;超阈值任务感知摘要,禁滑动窗口;prompt 一图一节点
   一文件 + frontmatter(ADR-0004)
 - **模型路由默认 strong**,降 light 仅限内部模式化步骤且须 eval 证明(ADR-0004)
 - **观测 fail-open,写路径 fail-closed**(ADR-0005)
-- **存储只有 Postgres**:checkpointer + 长期记忆/pgvector + 审计共用一实例,Redis 不在
-  agent 栈;部署 Node B,后端 MySQL 不迁移,Langfuse 生产部署延后(ADR-0007)
+- **存储只有 Postgres**:checkpointer + 状态表 + pgvector + 审计共用一实例,Redis 不在
+  agent 栈(ADR-0007)
 
-## 4. 工具 ↔ 端点映射(已按 openapi 核对,2026-08-24 修正)
+## 4. 代码导览(目录 ↔ 职责)
 
-### 只读(注册进 MCP,get_my_interview 除外)
+四层骨架(见 `docs/standards/layering.md`)在本仓的落位,依赖**单向向下**:
+`web(接口) → graphs(编排) → evaluation(评估域) → tools/state/kb/security(基础设施)`。
 
-| 工具 | 后端端点 | 备注 |
+| 目录 | 层 | 职责 |
 |---|---|---|
-| `get_open_cycle` | GET /api/cycles/open | 返回无 status 字段 |
-| `search_resumes` | GET /api/resumes/search | department→expectedDepartment;另有 name/major/status/分页 |
-| `get_resume_detail` | GET /api/resumes/admin/{userId}/{cycleId} | 无按 resumeId 直查的端点 |
-| `get_my_interview` | GET /api/interview/schedule/my | cycleId 必填;需本人令牌,**不入 MCP** |
-| `find_available_sessions` | GET …/cycles/{id}/available-sessions | 后端仅 deptId 过滤,date 客户端过滤 |
-| `list_unassigned` | GET …/cycles/{id}/unassigned | |
-| `list_reschedule_requests` | GET /api/interview/reschedule/admin/list | cycleId 必填;status int 0/1/2 |
-| `get_recruit_statistics` | result/list + evaluation summary 聚合 | 原 /statistics 未实现,端点列入 SEC-01 谈判 |
-| `get_candidate_card` | …/candidates/{scheduleId}/resume + …/dimensions | 需 X-On-Behalf-Of |
+| `web/` | 接口层 | FastAPI 路由与入口横切:`routes`(chat SSE + 会话路由)、`config_admin`(配置管理面)、`kb_admin`(知识库管理面)、`evaluation_admin`(初筛管理面)、`auth`(鉴权依赖)、`session_store`(会话注册表,纯状态)、`agent_factory`(配置热生效)、`telemetry`(对话观测落账)、`app`(装配 + 生命周期 + trace 中间件) |
+| `graphs/` | 编排层 | `assistant/`(A:ReAct 单循环 + 会话压缩)、`evaluation/`+`investigate_graph`(B 的编排面)、`copilot/`(C,规划)、`identity`(JWT→身份)、`router`(统一路由图,未接入) |
+| `evaluation/` | 评估域 | 流水线领域逻辑:`runner`(job 执行)、`bundle`(出题证据线)、`explore`+`investigate_graph`(仓探索/出题)、`graph`(评分子图)、`judge`/`tech_stack`/`awards`(专项出题)、`scoring`(量规)、`schema`(数据契约)、`llm_common`(共享 LLM 小件)、`github_client`/`autograding`/`attribution`/`dossier` |
+| `tools/` | 基础设施 | `client`(后端 REST 客户端,异常层级在此)、`readonly`/`knowledge`(语义化只读工具)、`write`(interrupt 写工具)、`credentials`(服务账号)、`interrupt_guard` |
+| `state/` | 基础设施 | Postgres 状态面:`pg`(checkpointer 连接)、`threads`(会话档案)、`conversation`(对话日志)、`evaluation/`(分卡/job/评审队列,包)、`qbank`(题库)、`audit`(审计)、`config_store`(热配置) |
+| `kb/` | 基础设施 | 知识库:入库分块/向量检索/表自举 |
+| `security/` | 横切 | `pii`(脱敏)、`injection_guard`(数据区+注入扫描)、`fabrication_guard`(编造守卫) |
+| `prompts/` | 资源 | prompt 唯一权威(一图一节点一文件 + frontmatter,ADR-0004) |
+| `evals/` | 质量门 | eval 集 + 统一 runner(`python evals/run_evals.py`) |
+| `observability.py` | 横切 | Langfuse 接线 + trace id(contextvar/W3C)+ PII 遮蔽 handler |
 
-### 写(仅 agent 进程内装配,全部经 interrupt 指纹令牌)
+## 5. 关键流程
 
-| 工具 | 后端端点 | 备注 |
-|---|---|---|
-| `assign_interview` | POST …/preferences/{resumeId}/assign | 分配/再分配;满员业务码 3604;改期后重排也走它 |
-| `handle_reschedule` | PUT …/reschedule/admin/{id}/handle | status 1 同意 / 2 拒绝 + adminNote;同意不自动重排 |
-| `submit_resume_score` | PUT /api/resumes/{id}/score | int 0~100;维度分+依据通道待 SEC-01 |
+### 一次对话回合(A)
 
-(v0.1 的 `move_interview` 已砍除:后端 manual-adjust 端点 deprecated。)
+```
+POST /chat(web/routes.chat,ChatBody 校验 + JWT 鉴权)
+  → 会话注册表(session_store):命中/档案恢复/新建+建档
+  → _stream_turn:配置热生效 → session 事件 → 模型并发闸 + 墙钟
+  → 流消费(ReAct:assistant graph.astream)→ delta/tool 事件(PII 掩码逐块)
+  → 工具调用(tools/*,只读直连后端;写操作 interrupt 确认)
+  → 编造守卫(toolless)→ 轮末压缩 → conversation_log 落账 → sources/done
+```
 
-## 5. 状态与记忆
+失败语义:闸满/超时/断连/异常四路都收敛到同一落账点;客户端只收
+`error(code,message)` 稳定事件,原始异常只进服务端日志。
 
-- **v1 只有 Postgres checkpointer**(#46):会话状态、interrupt 挂起载荷、C 速记、
-  B 断点续跑;thread 生命周期契约见 #67(命名/属主/并发串行化/TTL/跨入口)
-- 长期记忆 MEM-02..05 收缩为"等第一个真实需求再启"(P2)
-- **RAG Day1 接口化**(#51):先定 RAG 形接口 + 小语料实现,后端实现可换
+### 一个评估 job(B)
 
-## 6. 安全与合规
+```
+POST /admin/evaluation/run(evaluation_admin,权限 evaluation:run)
+  → runner.submit:后端权威归属核对 → create_jobs(幂等,活跃去重)
+  → _execute_job:评分段(_do_scoring:取数→归属硬断言→脱敏→评分子图→落卡)
+  → 题库段(_do_qbank:出题 bundle→qbank 落库→用量日志)
+  → mark succeeded(带 qbank_status)→ 完成审计 → 评审队列(list_review_queue)
+```
 
-- **PII 是分层边界,不是单个节点**(#68,红线):进模型前脱敏 + trace 采集侧防原文入
-  Langfuse + 模型输出侧守卫 + 挂起载荷 TTL;占位符映射契约随 #68 定义
-- **不可信输入**:简历、(未来)转写在 prompt 中框定为数据区;EVA-05 证据核验节点
-  (代码核引用真实性于脱敏文本内 + 模型核维度矛盾)兼作注入检测
+失败语义:评分失败 job 落 failed(可重试,上限交人工);题库线失败不影响评分卡
+(job succeeded + qbank_status=failed,管理面可见真实原因)。
+
+## 6. 工具 ↔ 端点映射(要点)
+
+完整映射以后端 `openapi.yaml` 为唯一真实来源;结构性约定:
+
+- 只读工具注册进 MCP(对外);`get_my_interview` 等需**最终用户本人令牌**,仅在
+  agent 进程内装配
+- 写工具(`assign_interview`/`handle_reschedule`/`submit_resume_score`)仅进程内装配,
+  全部经 interrupt 指纹令牌确认(ADR-0005)
+- 工具粒度对齐意图而非接口;返回做投影裁剪,错误信息必须可行动
+
+## 7. 状态与安全
+
+- **存储只有 Postgres**(ADR-0007):checkpointer、会话档案(agent_threads)、
+  对话日志、评测三表(分卡/job/题库)、审计、kb 向量
+- **PII 是分层边界**:进模型前脱敏(tools 出口)+ trace 采集侧遮蔽(observability
+  handler)+ 模型输出侧守卫 + 挂起载荷 TTL
+- **不可信输入**:简历/评测记录/候选人自述进 prompt 一律包数据区;批判节点兼作
+  注入检测
 - **写操作三重闸**:工具装配(读不到)→ interrupt(执行不了)→ 指纹令牌(绕不过)
-- **代理身份与审计**(ADR-0006):审计行五字段(acting_user / agent 模块+节点+prompt
-  版本 / action+指纹 / decision / trace_id);SEC-01 后端谈判清单终版见 #52(7 项一次谈)
-- 真实凭证只存 `.env`;agent 永不持有 JWT_SECRET
+- **审计**(ADR-0006):acting_user / agent 模块+节点+prompt 版本 / action+指纹 /
+  decision / trace_id
 
-## 7. 评估与可观测
+## 8. 评估与可观测
 
-- Langfuse 自托管:M1~M2 跑开发机(观测 fail-open),生产部署招新季前再定(#58)
-- eval 三层:工具选择/参数(确定性,进 CI)→ 终答 LLM-as-judge;简历标注集 20~50 份
-  (不入库);badcase 回流为回归用例;可执行性方案(secrets/数据集分发/基线/judge 校准)
-  见 #70;prompt 事实源=文件 frontmatter,Langfuse 只读镜像(ADR-0004)
-
-## 8. 里程碑
-
-| 里程碑 | 内容 | 验收 |
-|---|---|---|
-| M1(1~2周) | 工具层实现 + MCP Server + CLI ReAct(管理员侧)+ Langfuse 接线 + 最小 eval;前置:SEC-01 后端谈判(#52) | Claude Code 挂 MCP 查"技术部还有多少待筛简历"答对;CLI 完成多工具组合查询 |
-| M2(2周) | B 流水线(解析→脱敏→评分→证据核验→出题)+ 分数卡 schema 与评审确认(#69)+ PII 边界(#68)+ 标注集与 eval 门禁(#70) | 对历史周期影子运行,产出与人工初筛的一致率报告 |
-| M3(2~3周) | Postgres checkpointer(#46)+ thread 契约(#67)+ interrupt 确认闭环 + 审计行;入口范围按"A 飞书悬置"的结论执行 | 一次"查空场次→assign_interview→确认执行"全流程 |
-| M4(2周) | C 三态闭环(卡片/速记建议/评价草稿,消费 M2 产出)+ RAG 接口化(#51) | 一场演练面试全程使用 Copilot |
-| M5(2周) | 官网双端:SSE chat(含确认/拒绝上行,#8)+ 候选人浮窗 + 管理端面板(前端配合,契约先冻结) | 候选人在官网完成只读问答;管理员页面内完成带确认写操作 |
-| M6(2~3周) | C+ 语音:合规先行(COP-08)→ 流式 ASR → 静默窗口实时追问 | 演练中追问采纳率 ≥ 50% |
-
-## 9. 开放问题
-
-1. ~~A 是否接飞书~~ **已拍板(2026-08-31):保留**,INF-05..07 与 TOOL-08 全保留
-2. SEC-01 后端谈判结果——决定代理身份两层防线还是单防线退路,以及 B 落库通道
-3. trace PII 的具体修法(工具返回层脱敏 vs 采集点二次脱敏)——#68 内拍板
-4. 审计行权威存储(agent PG / 后端端点 / 文件+聚合)——随 SEC-01 谈判定
+- eval 分层与门禁见 `evals/README.md`;评测线可观测 runbook 见
+  `docs/eval-observability.md`;prompt 事实源=文件 frontmatter,Langfuse 只读镜像
+- trace 串联:轮级 trace id(web 中间件/CLI/eval job 三入口)+ 出站 traceparent +
+  审计 trace_id 四面同 id;日志行自带 `[trace_id]`
+- 工程规范(分层/错误处理/日志/注释)见 `docs/standards/`
 
 ## 文档地图
 
-- 决策记录:`docs/adr/0003`(入口与编排)/ `0004`(上下文工程)/ `0005`(令牌与失败
-  哲学)/ `0006`(代理身份与审计,Proposed)/ `0007`(存储,Accepted)
-- 评审产物:`docs/grill-session-2026-08-24.html`(32 项决策总览)/
-  `docs/gap-scan-2026-08-24.md` / `docs/sync-agenda-2026-08-24.md`
-- 历史版本:v0.1 完整稿(含被取代的意图分类、Redis 方案)存于设计 artifact,不入库
+- 代码架构详解(分层/包结构/设计模式/流程图):`docs/architecture.md`
+- 决策记录(ADR):`docs/adr/`(工作区根)
+- 工程规范:`docs/standards/`(入口 README 有加载地图)
+- 重构计划与进度:`docs/refactor-roadmap.md`
+- 历史过程记录(评审纪要/谈判清单/里程碑规划):`docs/archive/`(仅追溯用)
+- 架构决策的背景与备选:git 历史与 ADR;本文件只描述**当前**形态

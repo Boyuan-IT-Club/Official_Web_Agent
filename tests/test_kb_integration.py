@@ -1,4 +1,4 @@
-"""RAG #134 R1:KB 真库集成档(pgvector 容器;向量用确定性注入,不依赖真实端点)。
+"""KB 真库集成档(pgvector 容器;向量用确定性注入,不依赖真实端点)。
 
 运行门槛:环境变量 KB_TEST_DATABASE_URL 指向带 pgvector 的库,缺省整档跳过——
 单测档(test_kb_store.py)不依赖真库,CI 保持纯 mock。
@@ -208,7 +208,7 @@ async def test_reingest_updates_chunks_not_duplicates(kb_env) -> None:
 
 
 async def test_model_change_bumps_version_and_clears_vectors(kb_env) -> None:
-    """换 embedding 模型:旧向量全清+版本 bump+列维度 ALTER(禁混排,#119)。
+    """换 embedding 模型:旧向量全清+版本 bump+列维度 ALTER(禁跨模型混排)。
 
     评审闸 P1:这是全票风险最高的 DDL 路径(HNSW 索引在列上时 ALTER),
     实测正确性依赖「同事务先 DELETE 再 ALTER」的顺序,必须有真库守护。
@@ -254,13 +254,12 @@ async def test_model_change_bumps_version_and_clears_vectors(kb_env) -> None:
 
 
 async def test_admin_api_roundtrip_real_pg(monkeypatch) -> None:
-    """R2 真机等效闸:真实 HTTP(TestClient)→ 鉴权 → store → 真 pgvector 全链。"""
+    """真机等效闸:真实 HTTP(TestClient)→ 鉴权 → store → 真 pgvector 全链。"""
     import contextlib
     from collections.abc import AsyncIterator
 
     from fastapi.testclient import TestClient
 
-    from official_agent.web import routes
     from official_agent.web.app import create_app
 
     _patch_pg(monkeypatch)
@@ -291,7 +290,7 @@ async def test_admin_api_roundtrip_real_pg(monkeypatch) -> None:
             "source": "web",
         }
 
-    monkeypatch.setattr(routes, "resolve", _resolve)
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
 
     with TestClient(create_app()) as client:
         assert client.get("/health").json()["status"] == "ok"

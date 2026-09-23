@@ -1,7 +1,7 @@
-"""Embedding 客户端(RAG #134):OpenAI-compatible /embeddings。
+"""Embedding 客户端:OpenAI-compatible /embeddings。
 
 独立 EMBED_* 配置组(config.py),与对话模型 build_model 平行:
-不塞 llm_base_url、不入 HOT_KEYS(SEC-01:密钥只在 env)。
+不塞 llm_base_url、不入 HOT_KEYS(密钥只存 env,永不入库)。
 Anthropic 无 embedding → 托管中文模型(Qwen3-Embedding-0.6B/BGE-M3 等);
 端点与维度落在 kb_meta(schema.py),换模型 = 全量 reindex。
 """
@@ -34,7 +34,7 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
     if not (settings.embed_base_url and settings.embed_api_key and settings.embed_model):
         raise EmbeddingNotConfiguredError(
             "embedding 未配置:需在 .env 设 EMBED_BASE_URL/EMBED_API_KEY/EMBED_MODEL"
-            "(见 .env.example;当前 LLM 代理无 embedding 模型,night-run 执行板 #136 检查点①)"
+            "(见 .env.example;当前 LLM 代理无 embedding 模型)"
         )
     base = settings.embed_base_url.rstrip("/")
     url = base if base.endswith("/embeddings") else f"{base}/embeddings"

@@ -1,4 +1,4 @@
-"""RAG #134 R2:/admin/kb* 管理 API 测试(test_admin_conversations.py 先例)。
+"""/admin/kb* 管理 API 测试(test_admin_conversations.py 先例)。
 
 TestClient + monkeypatch:resolve 装 admin(kb:manage)/无权身份;
 kb_store 函数被 monkeypatch(不真连 PG;真库往返在 test_kb_integration.py)。
@@ -71,13 +71,12 @@ def _candidate_identity() -> dict:
 
 
 def _install_resolve(monkeypatch: pytest.MonkeyPatch, identity: dict) -> None:
-    from official_agent.web import routes
 
     async def _resolve(*_a: object, **_k: object) -> dict:
         return identity
 
-    # kb_admin 复用 routes._authenticate → 其内部 resolve 查找在 routes 模块全局
-    monkeypatch.setattr(routes, "resolve", _resolve)
+    # kb_admin 的鉴权走 web/auth.authenticate → 其内部 resolve 查找在 auth 模块全局
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
 
 
 _AUTH = {"Authorization": "Bearer tok"}
@@ -118,7 +117,7 @@ def test_kb_rejects_candidate(
 def test_kb_rejects_monitor_without_kb_manage(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """权限分离:agent:monitor 不含 kb:manage(#121)。"""
+    """权限分离:agent:monitor 不含 kb:manage(两码独立授予)。"""
     _install_resolve(monkeypatch, _monitor_only_identity())
     resp = client.get("/api/agent/admin/kb/sources", headers=_AUTH)
     assert resp.status_code == 403
@@ -383,3 +382,22 @@ def test_kb_reembed_reuses_stored_content(
 
     missing = client.post("/api/agent/admin/kb/sources/nope/reembed", headers=_AUTH)
     assert missing.status_code == 404
+
+
+def test_kb_unexpected_error_no_internal_detail(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未预期异常:500 稳定文案,原始异常(可能含内部细节)不出边界。"""
+    from official_agent.web import kb_admin
+
+    _install_resolve(monkeypatch, _kb_admin_identity())
+
+    def _boom(*_a: object, **_k: object):
+        raise RuntimeError("pg connect failed: postgresql://svc:pw@10.0.0.3/official")
+
+    monkeypatch.setattr(kb_admin.kb_store, "list_sources", _boom)
+    resp = client.get("/api/agent/admin/kb/sources", headers=_AUTH)
+    assert resp.status_code == 500
+    detail = resp.json()["detail"]
+    assert detail == "KB 操作失败,请稍后重试"
+    assert "postgresql://" not in detail, "内部细节不得进响应体"

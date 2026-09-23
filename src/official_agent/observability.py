@@ -48,7 +48,7 @@ _ZERO_TRACE_ID = "0" * 32
 _turn_trace_id: contextvars.ContextVar[str] = contextvars.ContextVar("turn_trace_id", default="")
 
 
-def _to_w3c_trace_id(value: str) -> str:
+def to_w3c_trace_id(value: str) -> str:
     """任意串 → 合法 W3C trace-id 段(32 位小写 hex)。
 
     已是 32 位小写 hex 原样通过;否则 sha256 确定性映射(同值同像,两侧可复算)。
@@ -69,7 +69,7 @@ def set_turn_trace_id(turn_id: str) -> contextvars.Token[str]:
     W3C 规定 trace-id 段必须 32 位小写 hex,严格消费端会丢弃非法头并自生成
     id,对账即失效。原值可读性由入口日志自行打印,不依赖此字段。
     """
-    return _turn_trace_id.set(_to_w3c_trace_id(turn_id))
+    return _turn_trace_id.set(to_w3c_trace_id(turn_id))
 
 
 def reset_turn_trace_id(token: contextvars.Token[str]) -> None:
@@ -302,4 +302,4 @@ def eval_job_trace_id(job_id: int) -> str:
     Langfuse trace、出站 Backend 请求 traceparent、审计 trace_id、结构化
     日志四面同 id,分钟级定位失败阶段(见 docs/eval-observability.md)。
     """
-    return _to_w3c_trace_id(f"eval-job-{job_id}")
+    return to_w3c_trace_id(f"eval-job-{job_id}")

@@ -19,6 +19,7 @@ import logging
 import secrets
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from official_agent.config import get_effective_settings
 from official_agent.evaluation.github_client import normalize_github_login
@@ -28,6 +29,15 @@ from official_agent.state import audit, evaluation
 from official_agent.tools.readonly import get_backend_client
 
 _MAX_CONCURRENCY = 4
+
+
+class SubmissionDataError(RuntimeError):
+    """调用方请求与后端权威数据错位/缺失(预检与执行期校验共用)。
+
+    继承 RuntimeError 保持既有 except 兼容。语义上是「调用方数据错位」
+    (管理面 → 400),不是服务端故障(→ 500),也不是可重试的瞬时故障;
+    消息是受控领域文案(resume_id 错位详情),可直达管理面。
+    """
 
 
 @dataclass(frozen=True)
@@ -152,7 +162,7 @@ async def fetch_scoring_fields(user_id: int, cycle_id: int) -> tuple[int, list[F
     resume_id = int(data.get("resumeId") or 0)
     if resume_id <= 0:
         # 缺 resumeId 静默落 0 会产生查不到的幽灵卡
-        raise RuntimeError("后端响应缺 resumeId,拒绝评分")
+        raise SubmissionDataError("后端响应缺 resumeId,拒绝评分")
     simple_fields = list(data.get("simpleFields") or [])
     fields = [
         FieldText(
@@ -183,13 +193,13 @@ async def fetch_resume_authority(resume_id: int) -> dict:
     data = await client.get(f"/api/resumes/admin/by-resume/{resume_id}")
     resume_id_back = int(data.get("resumeId") or 0)
     if resume_id_back != resume_id:
-        raise RuntimeError(
+        raise SubmissionDataError(
             f"简历权威归属不一致:请求 resume_id={resume_id},后端返回 {resume_id_back}——"
             "拒绝执行,防错位操作"
         )
     user_id = int(data.get("userId") or 0)
     if user_id <= 0:
-        raise RuntimeError(f"后端未返回简历 {resume_id} 的归属 user_id,拒绝执行")
+        raise SubmissionDataError(f"后端未返回简历 {resume_id} 的归属 user_id,拒绝执行")
     return {
         "resume_id": resume_id,
         "user_id": user_id,
@@ -234,6 +244,148 @@ def _mask_fields_for_model(fields: list[FieldText], *, resume_id: int) -> list[F
             resume_id,
         )
     return out
+
+
+async def _do_scoring(
+    job: dict[str, Any], resume_id: int, cycle_id: int, job_id: int
+) -> tuple[dict, int, list, str]:
+    """评分段:取数 → 归属硬断言 → 脱敏 → 评分子图 → 落卡。
+
+    返回 (卡, 卡版本, 脱敏后字段, 年级)——字段与年级是出题段的输入,
+    两个模型入口共用同一份脱敏后材料(出口契约)。
+    """
+    from official_agent.observability import eval_job_trace_id
+
+    t_eval = time.monotonic()
+    fetched_resume_id, fields, grade = await fetch_scoring_fields(job["user_id"], cycle_id)
+    # 硬断言:后端按 user_id+cycle 派生出的简历必须就是本 job
+    # 的简历;不一致说明数据错位,立即失败,绝不带病继续。
+    if fetched_resume_id != resume_id:
+        raise SubmissionDataError(
+            f"简历归属错位:job resume_id={resume_id},"
+            f"后端按 user_id={job['user_id']} 返回 {fetched_resume_id}——拒绝评分"
+        )
+    # 出口契约:评分与出题两个模型入口共用这份脱敏后字段
+    fields = _mask_fields_for_model(fields, resume_id=resume_id)
+    scoring_usage: dict[str, int | None] = {}
+    card = await run_evaluation(
+        [
+            {
+                "field_key": f.field_key,
+                "title": f.title,
+                "value": f.value,
+                "placeholder": f.placeholder,
+                "required": f.required,
+            }
+            for f in fields
+        ],
+        resume_id=resume_id,
+        cycle_id=cycle_id,
+        usage_out=scoring_usage,
+        correlation_id=eval_job_trace_id(job_id),
+    )
+    version = await asyncio.to_thread(
+        evaluation.save_scorecard,
+        card,
+        resume_id=resume_id,
+        cycle_id=cycle_id,
+        prompt_version=_prompt_version(),
+    )
+    _log_event(
+        job_id,
+        cycle_id,
+        resume_id,
+        "scorecard_saved",
+        card_version=version,
+        duration_ms=int((time.monotonic() - t_eval) * 1000),
+        prompt_version=_prompt_version(),
+        input_tokens=scoring_usage.get("input_tokens"),
+        output_tokens=scoring_usage.get("output_tokens"),
+    )
+    return card, version, fields, grade
+
+
+async def _do_qbank(
+    job: dict[str, Any],
+    fields: list,
+    grade: str,
+    *,
+    resume_id: int,
+    cycle_id: int,
+    job_id: int,
+) -> tuple[str, str | None, int]:
+    """题库段:调查 bundle → qbank 落库 → 用量日志。
+
+    返回 (qbank_status, qbank_error, qbank_version)。题库线失败不再静默
+    (qbank_status 落库):job 记 succeeded + qbank_status=failed——评分卡
+    有效,题库缺失管理面可见、可单独重试。
+    """
+    from official_agent.evaluation import bundle as eval_bundle
+    from official_agent.state import qbank as qbank_store
+
+    t_qbank = time.monotonic()
+    try:
+        envelope = await eval_bundle.run_bundle(
+            fields,
+            resume_id=resume_id,
+            cycle_id=cycle_id,
+            github_key=await fetch_candidate_github(job["user_id"]) or None,
+            github_token=get_effective_settings().github_token,
+            grade=grade,
+        )
+        qbank_version = await asyncio.to_thread(
+            qbank_store.save_qbank,
+            resume_id=resume_id,
+            cycle_id=cycle_id,
+            source=(
+                str(envelope["groups"][0].get("group", "bundle"))
+                if envelope.get("groups")
+                else "bundle"
+            ),
+            envelope=envelope,
+            prompt_version=str(envelope.get("prompt_version", "")),
+        )
+        # 探索+出题用量进 conversation_log(evaluation 通道,
+        # 关联 job;复用四列 token 管道,不新建表)
+        usage_total = envelope.get("explore_usage_total") or {}
+        await asyncio.to_thread(
+            _write_eval_usage_log,
+            job_id=job_id,
+            job_user_id=job.get("user_id"),
+            resume_id=resume_id,
+            cycle_id=cycle_id,
+            qbank_version=qbank_version,
+            usage=usage_total,
+        )
+    except Exception as qbank_exc:  # noqa: BLE001 — 题库线失败不拖垮评分卡
+        # 原因摘要落 job 行:管理面题库 404 文案据此给出真实
+        # 原因(权限/模型/网络),不再拿"暂无题库"掩盖失败
+        _log_event(
+            job_id,
+            cycle_id,
+            resume_id,
+            "qbank_done",
+            status="failed",
+            duration_ms=int((time.monotonic() - t_qbank) * 1000),
+            error_class=type(qbank_exc).__name__,
+        )
+        logging.getLogger(__name__).warning(
+            "调查 bundle 落库失败(job=%s),job qbank_status=failed",
+            job_id,
+            exc_info=True,
+        )
+        return "failed", f"{type(qbank_exc).__name__}: {qbank_exc}"[:500], 0
+    # 成功显式清列:复评翻案时不清,404 文案会拿陈旧原因误导
+    _log_event(
+        job_id,
+        cycle_id,
+        resume_id,
+        "qbank_done",
+        status="succeeded",
+        qbank_version=qbank_version,
+        duration_ms=int((time.monotonic() - t_qbank) * 1000),
+    )
+    return "succeeded", None, qbank_version
 
 
 class EvaluationRunner:
@@ -332,8 +484,6 @@ class EvaluationRunner:
             reset_turn_trace_id(trace_token)
 
     async def _execute_job(self, job_id: int, cycle_id: int, *, trigger_user_id: int) -> None:
-        from official_agent.observability import eval_job_trace_id
-
         started = time.monotonic()
         job = await asyncio.to_thread(evaluation.get_job, job_id)
         if job is None:
@@ -358,126 +508,17 @@ class EvaluationRunner:
             qbank_status = "skipped"
             qbank_error: str | None = None
             try:
-                t_eval = time.monotonic()
-                fetched_resume_id, fields, grade = await fetch_scoring_fields(
-                    job["user_id"], cycle_id
+                card, version, fields, grade = await _do_scoring(
+                    job, resume_id, cycle_id, job_id
                 )
-                # 硬断言:后端按 user_id+cycle 派生出的简历必须就是本 job
-                # 的简历;不一致说明数据错位,立即失败,绝不带病继续。
-                if fetched_resume_id != resume_id:
-                    raise RuntimeError(
-                        f"简历归属错位:job resume_id={resume_id},"
-                        f"后端按 user_id={job['user_id']} 返回 {fetched_resume_id}——拒绝评分"
-                    )
-                # 出口契约:评分与出题两个模型入口共用这份脱敏后字段
-                fields = _mask_fields_for_model(fields, resume_id=resume_id)
-                scoring_usage: dict[str, int | None] = {}
-                card = await run_evaluation(
-                    [
-                        {
-                            "field_key": f.field_key,
-                            "title": f.title,
-                            "value": f.value,
-                            "placeholder": f.placeholder,
-                            "required": f.required,
-                        }
-                        for f in fields
-                    ],
+                qbank_status, qbank_error, _ = await _do_qbank(
+                    job,
+                    fields,
+                    grade,
                     resume_id=resume_id,
                     cycle_id=cycle_id,
-                    usage_out=scoring_usage,
-                    correlation_id=eval_job_trace_id(job_id),
+                    job_id=job_id,
                 )
-                version = await asyncio.to_thread(
-                    evaluation.save_scorecard,
-                    card,
-                    resume_id=resume_id,
-                    cycle_id=cycle_id,
-                    prompt_version=_prompt_version(),
-                )
-                _log_event(
-                    job_id,
-                    cycle_id,
-                    resume_id,
-                    "scorecard_saved",
-                    card_version=version,
-                    duration_ms=int((time.monotonic() - t_eval) * 1000),
-                    prompt_version=_prompt_version(),
-                    input_tokens=scoring_usage.get("input_tokens"),
-                    output_tokens=scoring_usage.get("output_tokens"),
-                )
-                # 调查 bundle → qbank:题库线失败不再静默(qbank_status 落库),
-                # job 记 succeeded + qbank_status=failed——评分卡有效,题库缺失
-                # 管理面可见、可单独重试。
-                t_qbank = time.monotonic()
-                try:
-                    from official_agent.evaluation import bundle as eval_bundle
-                    from official_agent.state import qbank as qbank_store
-
-                    envelope = await eval_bundle.run_bundle(
-                        fields,
-                        resume_id=resume_id,
-                        cycle_id=cycle_id,
-                        github_key=await fetch_candidate_github(job["user_id"]) or None,
-                        github_token=get_effective_settings().github_token,
-                        grade=grade,
-                    )
-                    qbank_version = await asyncio.to_thread(
-                        qbank_store.save_qbank,
-                        resume_id=resume_id,
-                        cycle_id=cycle_id,
-                        source=(
-                            str(envelope["groups"][0].get("group", "bundle"))
-                            if envelope.get("groups")
-                            else "bundle"
-                        ),
-                        envelope=envelope,
-                        prompt_version=str(envelope.get("prompt_version", "")),
-                    )
-                    qbank_status = "succeeded"
-                    # 探索+出题用量进 conversation_log(evaluation 通道,
-                    # 关联 job;复用四列 token 管道,不新建表)
-                    usage_total = envelope.get("explore_usage_total") or {}
-                    await asyncio.to_thread(
-                        _write_eval_usage_log,
-                        job_id=job_id,
-                        job_user_id=job.get("user_id"),
-                        resume_id=resume_id,
-                        cycle_id=cycle_id,
-                        qbank_version=qbank_version,
-                        usage=usage_total,
-                    )
-                except Exception as qbank_exc:  # noqa: BLE001 — 题库线失败不拖垮评分卡
-                    qbank_status = "failed"
-                    # 原因摘要落 job 行:管理面题库 404 文案据此给出真实
-                    # 原因(权限/模型/网络),不再拿"暂无题库"掩盖失败
-                    qbank_error = f"{type(qbank_exc).__name__}: {qbank_exc}"[:500]
-                    _log_event(
-                        job_id,
-                        cycle_id,
-                        resume_id,
-                        "qbank_done",
-                        status="failed",
-                        duration_ms=int((time.monotonic() - t_qbank) * 1000),
-                        error_class=type(qbank_exc).__name__,
-                    )
-                    logging.getLogger(__name__).warning(
-                        "调查 bundle 落库失败(job=%s),job qbank_status=failed",
-                        job_id,
-                        exc_info=True,
-                    )
-                else:
-                    # 成功显式清列:复评翻案时不清,404 文案会拿陈旧原因误导
-                    qbank_error = None
-                    _log_event(
-                        job_id,
-                        cycle_id,
-                        resume_id,
-                        "qbank_done",
-                        status="succeeded",
-                        qbank_version=qbank_version,
-                        duration_ms=int((time.monotonic() - t_qbank) * 1000),
-                    )
                 await asyncio.to_thread(
                     evaluation.mark_job,
                     job_id,

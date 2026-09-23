@@ -38,12 +38,16 @@ def test_create_jobs_select_first_then_insert(monkeypatch) -> None:
     """幂等创建:SELECT-first——已有活跃 job 复用,无则 INSERT。"""
     # 第一个 item:无活跃 → INSERT 返回 7
     conn = _mock_conn(fetchone={"job_id": 7})
-    monkeypatch.setattr(ev_store, "_conn", lambda: conn)
+    monkeypatch.setattr(
+        "official_agent.state.evaluation._connection._conn", lambda: conn
+    )
     ids = ev_store.create_jobs([(11, 101)], cycle_id=2026)
     assert ids == [7]
     # 已有活跃 job → 直接复用,不再 INSERT
     conn2 = _mock_conn(fetchone={"job_id": 7})
-    monkeypatch.setattr(ev_store, "_conn", lambda: conn2)
+    monkeypatch.setattr(
+        "official_agent.state.evaluation._connection._conn", lambda: conn2
+    )
     ids2 = ev_store.create_jobs([(11, 101)], cycle_id=2026)
     assert ids2 == [7]
     inserts = [c for c in conn2.execute.call_args_list if "INSERT INTO evaluation_job" in c.args[0]]
@@ -58,7 +62,9 @@ def test_mark_job_rejects_unknown_status() -> None:
 def test_requeue_failed_scoped_by_cycle_and_skips_exhausted(monkeypatch) -> None:
     """失败重试按周期限定,且跳过 attempts 已达上限的 job(交人工)。"""
     conn = _mock_conn(fetchall=[{"job_id": 5}])
-    monkeypatch.setattr(ev_store, "_conn", lambda: conn)
+    monkeypatch.setattr(
+        "official_agent.state.evaluation._connection._conn", lambda: conn
+    )
     assert ev_store.requeue_failed(2026) == [5]
     sql, params = conn.execute.call_args.args
     assert "status = 'failed'" in sql and "RETURNING job_id" in sql
@@ -70,7 +76,9 @@ def test_requeue_failed_scoped_by_cycle_and_skips_exhausted(monkeypatch) -> None
 def test_requeue_failed_skips_attempts_exhausted(monkeypatch) -> None:
     """attempts 达上限的失败 job 不重排(交人工),不进返回列表。"""
     conn = _mock_conn(fetchall=[])
-    monkeypatch.setattr(ev_store, "_conn", lambda: conn)
+    monkeypatch.setattr(
+        "official_agent.state.evaluation._connection._conn", lambda: conn
+    )
     # 生产 SQL 带 attempts < %s 过滤;fetchall 空 → 无重排
     assert ev_store.requeue_failed(2026) == []
     sql, params = conn.execute.call_args.args
@@ -317,7 +325,9 @@ def test_attempts_only_bumps_on_running(monkeypatch) -> None:
 
             return _Cur()
 
-    monkeypatch.setattr(ev_store, "_conn", lambda: _FakeConn())
+    monkeypatch.setattr(
+        "official_agent.state.evaluation._connection._conn", lambda: _FakeConn()
+    )
     ev_store.mark_job(1, "running")
     ev_store.mark_job(1, "succeeded")
     updates = [sql for sql, _ in calls if "UPDATE evaluation_job" in sql]

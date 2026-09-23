@@ -29,12 +29,13 @@ from langchain_core.messages import HumanMessage
 
 from official_agent.config import get_effective_settings
 from official_agent.evaluation.graph import _extract_json
+from official_agent.evaluation.llm_common import TEMPERATURE_GENERATION, content_text
 from official_agent.graphs.assistant import build_model
 from official_agent.prompt_loader import load_prompt
 from official_agent.security.injection_guard import wrap_data_zone
 
 PROMPT_FILE = "evaluation/tech_stack.md"
-TEMPERATURE = 0.2
+TEMPERATURE = TEMPERATURE_GENERATION
 
 #: 技术名词上限:简历可能列 9 个以上,取前几档供面试官挑;这一档也为
 #: 出题留出预算(每题 1-2 问,总量不越出题硬顶)。
@@ -363,12 +364,7 @@ def build_items(raw_items: Sequence[Any], source_text: str) -> list[TechStackIte
     return out
 
 
-def _content_text(response: Any) -> str:
-    """模型回复 → 文本(多模态 content 取文本块拼接)。"""
-    raw = getattr(response, "content", "")
-    if isinstance(raw, list):
-        raw = "".join(block.get("text", "") for block in raw if isinstance(block, dict))
-    return raw if isinstance(raw, str) else str(raw)
+_content_text = content_text  # 回复解包已收口到 llm_common(保留旧名供内部调用)
 
 
 def _build_material(resume_text: str) -> str:

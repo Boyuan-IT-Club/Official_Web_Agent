@@ -17,15 +17,15 @@ import asyncio
 import json
 import logging
 import time
-from collections import OrderedDict
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import AIMessageChunk, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from pydantic import BaseModel
 
 from official_agent.graphs.assistant import (
     _ROLE_TOOL_NAMES,  # noqa: PLC2701 — 同模块装配表(prefix_hash 证据)
@@ -36,120 +36,24 @@ from official_agent.graphs.assistant.compression import (
     maybe_compress,
     summarize_messages,
 )
-from official_agent.graphs.identity import ResolvedIdentity, resolve
+from official_agent.graphs.identity import ResolvedIdentity
 from official_agent.observability import langfuse_callbacks
 from official_agent.security.pii import ReplyPiiMasker
 from official_agent.state.threads import create_thread, new_thread_id, resolve_thread
 from official_agent.tools.client import BackendError, BackendUnavailableError
 from official_agent.tools.readonly import asker_scope
+from official_agent.web import agent_factory, session_store, telemetry
+from official_agent.web.auth import authenticate as _authenticate
+from official_agent.web.auth import require_any as _require_any
 
 router = APIRouter()
 
 logger = logging.getLogger(__name__)
 
-# 会话列表排序兜底:agent_threads.created_at 表级 NOT NULL,测试替身可能给 None
-_SORT_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
-
-
-class _SessionState:
-    """一个会话的运行时状态:装配好的 agent + 身份 + 用户 JWT。
-
-    checkpointer(记忆)是共享的(进程级,thread_id 隔离);这里只存每个会话
-    不能共享的东西:绑定该用户 token 的 agent(见模块 docstring)。
-    """
-
-    def __init__(
-        self,
-        session_id: str,
-        identity: ResolvedIdentity,
-        user_token: str,
-        agent: Any,
-    ) -> None:
-        self.session_id = session_id
-        self.identity = identity
-        self.user_token = user_token
-        self.agent = agent
-        # 配置热生效:agent 装配时的配置指纹(HOT_KEYS 值哈希)。
-        # PUT /admin/config 后下一轮比对发现不同 → 重建 agent 用新配置。
-        self.applied_config_fingerprint: str | None = None
-        # 轮计数(1 起),压缩事件留痕「触发轮」用
-        self.turns = 0
-        # 同会话并发轮次串行化——_stream_turn 全程持有,
-        # 第二个并发请求按 SSE 错误码契约立即回 busy(不入队;单 worker 下即全部防线)
-        self.turn_lock = asyncio.Lock()
-
-
-# 会话注册表:session_id → 运行时状态。进程内存,单 worker 语义(多副本部署下
-# 不得依赖进程内表做权限判断——恢复走 PG 档案 resolve_thread)。
-# 有界 TTL+LRU——超容/空闲过期只淘汰运行时对象;会话档案与 checkpoint
-# 在 PG,淘汰后携原 session_id 重入会走 resolve_thread 恢复路径,上下文不丢。
-_sessions: OrderedDict[str, _SessionState] = OrderedDict()
-# #194 复审:正在删除的 session_id 集合——删除期间拒绝新轮次。
-# 仅靠 turn_lock 不够:会话不在内存(重启/LRU 淘汰)时,续传路径会为同一
-# thread_id 重建**新对象 + 新锁**,旧锁的检查对它无效。删除开始即在此登记,
-# _get_or_create_session 两条分支(内存命中/档案恢复)都先查它。
-_deleting_sessions: set[str] = set()
-_sessions_last_access: dict[str, float] = {}
-_sessions_lock = asyncio.Lock()
-
 # 恢复拒绝的统一文案:不存在/跨属主/已终结不区分(防会话枚举翻看)
 _SESSION_RESUME_REJECT = "会话不存在、已结束或无权访问"
 
 
-def _evict_sessions_locked(now: float) -> None:
-    """TTL+LRU 淘汰(调用方持 _sessions_lock)。只删运行时,不碰 PG。
-
-    在途轮次(turn_lock 被持)一律不淘汰。
-    淘汰执行中的 _SessionState 会让同一 session_id 的下一个请求在内存
-    未命中,走 resolve_thread 恢复路径重建出一个**新对象 + 新锁**,两个
-    agent 随后并发写同一 checkpoint thread(旧对象还在 astream 里)。
-    容量不足且全部在途时宁可不淘汰,留待轮末下一次调用再清。
-    """
-    from official_agent.config import get_settings
-
-    settings = get_settings()
-    ttl = max(int(settings.session_registry_ttl_seconds), 1)
-    cap = max(int(settings.session_registry_max), 1)
-
-    def _evictable(sid: str) -> bool:
-        state = _sessions.get(sid)
-        return state is not None and not state.turn_lock.locked()
-
-    expired = [
-        sid for sid, ts in _sessions_last_access.items() if now - ts > ttl and _evictable(sid)
-    ]
-    for sid in expired:
-        _sessions.pop(sid, None)
-        _sessions_last_access.pop(sid, None)
-    # LRU:从最旧开始挑可淘汰项,在途的跳过(不阻断其余淘汰)
-    while len(_sessions) > cap:
-        victim = next((sid for sid in _sessions if _evictable(sid)), None)
-        if victim is None:  # 全部在途:本轮放弃淘汰,不制造双锁
-            break
-        _sessions.pop(victim, None)
-        _sessions_last_access.pop(victim, None)
-
-
-async def _authenticate(request: Request, authorization: Annotated[str | None, Header()] = None):
-    """Authorization: Bearer <官网JWT> → (身份, 官网JWT)。
-
-    官网 JWT 两用:① resolve 换身份(只查 /auth/me)② 原样绑定给工具
-    查本人数据(get_as_user 裸发)。JWT 只存会话态,不进 checkpointer。
-    """
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="缺少 Bearer token")
-    token = authorization.split(" ", 1)[1].strip()
-    if not token:
-        raise HTTPException(status_code=401, detail="Bearer token 为空")
-
-    try:
-        identity = await resolve({"kind": "web", "token": token})  # type: ignore[typeddict-item]
-    except BackendUnavailableError as exc:
-        # 后端网络/服务故障是 503(可重试),不与凭证错误混为 401
-        raise HTTPException(status_code=503, detail="认证服务暂时不可用,请稍后重试") from exc
-    except BackendError as exc:  # 凭证无效/过期等
-        raise HTTPException(status_code=401, detail="身份解析失败") from exc
-    return identity, token
 
 
 async def _get_or_create_session(
@@ -157,7 +61,7 @@ async def _get_or_create_session(
     identity: ResolvedIdentity,
     user_token: str,
     session_id: str | None,
-) -> tuple[_SessionState, bool]:
+) -> tuple[session_store.SessionState, bool]:
     """取会话;无则(或未给)新建并建档。同一 session_id 只能被同 user 续传。
 
     返回 (session, is_new):is_new=True 表示本会话是进程内新建(首轮须注身份前缀),
@@ -170,14 +74,14 @@ async def _get_or_create_session(
     跨属主/已终结/不存在统一 404,档案校验故障 503 fail-closed——绝不静默换新会话。
     """
     now = time.monotonic()
-    async with _sessions_lock:
-        # #194 复审:删除中的会话一律拒绝——先于内存命中/档案恢复两条分支。
+    async with session_store.lock:
+        # 删除中的会话一律拒绝——先于内存命中/档案恢复两条分支。
         # 删除端在持锁登记后立刻放锁去做磁盘清理;此处若放行,新轮次会与
         # 清理并发读写同一 checkpoint thread(要么复活已删数据,要么读到半删状态)。
-        if session_id and session_id in _deleting_sessions:
+        if session_id and session_id in session_store.deleting:
             raise HTTPException(status_code=409, detail="会话正在删除中")
-        if session_id and session_id in _sessions:
-            existing = _sessions[session_id]
+        if session_id and session_id in session_store.sessions:
+            existing = session_store.sessions[session_id]
             if existing.identity.get("user_id") != identity.get("user_id"):
                 raise HTTPException(status_code=403, detail="无权访问该会话")
             # 续传但 token 变了(官网 JWT 轮换/过期重登):重建 agent 绑定新 token,
@@ -189,8 +93,8 @@ async def _get_or_create_session(
                 )
                 existing.user_token = user_token
                 existing.identity = identity
-            _sessions.move_to_end(session_id)
-            _sessions_last_access[session_id] = now
+            session_store.sessions.move_to_end(session_id)
+            session_store.last_access[session_id] = now
             return existing, False
 
         user_id = identity.get("user_id")
@@ -217,37 +121,57 @@ async def _get_or_create_session(
             agent = build_assistant_agent(
                 identity, user_token=user_token, checkpointer=checkpointer
             )
-            session = _SessionState(session_id, identity, user_token, agent)
-            session.applied_config_fingerprint = _config_fingerprint()
-            _sessions[session_id] = session
-            _sessions_last_access[session_id] = now
-            _evict_sessions_locked(now)
+            session = session_store.SessionState(session_id, identity, user_token, agent)
+            session.applied_config_fingerprint = await asyncio.to_thread(
+                agent_factory.config_fingerprint
+            )
+            session_store.sessions[session_id] = session
+            session_store.last_access[session_id] = now
+            session_store.evict_locked(now)
             return session, False
 
         # thread_id:建档优先;PG 不可用降级随机 thread_id(保隔离,不持久化)
         try:
             if user_id is not None:
-                session_id = create_thread("web", user_id, subject="web-chat").thread_id
+                # psycopg 是同步驱动,建档不能在事件循环上直跑(此处还持 session_store.lock)
+                rec = await asyncio.to_thread(create_thread, "web", user_id, subject="web-chat")
+                session_id = rec.thread_id
             else:
                 session_id = new_thread_id("web", 0)
         except Exception:  # noqa: BLE001 — 建档失败不阻断对话(与 CLI 同语义)
+            # 降级必须留痕:否则 conversation 档案静默丢失,排障无从下手
+            logger.warning("会话建档失败,降级为无档案随机会话", exc_info=True)
             session_id = new_thread_id("web", user_id or 0)
 
         # checkpointer:进程级共享(app lifespan 建立,fail-open)。thread_id 隔离会话。
         checkpointer = getattr(request.app.state, "checkpointer", None)
         agent = build_assistant_agent(identity, user_token=user_token, checkpointer=checkpointer)
-        session = _SessionState(session_id, identity, user_token, agent)
-        # 新建即记录当前配置指纹,避免首轮 _ensure_fresh_agent_config 误重建
-        session.applied_config_fingerprint = _config_fingerprint()
-        _sessions[session_id] = session
-        _sessions_last_access[session_id] = now
-        _evict_sessions_locked(now)
+        session = session_store.SessionState(session_id, identity, user_token, agent)
+        # 新建即记录当前配置指纹,避免首轮热生效比对误重建
+        session.applied_config_fingerprint = await asyncio.to_thread(
+            agent_factory.config_fingerprint
+        )
+        session_store.sessions[session_id] = session
+        session_store.last_access[session_id] = now
+        session_store.evict_locked(now)
         return session, True
+
+
+class ChatBody(BaseModel):
+    """POST /chat 入参:一轮用户消息。session_id 缺省 = 新建会话。
+
+    形状校验交 schema(畸形 JSON → FastAPI 标准 422);空/超长属语义
+    校验,端点内手工判(保持 400 契约,前端文案不变)。
+    """
+
+    message: str
+    session_id: str | None = None
 
 
 @router.post("/chat")
 async def chat(
     request: Request,
+    body: ChatBody,
     auth: Annotated[tuple[ResolvedIdentity, str], Depends(_authenticate)],
 ) -> StreamingResponse:
     """一轮对话(SSE 流)。body: {"message": str, "session_id": str | null}
@@ -257,13 +181,12 @@ async def chat(
     tool(role,name) / done / error(code,message)。
     """
     identity, user_token = auth
-    body = await request.json()
-    message = (body.get("message") or "").strip()
+    message = body.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="message 不能为空")
     if len(message) > _MAX_MESSAGE_CHARS:
         raise HTTPException(status_code=400, detail=f"消息过长(上限 {_MAX_MESSAGE_CHARS} 字)")
-    session_id = (body.get("session_id") or "").strip() or None
+    session_id = (body.session_id or "").strip() or None
 
     session, is_new = await _get_or_create_session(request, identity, user_token, session_id)
     checkpointer = getattr(request.app.state, "checkpointer", None)
@@ -299,23 +222,29 @@ _ERR_SAFE_COPY: dict[str, str] = {
     _ERR_UNKNOWN: "服务出现异常,请稍后重试",
 }
 
-# auth 失效的关键词(get_as_user 失败文案含之;message 判定的最后兜底)。
-_AUTH_FAIL_HINTS = ("令牌", "token", "登录", "JWT")
 # 单条消息长度上限(先收敛单请求滥用面;超限走 400 invalid_request,前端零改动)
 _MAX_MESSAGE_CHARS = 2000
 
 # 全局活跃模型调用并发闸(跨用户资源保护;进程内,数值待定)
 _model_gate: asyncio.Semaphore | None = None
+_model_gate_lock = asyncio.Lock()
 
 
-def _get_model_gate() -> asyncio.Semaphore:
+async def _get_model_gate() -> asyncio.Semaphore:
     global _model_gate
     if _model_gate is None:
-        from official_agent.config import get_effective_settings
+        # 初始化含 await(to_thread 读配置),必须持锁:否则首批并发轮次
+        # 各建各的 Semaphore,K 个并发把全局并发上限放大 K 倍,击穿闸
+        async with _model_gate_lock:
+            if _model_gate is None:
+                from official_agent.config import get_effective_settings
 
-        _model_gate = asyncio.Semaphore(
-            max(int(get_effective_settings().model_call_global_concurrency), 1)
-        )
+                # get_effective_settings 每次直连 PG 读 agent_config(无缓存),
+                # 不能占事件循环;闸建好后进程内复用,不再触库
+                settings = await asyncio.to_thread(get_effective_settings)
+                _model_gate = asyncio.Semaphore(
+                    max(int(settings.model_call_global_concurrency), 1)
+                )
     return _model_gate
 
 
@@ -329,18 +258,18 @@ def _sse_error(code: str) -> dict[str, str]:
 
 def _error_code(exc: Exception) -> str:
     """执行期异常 → 面向客户端的稳定错误码。分类原则:
-    - 用户令牌失效(get_as_user 文案)或明确登录/token 问题 → auth_expired
+    - BackendAuthError(用户令牌/服务账号凭证失效)→ auth_expired
     - BackendUnavailableError(网络/传输故障)→ backend_unavailable
     - httpx 传输/超时 → backend_unavailable(后端不可达/网关错)
     - 其余 BackendError(业务错误)按其文案;未知 → unknown
     观测/模型错误由 LangGraph 包装,不易精确识别,归 unknown(前端可重试)。
+    分类只看异常类型,不看文案——后端文案一改,子串匹配的分类立刻失效。
     """
     import httpx
 
-    from official_agent.tools.client import BackendUnavailableError
+    from official_agent.tools.client import BackendAuthError
 
-    text = str(exc)
-    if any(h in text for h in _AUTH_FAIL_HINTS):
+    if isinstance(exc, BackendAuthError):
         return _ERR_AUTH_EXPIRED
     if isinstance(exc, (httpx.HTTPError, BackendUnavailableError)):
         return _ERR_BACKEND_UNAVAILABLE
@@ -350,34 +279,9 @@ def _error_code(exc: Exception) -> str:
     return _ERR_UNKNOWN
 
 
-def _config_fingerprint() -> str:
-    """当前生效配置(HOT_KEYS 值)的指纹;配置变更即变化。"""
-    from official_agent.config import HOT_KEYS, get_effective_settings
-
-    settings = get_effective_settings()
-    return repr(tuple((k, getattr(settings, k, None)) for k in sorted(HOT_KEYS)))
-
-
-def _ensure_fresh_agent_config(session: _SessionState, checkpointer: Any) -> None:
-    """配置热生效:比对配置指纹,变了则重建 session 的 agent。
-
-    PUT /admin/config 只失效 get_settings 缓存;活跃会话的 agent 是进程内
-    复用的(见模块 docstring),不重建就一直用旧 model/provider。此处每轮
-    比对指纹,发现变化即用新配置重建 agent(身份/token 不变)。
-    """
-    try:
-        current = _config_fingerprint()
-    except Exception:  # noqa: BLE001 — PG 不可用 → 指纹取 env(不重建)
-        return
-    if session.applied_config_fingerprint == current:
-        return
-    session.agent = build_assistant_agent(
-        session.identity, user_token=session.user_token, checkpointer=checkpointer
-    )
-    session.applied_config_fingerprint = current
-
-
-async def _compress_if_needed(session: _SessionState, config: dict, user_query: str) -> str | None:
+async def _compress_if_needed(
+    session: session_store.SessionState, config: dict, user_query: str
+) -> str | None:
     """轮末检查会话 token,超阈值则压缩回写 checkpoint。
 
     回写 = update_state 产生 checkpoint **新版本**(先 REMOVE_ALL_MESSAGES
@@ -403,7 +307,7 @@ async def _compress_if_needed(session: _SessionState, config: dict, user_query: 
         messages = (getattr(state, "values", None) or {}).get("messages") or []
         if not messages:
             return None
-        settings = get_effective_settings()
+        settings = await asyncio.to_thread(get_effective_settings)
         # 摘要用 strong 模型(ADR-0004「压缩即理解」,降 light 须 eval 证明);
         # 温度 0 + 输出预算 = reasoning-safe
         summarizer = build_model(settings).bind(temperature=0, max_tokens=SUMMARY_MAX_TOKENS)
@@ -432,30 +336,160 @@ async def _compress_if_needed(session: _SessionState, config: dict, user_query: 
         return None
 
 
+def _sse(payload: dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+@dataclass
+class _TurnAccum:
+    """单轮流式消费的就地累计状态(回复块/工具/引用锚/跨步 usage 求和)。"""
+
+    reply_chunks: list[str] = field(default_factory=list)
+    tools_called: list[str] = field(default_factory=list)
+    sources: list[dict[str, str]] = field(default_factory=list)
+    seen_sources: set[str] = field(default_factory=set)
+    usage: dict[str, int | None] = field(
+        default_factory=lambda: dict.fromkeys(
+            ("input_tokens", "output_tokens", "cache_hit_tokens", "cache_miss_tokens"), 0
+        )
+    )
+
+
+def _feed_text_chunk(
+    chunk: AIMessageChunk, acc: _TurnAccum, masker: ReplyPiiMasker | None
+) -> str | None:
+    """文本块入回复累计,返回掩码后可下发片段(无文本/无增量 → None)。"""
+    text = chunk.content if isinstance(chunk.content, str) else ""
+    if not text:
+        return None
+    acc.reply_chunks.append(text)
+    if masker is None:
+        return None
+    return masker.feed(text)
+
+
+def _accumulate_usage(
+    chunk: Any,
+    usage_acc: dict[str, int | None],
+    last_usage: dict[str, int | None] | None,
+) -> dict[str, int | None] | None:
+    """usage 终块并入跨步累计;返回新的 last_usage。
+
+    同值跳过:流式下同一累计值会在多个 chunk 上重复出现,不去重就重复求和。
+    raw token_usage 优先(prompt_cache 字段只在原始形状)。
+    """
+    um = getattr(chunk, "usage_metadata", None)
+    raw_usage = (getattr(chunk, "response_metadata", None) or {}).get("token_usage")
+    usage_payload = raw_usage if raw_usage else um
+    if um is None or not usage_payload:
+        return last_usage
+    extracted = telemetry.extract_usage(usage_payload)
+    if extracted == last_usage:
+        return last_usage
+    for k in usage_acc:  # 白名单键:未知键混入会经 write_conversation(**usage) 炸落账
+        v = extracted.get(k)
+        if v is not None:
+            usage_acc[k] = (usage_acc[k] or 0) + v
+    return extracted
+
+
+def _drain_updates(payload: Any, acc: _TurnAccum) -> list[dict[str, Any]]:
+    """updates 模式:收集 tool 事件载荷与 search_knowledge 引用锚。"""
+    events: list[dict[str, Any]] = []
+    for _ns, node_update in payload.items():
+        if not isinstance(node_update, dict):
+            continue
+        for m in node_update.get("messages") or []:
+            # 工具调用状态(tool 事件,role=tool)
+            for tc in getattr(m, "tool_calls", None) or ():
+                acc.tools_called.append(tc.get("name") or "")
+                events.append({"type": "tool", "role": "tool", "name": tc.get("name")})
+            # search_knowledge 的结果收集为引用锚(轮末随 delta.sources 下发)
+            if isinstance(m, ToolMessage) and getattr(m, "name", "") == "search_knowledge":
+                telemetry.collect_sources(m, acc.sources, acc.seen_sources)
+    return events
+
+
+async def _consume_model_stream(
+    agent: Any,
+    messages: list,
+    config: dict,
+    *,
+    masker: ReplyPiiMasker | None,
+    acc: _TurnAccum,
+) -> AsyncIterator[str]:
+    """消费 astream 双模式流:吐 SSE 事件,就地更新 acc(回复/工具/引用/usage)。"""
+    last_usage: dict[str, int | None] | None = None
+    async for mode, payload in agent.astream(
+        {"messages": messages}, config=config, stream_mode=["messages", "updates"]
+    ):
+        if mode == "messages":
+            chunk, _meta = payload
+            if isinstance(chunk, AIMessageChunk):
+                out = _feed_text_chunk(chunk, acc, masker)
+                if out:
+                    yield _sse({"type": "delta", "role": "assistant", "content": out})
+            last_usage = _accumulate_usage(chunk, acc.usage, last_usage)
+        elif mode == "updates":
+            for event in _drain_updates(payload, acc):
+                yield _sse(event)
+
+
+async def _toolless_guarded_reply(
+    agent: Any, config: dict, reply_chunks: list[str]
+) -> AsyncIterator[str]:
+    """无工具档:整段回复过编造守卫后一次性下发(缓冲直播)。
+
+    守卫在一切持久化之前——直播、conversation_log、checkpointer 三面同用
+    改写文本;压缩必须排在其后,否则编造原文会被压进摘要。
+    """
+    from official_agent.security.fabrication_guard import guard_empty_tools_reply
+    from official_agent.security.pii import mask_pii_output
+
+    final_reply, verdict = guard_empty_tools_reply("".join(reply_chunks))
+    # toolless 回复出口同过 PII 掩(与 cli 对称;掩后文本进回写)
+    final_reply, _pii_trace = mask_pii_output(final_reply)
+    if verdict != "clean":
+        logging.getLogger(__name__).warning(
+            "guard_event guard_name=%s verdict=%s tool=<(empty)>",
+            "fabrication_empty_tools",
+            verdict,
+        )
+        reply_chunks[:] = [final_reply]
+        await _rewrite_last_ai_message(agent, config, final_reply)
+    if final_reply:
+        yield _sse({"type": "delta", "role": "assistant", "content": final_reply})
+
+
+def _usage_out(usage_acc: dict[str, int | None]) -> dict[str, int | None]:
+    """全零(无 usage 数据)→ 全 None 形状(落账列语义:未采到 ≠ 0)。"""
+    if any(usage_acc.values()):
+        return usage_acc
+    return {k: None for k in usage_acc}
+
+
 async def _stream_turn(
-    session: _SessionState, message: str, is_new: bool, checkpointer: Any = None
+    session: session_store.SessionState, message: str, is_new: bool, checkpointer: Any = None
 ) -> AsyncIterator[str]:
     """跑一轮:流式吐 SSE。is_new 仅作 SSE session 事件的 created 标记。
 
-    每轮结束在 conversation_log 落一行:
-    - 正常:user_message(问题原文) + reply_summary(回复摘要非全文) + tools/耗时
-    - 异常(error 事件):只存 error_code + 耗时,不存对话内容
+    编排序:锁 → 热生效 → session 事件 → 受闸流消费 → 守卫/尾冲 → 压缩 →
+    落账 → sources/done(或 error)。每轮结束在 conversation_log 落一行:
+    正常存问题原文+回复摘要+tools/耗时;异常只存 error_code+耗时,不存内容。
     落行失败(fail-open)不阻断对话——观测绝不拖垮主流程(ADR-0005)。
-    checkpointer:配置变更后重建 agent 需要(见 _ensure_fresh_agent_config)。
     """
-
-    def sse(payload: dict[str, Any]) -> str:
-        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     # 同会话并发轮次串行化——锁被占用时立即回 busy,
     # 不排队(前端提示「上一条还在回复中」);check/acquire 间无 await,原子。
     if session.turn_lock.locked():
-        yield sse({"type": "error", "code": _ERR_BUSY, "message": "上一条消息还在回复中,请稍候"})
+        yield _sse({"type": "error", "code": _ERR_BUSY, "message": "上一条消息还在回复中,请稍候"})
         return
     await session.turn_lock.acquire()
     try:
         # 配置热生效:配置指纹变了 → 重建 agent(新 model/provider 立即作用于本轮)
-        _ensure_fresh_agent_config(session, checkpointer)
+        await agent_factory.ensure_fresh_agent(
+            session, checkpointer=checkpointer, build_agent=build_assistant_agent
+        )
         # 轮计数(1 起),压缩事件「触发轮」留痕用
         session.turns += 1
 
@@ -478,27 +512,15 @@ async def _stream_turn(
         messages: list = [HumanMessage(content=message)]
 
         # 首事件 session(带 created 标记新/续传)
-        yield sse({"type": "session", "session_id": session.session_id, "created": is_new})
+        yield _sse({"type": "session", "session_id": session.session_id, "created": is_new})
 
         started = time.monotonic()
-        tools_called: list[str] = []
-        reply_chunks: list[str] = []
+        acc = _TurnAccum()
         # 无工具档缓冲整段回复,流尾过编造守卫后一次性下发
         toolless = not tool_roster(session.identity)
         # 流式 delta 逐块过 PII 掩码器(尾部缓冲抗跨块)
-        pii_masker = None if toolless else ReplyPiiMasker()
+        masker = None if toolless else ReplyPiiMasker()
         error_code: str | None = None
-        # 本轮 KB 引用锚——search_knowledge 结果按序去重,
-        # 轮末随 delta.sources 下发(前端 [n] → source_id+title 映射)
-        sources: list[dict[str, str]] = []
-        _seen_sources: set[str] = set()
-        usage_acc: dict[str, int | None] = {  # 跨 model 步累计(ReAct 多步求和)
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cache_hit_tokens": 0,
-            "cache_miss_tokens": 0,
-        }
-        _last_usage: dict[str, int | None] | None = None
         # 只读查询以来问者本人 JWT 执行(ADR-0006「社团官网层问答助手」):
         # 本轮内 readonly 查询经 _read 走 get_as_user,后端按本人权限判+归因
         async with asker_scope(session.user_token):
@@ -506,9 +528,9 @@ async def _stream_turn(
             # 卡死的模型/工具调用在配置时限内被取消,turn_lock 随 with 释放。
             from official_agent.config import get_effective_settings
 
-            _settings = get_effective_settings()
+            _settings = await asyncio.to_thread(get_effective_settings)
             config["recursion_limit"] = max(int(_settings.turn_recursion_limit), 1)
-            gate = _get_model_gate()
+            gate = await _get_model_gate()
             try:
                 gate_acquired = False
                 try:
@@ -518,10 +540,9 @@ async def _stream_turn(
                     )
                     gate_acquired = True
                 except TimeoutError:
-                    # 闸满不提前 return——闸满也是「一轮失败」，
-                    # 必须走下方统一落账路径，否则资源饱和事件从
-                    # conversation_log 消失(收尾点唯一:正常/错误/超时/
-                    # gate-busy/断连五条路径都落一行)。
+                    # 闸满不提前 return——闸满也是「一轮失败」,必须走统一落账
+                    # 路径,否则资源饱和事件从 conversation_log 消失(收尾点
+                    # 唯一:正常/错误/超时/gate-busy/断连五条路径都落一行)。
                     error_code = _ERR_BUSY
                     logger.warning(
                         "chat turn gate busy session=%s turns=%d concurrency=%d",
@@ -531,65 +552,10 @@ async def _stream_turn(
                     )
                 else:
                     async with asyncio.timeout(max(int(_settings.turn_wall_clock_timeout), 1)):
-                        async for mode, payload in session.agent.astream(  # type: ignore[attr-defined]
-                            {"messages": messages},
-                            config=config,
-                            stream_mode=["messages", "updates"],
+                        async for event in _consume_model_stream(
+                            session.agent, messages, config, masker=masker, acc=acc
                         ):
-                            if mode == "messages":
-                                chunk, _meta = payload
-                                if isinstance(chunk, AIMessageChunk) and chunk.content:
-                                    # 只收文本块;多模态 content(list)跳过文本拼接(回复摘要仅文本)
-                                    text = chunk.content if isinstance(chunk.content, str) else ""
-                                    if text:
-                                        reply_chunks.append(text)
-                                        if pii_masker:
-                                            out = pii_masker.feed(text)
-                                            if out:
-                                                yield sse(
-                                                    {
-                                                        "type": "delta",
-                                                        "role": "assistant",
-                                                        "content": out,
-                                                    }
-                                                )
-                                # usage:只在 usage 终块累计,同值去重防重复计数。
-                                # 两种形状二选一(langchain-openai 1.x 流式 raw
-                                # token_usage 已消失,只剩 usage_metadata;DeepSeek 原始形状
-                                # 保留兼容)。raw 优先(prompt_cache 字段只在原始)。
-                                um = getattr(chunk, "usage_metadata", None)
-                                raw_usage = (chunk.response_metadata or {}).get("token_usage")
-                                usage_payload = raw_usage if raw_usage else um
-                                if um is not None and usage_payload:
-                                    extracted = extract_usage(usage_payload)
-                                    if extracted != _last_usage:  # 同值跳过(跨 chunk 累计值重复)
-                                        _last_usage = extracted
-                                        for k in usage_acc:
-                                            v = extracted.get(k)
-                                            cur = usage_acc.get(k) or 0
-                                            if v is not None:
-                                                usage_acc[k] = cur + v
-                            elif mode == "updates":
-                                for _ns, node_update in payload.items():
-                                    if isinstance(node_update, dict):
-                                        for m in node_update.get("messages") or []:
-                                            # 工具调用状态(tool 事件,role=tool)
-                                            if getattr(m, "tool_calls", None):
-                                                for tc in m.tool_calls:
-                                                    tools_called.append(tc.get("name") or "")
-                                                    yield sse(
-                                                        {
-                                                            "type": "tool",
-                                                            "role": "tool",
-                                                            "name": tc.get("name"),
-                                                        }
-                                                    )
-                                            # R4:search_knowledge 的结果收集为引用锚
-                                            if (
-                                                isinstance(m, ToolMessage)
-                                                and getattr(m, "name", "") == "search_knowledge"
-                                            ):
-                                                _collect_sources(m, sources, _seen_sources)
+                            yield event
             except asyncio.CancelledError:
                 # 客户端断连(CancelledError 非 Exception):中止轮次也要留痕
                 # (partial reply/已调工具不丢失),error_code 记断连中止。
@@ -602,7 +568,7 @@ async def _stream_turn(
                     "chat turn timeout session=%s turns=%d usage=%s",
                     session.session_id,
                     session.turns,
-                    usage_acc,
+                    acc.usage,
                 )
             except Exception as exc:  # noqa: BLE001 — 单轮失败不崩连接,吐 error 事件
                 error_code = _error_code(exc)
@@ -616,43 +582,18 @@ async def _stream_turn(
                 if gate_acquired:
                     gate.release()
 
-        # 单一写入路径:正常(error_code None)/错误/断连三态合一,落一行。
-        # 缓存命中证据:缓存前缀稳定性 hash(system prompt + 角色工具名)。
-        # 同 role 的会话前缀应逐字节稳定;hash 变化 = 前缀失效(命中率不可信)。
-        # 实际 system = 静态正文 + 身份段 + 工具契约(随角色变);
-        # hash 必须基于真实 system,否则"缓存命中证据"失真。同角色会话内
-        # 前缀稳定(身份块同 session 不变),仍可作命中率观察。
         from official_agent.graphs.assistant import build_system_prompt
 
-        # 编造守卫在一切持久化之前——直播(缓冲 delta)、
-        # conversation_log、checkpointer(回看/下轮上下文)三面同用改写文本。
-        # 压缩(_compress_if_needed 会 update_state 重写历史)必须排在守卫
-        # 回写之后,否则会把编造原文一并压进摘要。
         if toolless and error_code is None:
-            from official_agent.security.fabrication_guard import guard_empty_tools_reply
-            from official_agent.security.pii import mask_pii_output
+            async for event in _toolless_guarded_reply(session.agent, config, acc.reply_chunks):
+                yield event
 
-            final_reply, verdict = guard_empty_tools_reply("".join(reply_chunks))
-            # toolless 回复出口同过 PII 掩(与 cli 对称;掩后文本进回写)
-            final_reply, _pii_trace = mask_pii_output(final_reply)
-            if verdict != "clean":
-                logging.getLogger(__name__).warning(
-                    "guard_event guard_name=%s verdict=%s tool=<(empty)>",
-                    "fabrication_empty_tools",
-                    verdict,
-                )
-                reply_chunks = [final_reply]
-                await _rewrite_last_ai_message(session.agent, config, final_reply)
-            if final_reply:
-                yield sse({"type": "delta", "role": "assistant", "content": final_reply})
-
-        # 回复出口 PII 守卫——全部会话适用。流式
-        # delta 经 ReplyPiiMasker 逐块掩(尾部缓冲抗跨块);工具侧 deep 掩为
-        # 主,此处为输出面兜底;命中即 trace(guard_event)。
-        if pii_masker:
-            tail = pii_masker.finish()
+        # 回复出口 PII 守卫——全部会话适用。流式 delta 已逐块掩(尾部缓冲抗
+        # 跨块),此处冲洗尾缓冲;命中即 trace(guard_event)。
+        if masker:
+            tail = masker.finish()
             if tail:
-                yield sse({"type": "delta", "role": "assistant", "content": tail})
+                yield _sse({"type": "delta", "role": "assistant", "content": tail})
 
         # 轮末按需压缩(先压缩后落行,同一行携带 compress_event)。
         # 在 done 事件前执行:失败 fail-open 返回 None,不阻断 done。
@@ -662,44 +603,35 @@ async def _stream_turn(
             compress_event = await _compress_if_needed(session, config, message)
         role = session.identity.get("role") or "unknown"
         tool_names = list(_ROLE_TOOL_NAMES.get(role, ()))
-        p_hash = prefix_hash(build_system_prompt(session.identity), tool_names)
-        if any(usage_acc.values()):
-            usage = usage_acc
-        else:
-            usage = {
-                "input_tokens": None,
-                "output_tokens": None,
-                "cache_hit_tokens": None,
-                "cache_miss_tokens": None,
-            }
-        _log_conversation(
+        p_hash = telemetry.prefix_hash(build_system_prompt(session.identity), tool_names)
+        telemetry.log_conversation(
             session,
             user_message=message,
-            reply_summary="".join(reply_chunks),
-            tools=tools_called,
+            reply_summary="".join(acc.reply_chunks),
+            tools=acc.tools_called,
             duration_ms=_elapsed_ms(started),
             error_code=error_code,
-            usage=usage,
+            usage=_usage_out(acc.usage),
             prefix_hash=p_hash,
             compress_event=compress_event,
         )
         if error_code is None:
-            if sources:
-                # R4 契约:delta 上新增可选 sources,不改消息 type 枚举——
+            if acc.sources:
+                # 引用锚契约:delta 上新增可选 sources,不改消息 type 枚举——
                 # 旧消费者收到空 content 追加无感;新前端做 [n] → 来源映射
-                yield sse(
+                yield _sse(
                     {
                         "type": "delta",
                         "role": "assistant",
                         "content": "",
-                        "sources": sources,
+                        "sources": acc.sources,
                     }
                 )
-            yield sse({"type": "done", "session_id": session.session_id})
+            yield _sse({"type": "done", "session_id": session.session_id})
         elif error_code != _ERR_DISCONNECTED:
             # 错误事件统一走稳定文案 + trace_id(原始异常只留服务端日志);
             # 断连无需事件(客户端已不在)。
-            yield sse(_sse_error(error_code))
+            yield _sse(_sse_error(error_code))
     finally:
         session.turn_lock.release()
 
@@ -730,208 +662,12 @@ async def _rewrite_last_ai_message(agent: Any, config: dict, final_reply: str) -
         logging.getLogger(__name__).warning("编造守卫回写 checkpointer 失败(已忽略)", exc_info=True)
 
 
-def _log_conversation(
-    session: _SessionState,
-    *,
-    user_message: str,
-    reply_summary: str,
-    tools: list[str],
-    duration_ms: int,
-    error_code: str | None = None,
-    usage: dict[str, int | None] | None = None,
-    prefix_hash: str | None = None,
-    compress_event: str | None = None,
-) -> None:
-    """落一行 conversation_log(fail-open,非阻塞)。
-
-    lazy import:web 入口不顶层依赖 psycopg(无 PG 环境可跑服务,
-    观测侧不给主链路加硬依赖,同 app.py lifespan 先例)。
-    fire-and-forget:写入放后台任务,不阻塞 SSE 流尾(ADR-0005 fail-open)。
-    """
-    from official_agent.state.conversation import write_conversation
-
-    async def _write() -> None:
-        try:
-            write_conversation(
-                thread_id=session.session_id,
-                user_id=session.identity.get("user_id"),
-                channel=session.identity.get("source") or "web",
-                user_message=user_message,
-                reply_summary=reply_summary,
-                tools=tools,
-                duration_ms=duration_ms,
-                error_code=error_code,
-                prefix_hash=prefix_hash,
-                compress_event=compress_event,
-                **(usage or {}),
-            )
-        except Exception:  # noqa: BLE001 — 观测写入失败不拖垮对话(ADR-0005)
-            logger.warning("conversation_log 写入失败(已忽略)", exc_info=True)
-
-    asyncio.create_task(_write())
-
-
 def _elapsed_ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
 
 
-def extract_usage(usage_metadata: dict[str, Any] | None) -> dict[str, int | None]:
-    """从 LLM usage_metadata 提取 token 数(lazy;模块级包装供测试 patch)。"""
-    from official_agent.state.conversation import extract_usage as _impl
-
-    return _impl(usage_metadata)
-
-
-def prefix_hash(system_prompt: str, tool_names: list[str]) -> str:
-    """缓存前缀稳定性 hash(lazy;模块级包装供测试 patch)。"""
-    from official_agent.state.conversation import prefix_hash as _impl
-
-    return _impl(system_prompt, tool_names)
-
-
-def _collect_sources(tool_msg: ToolMessage, sources: list, seen: set) -> None:
-    """search_knowledge 的 ToolMessage → 轮级引用锚([n]→条目,保序去重)。
-
-    内容是工具返回的 JSON;解析失败只丢引用,不影响主回复(#120 降级纪律)。
-    """
-    try:
-        data = (
-            json.loads(tool_msg.content)
-            if isinstance(tool_msg.content, str)
-            else tool_msg.content
-        )
-        for r in (data or {}).get("results") or []:
-            sid = r.get("source_id")
-            if sid and sid not in seen:
-                seen.add(sid)
-                sources.append({"source_id": sid, "title": r.get("title", "")})
-    except Exception:  # noqa: BLE001 — 引用属增强面,失败不拖垮对话
-        logger.warning("search_knowledge sources 收集失败(已忽略)", exc_info=True)
-
-# ── 管理 API:配置热生效 ────────────────────────────────────────
-
-# 高敏键(Settings 字段名):真实凭证,只读回显掩码,永不入库/不可在线改。
-_SECRET_SETTINGS_FIELDS: frozenset[str] = frozenset(
-    {
-        "backend_service_username",
-        "backend_service_password",
-        "llm_api_key",
-        "anthropic_api_key",
-        "postgres_url",
-        "feishu_app_id",
-        "feishu_app_secret",
-        "feishu_verification_token",
-        "feishu_encrypt_key",
-        "langfuse_public_key",
-        "langfuse_secret_key",
-    }
-)
-
-
-def _mask_secret(value: str) -> str:
-    """掩码末 4 位(短值整掩)。"""
-    return value[-4:] if len(value) >= 4 else "****"
-
-
-async def _require_monitor(request: Request, authorization: Annotated[str | None, Header()] = None):
-    """管理 API 认证:官网 JWT → resolve → permission_codes 含 agent:monitor。"""
-    identity, _ = await _authenticate(request, authorization)
-    codes = identity.get("permission_codes") or []
-    if "agent:monitor" not in codes:
-        raise HTTPException(status_code=403, detail="需要 agent:monitor 权限")
-    return identity
-
-
-@router.get("/admin/config")
-async def get_admin_config(
-    _: Annotated[ResolvedIdentity, Depends(_require_monitor)],
-) -> dict[str, Any]:
-    """回显配置:低敏键实值(DB 覆盖优先) + 高敏键掩码({configured, masked})。"""
-    from official_agent.config import HOT_KEYS, get_settings
-
-    settings = get_settings()
-    try:
-        db_overrides = get_all_config()
-    except Exception:  # noqa: BLE001 — PG 不可用 → 只显示 env(fail-open)
-        db_overrides = {}
-
-    result: dict[str, Any] = {}
-    for field in HOT_KEYS:
-        result[field] = db_overrides.get(field, getattr(settings, field, ""))
-    for field in sorted(_SECRET_SETTINGS_FIELDS):
-        value = getattr(settings, field, "") or ""
-        result[field] = {
-            "configured": bool(value),
-            "masked": _mask_secret(value) if value else "",
-        }
-    return result
-
-
-# 安全:llm_base_url 若被改成任意端点,下轮重建 agent 时
-# .env 的 LLM key 会作为 Bearer 发往该端点 → key 泄漏。只允许 https + 受信 host。
-_ALLOWED_LLM_HOSTS: tuple[str, ...] = (
-    "api.deepseek.com",
-    "api.openai.com",
-    "api.anthropic.com",
-    "open.bigmodel.cn",
-)
-
-
-def _validate_base_url(value: str) -> None:
-    import urllib.parse
-
-    parsed = urllib.parse.urlparse(value)
-    if parsed.scheme != "https" or not parsed.hostname:
-        raise HTTPException(status_code=400, detail="llm_base_url 必须为 https 且含 host")
-    if parsed.hostname not in _ALLOWED_LLM_HOSTS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"llm_base_url 的 host 不在白名单: {parsed.hostname}",
-        )
-
-
-@router.put("/admin/config")
-async def put_admin_config(
-    body: dict[str, str],
-    _: Annotated[ResolvedIdentity, Depends(_require_monitor)],
-) -> dict[str, Any]:
-    """改低敏键(HOT_KEYS 白名单)并热生效;非白名单(高敏)→ 400。"""
-    from official_agent.config import HOT_KEYS
-
-    invalid_keys = [k for k in body if k not in HOT_KEYS]
-    if invalid_keys:
-        raise HTTPException(status_code=400, detail=f"不可热载的键: {', '.join(invalid_keys)}")
-    for key, value in body.items():
-        value = (value or "").strip()
-        if not value:
-            raise HTTPException(status_code=400, detail=f"{key} 值不能为空")
-        if key == "llm_base_url":
-            _validate_base_url(value)
-        set_config(key, value)
-    # 全部键成功写库后才失效缓存(避免部分写 + 缓存未刷的分离)
-    invalidate_settings_cache()
-    return {"updated": list(body.keys())}
-
-
-def get_all_config() -> dict[str, str]:
-    """读 agent_config 全部键值(lazy;模块级包装供测试 patch)。"""
-    from official_agent.state.config_store import get_all_config as _impl
-
-    return _impl()
-
-
-def set_config(key: str, value: str) -> None:
-    """upsert 一个配置键(lazy;模块级包装供测试 patch)。"""
-    from official_agent.state.config_store import set_config as _impl
-
-    _impl(key, value)
-
-
-def invalidate_settings_cache() -> None:
-    """使 get_settings 缓存失效(lazy;模块级包装供测试 patch)。"""
-    from official_agent.config import invalidate_settings_cache as _impl
-
-    _impl()
+# 管理 API 认证:官网 JWT → resolve → permission_codes 含 agent:monitor
+_require_monitor = _require_any("agent:monitor")
 
 
 # ── 管理 API:运营视图(对话列表/详情) ───────────────────────────
@@ -967,7 +703,9 @@ async def get_admin_conversations(
         offset = max(0, int(offset_raw))
     except ValueError:
         raise HTTPException(status_code=400, detail="user_id/limit/offset 必须为整数") from None
-    items = list_conversations(user_id=user_id, thread_id=thread_id, limit=limit, offset=offset)
+    items = await asyncio.to_thread(
+        list_conversations, user_id=user_id, thread_id=thread_id, limit=limit, offset=offset
+    )
     return {"items": items, "limit": limit, "offset": offset}
 
 
@@ -977,7 +715,7 @@ async def get_admin_conversation_detail(
     _: Annotated[ResolvedIdentity, Depends(_require_monitor)],
 ) -> dict[str, Any]:
     """对话详情:轮次/工具/耗时/错误码 + 可展开回复摘要。"""
-    row = get_conversation(conversation_id)
+    row = await asyncio.to_thread(get_conversation, conversation_id)
     if row is None:
         raise HTTPException(status_code=404, detail="会话不存在")
     return row
@@ -1041,8 +779,10 @@ async def list_my_sessions(
 
     identity, _ = auth
     user_id = identity.get("user_id")
-    threads = list_active_threads(user_id) if user_id is not None else []
-    overview = session_overview([t.thread_id for t in threads])
+    threads = (
+        await asyncio.to_thread(list_active_threads, user_id) if user_id is not None else []
+    )
+    overview = await asyncio.to_thread(session_overview, [t.thread_id for t in threads])
     items = [
         {
             "thread_id": t.thread_id,
@@ -1073,7 +813,7 @@ async def get_my_session_messages(
 
     identity, _ = auth
     user_id = identity.get("user_id")
-    if user_id is None or resolve_thread(thread_id, user_id) is None:
+    if user_id is None or await asyncio.to_thread(resolve_thread, thread_id, user_id) is None:
         raise HTTPException(status_code=404, detail="会话不存在")
     messages = await _fetch_transcript(request, thread_id)
     return {"thread_id": thread_id, "messages": messages}
@@ -1097,19 +837,19 @@ async def delete_my_session(
 
     identity, _ = auth
     user_id = identity.get("user_id")
-    if user_id is None or resolve_thread(thread_id, user_id) is None:
+    if user_id is None or await asyncio.to_thread(resolve_thread, thread_id, user_id) is None:
         raise HTTPException(status_code=404, detail="会话不存在")
-    # 整段删除持"_deleting_sessions"登记——check 与清理之间不再有窗口。
+    # 整段删除持"session_store.deleting"登记——check 与清理之间不再有窗口。
     # 只在持锁时登记,顺带确认没有在途轮次(在途 generator 会复活已清数据)。
-    # 登记后即放锁:清理走线程池,不能让 _sessions_lock 被磁盘 IO 长占
+    # 登记后即放锁:清理走线程池,不能让 session_store.lock 被磁盘 IO 长占
     # (其余会话读走同一把锁)。
-    async with _sessions_lock:
-        inflight = _sessions.get(thread_id)
+    async with session_store.lock:
+        inflight = session_store.sessions.get(thread_id)
         if inflight is not None and inflight.turn_lock.locked():
             raise HTTPException(status_code=409, detail="会话正在回复中,请稍后再删除")
-        if thread_id in _deleting_sessions:
+        if thread_id in session_store.deleting:
             raise HTTPException(status_code=409, detail="会话正在删除中")
-        _deleting_sessions.add(thread_id)
+        session_store.deleting.add(thread_id)
     try:
         # 顺序:先清数据面(checkpoint/对话日志),档案行最后——部分失败时
         # 会话仍可重试删除,不产生"档案已删、数据面成孤儿"的死状态。
@@ -1125,13 +865,13 @@ async def delete_my_session(
         )
         if not deleted:
             raise HTTPException(status_code=404, detail="会话不存在")
-        async with _sessions_lock:
-            _sessions.pop(thread_id, None)
-            _sessions_last_access.pop(thread_id, None)
+        async with session_store.lock:
+            session_store.sessions.pop(thread_id, None)
+            session_store.last_access.pop(thread_id, None)
     finally:
         # 无论成败都撤登记:失败路径要让用户能重试删除
-        async with _sessions_lock:
-            _deleting_sessions.discard(thread_id)
+        async with session_store.lock:
+            session_store.deleting.discard(thread_id)
     return Response(status_code=204)
 
 
@@ -1149,8 +889,8 @@ async def get_admin_sessions(
         user_id = int(user_id_raw) if user_id_raw else None
     except ValueError:
         raise HTTPException(status_code=400, detail="user_id 必须为整数") from None
-    threads = list_active_threads(user_id)
-    overview = session_overview([t.thread_id for t in threads])
+    threads = await asyncio.to_thread(list_active_threads, user_id)
+    overview = await asyncio.to_thread(session_overview, [t.thread_id for t in threads])
     items = [
         {
             "thread_id": t.thread_id,
@@ -1182,7 +922,7 @@ async def get_admin_session_messages(
     from official_agent.state.audit import write_audit
     from official_agent.state.threads import get_thread
 
-    rec = get_thread(thread_id)
+    rec = await asyncio.to_thread(get_thread, thread_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="会话不存在")
     try:

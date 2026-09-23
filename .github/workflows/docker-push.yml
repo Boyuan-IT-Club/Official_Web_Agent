@@ -177,6 +177,14 @@ jobs:
             # (env_file: 只注入容器,不参与插值 —— 两套机制)
             DC="docker compose --env-file .env.prod -f docker-compose.prod.yml"
 
+            # 健康检查地址必须跟 compose 的 ports 绑定地址一致:AGENT_BIND 设成
+            # 内网 IP 时(Node B 的 admin 代理要直达),回环上并无监听,探回环会
+            # 让每次部署都误判失败并触发回滚——回滚验证同样探不通,于是整条 CD
+            # 永远红。取 .env.prod 最后一条(与 shell/compose 的后者覆盖语义一致)。
+            AGENT_HOST=$(grep -oP '(?<=^AGENT_BIND=).*' .env.prod 2>/dev/null | tail -1)
+            AGENT_HOST=${AGENT_HOST:-127.0.0.1}
+            echo "健康检查地址:$AGENT_HOST:8001"
+
             # 记下当前镜像摘要,失败时回滚到它
             PREV=$($DC images -q agent 2>/dev/null | head -1 || true)
             echo "回滚锚点:${PREV:-无(首次部署)}"
@@ -193,7 +201,7 @@ jobs:
             echo "等待 /health 就绪..."
             ok=0
             for i in $(seq 1 20); do
-              if curl -fsS -m 5 http://127.0.0.1:8001/health | grep -q '"status":"ok"'; then
+              if curl -fsS -m 5 http://$AGENT_HOST:8001/health | grep -q '"status":"ok"'; then
                 ok=1; echo "健康检查通过(第 $i 次)"; break
               fi
               sleep 5
@@ -207,7 +215,7 @@ jobs:
                 docker tag "$PREV" ${{ env.DOCKER_NAMESPACE }}/${{ env.IMAGE_NAME }}:latest
                 $DC up -d --no-build agent
                 for i in $(seq 1 12); do
-                  curl -fsS -m 5 http://127.0.0.1:8001/health | grep -q '"status":"ok"' && { echo "回滚后已恢复"; break; }
+                  curl -fsS -m 5 http://$AGENT_HOST:8001/health | grep -q '"status":"ok"' && { echo "回滚后已恢复"; break; }
                   sleep 5
                 done
               fi
@@ -216,7 +224,7 @@ jobs:
 
             # /health 只看 checkpointer(PG)可达;再确认业务路由真的在服务
             # (无 token 应为 401 —— 200/404 都说明路由或鉴权不对)
-            code=$(curl -s -o /dev/null -w '%{http_code}' -m 8 http://127.0.0.1:8001/api/agent/sessions)
+            code=$(curl -s -o /dev/null -w '%{http_code}' -m 8 http://$AGENT_HOST:8001/api/agent/sessions)
             test "$code" = "401" || { echo "业务路由异常:/api/agent/sessions 返回 $code(预期 401)" >&2; exit 1; }
             echo "部署完成:${{ needs.build.outputs.version }}"
 

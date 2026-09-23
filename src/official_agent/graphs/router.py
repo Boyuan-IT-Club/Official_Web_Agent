@@ -53,7 +53,7 @@ def assistant_loop(state: AgentState) -> AgentState:
 
     写工具调用触发 interrupt 挂起,确认令牌机制见 ADR-0005 与 tools/write.py。
     """
-    raise NotImplementedError("GRA-04")
+    raise NotImplementedError("assistant ReAct 单循环尚未接入")
 
 
 def build_router_graph() -> StateGraph:

@@ -148,6 +148,17 @@ def extract_usage(usage_data: dict[str, Any] | None) -> dict[str, int | None]:
     }
 
 
+def usage_from_response(response: Any) -> dict[str, int | None] | None:
+    """从 LLM 响应对象提取 usage;两种形状都缺 → None(调用方保留旧值/跳过)。
+
+    原始 token_usage 优先:DeepSeek prompt_cache_hit/miss 只在原始 usage,
+    langchain 转换会丢(实测 usage_metadata 有恒真值短路兜底)。
+    """
+    meta = getattr(response, "response_metadata", None) or {}
+    data = meta.get("token_usage") or getattr(response, "usage_metadata", None)
+    return extract_usage(data) if data else None
+
+
 def write_conversation(
     *,
     thread_id: str,
