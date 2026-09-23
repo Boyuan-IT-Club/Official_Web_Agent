@@ -24,6 +24,8 @@ cd deploy/langfuse && docker compose up -d   # web: http://127.0.0.1:3001
 
 ## 架构要点
 
+代码架构详解(分层/包结构/设计模式/业务流程图):`docs/architecture.md`。
+
 - `tools/` 是确定性层:后端 API 的语义化封装,全部可单测;工具粒度对齐意图而非接口,
   返回做投影裁剪,错误信息必须可行动;agent 进程内直连函数,MCP 仅对外(ADR-0003)
 - `graphs/` 是编排层(ADR-0003,无意图分类):A=身份解析→按角色装配工具集→ReAct

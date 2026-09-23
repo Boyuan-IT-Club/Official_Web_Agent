@@ -147,6 +147,7 @@ POST /admin/evaluation/run(evaluation_admin,权限 evaluation:run)
 
 ## 文档地图
 
+- 代码架构详解(分层/包结构/设计模式/流程图):`docs/architecture.md`
 - 决策记录(ADR):`docs/adr/`(工作区根)
 - 工程规范:`docs/standards/`(入口 README 有加载地图)
 - 重构计划与进度:`docs/refactor-roadmap.md`
