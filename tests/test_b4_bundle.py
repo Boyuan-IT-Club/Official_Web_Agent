@@ -550,6 +550,9 @@ async def test_bundle_repo_line_failure_degrades_and_logs(
         "official_agent.evaluation.autograding.fetch_latest_submission",
         _no_submission,
     )
+    # 仓线全空 → 兜底线触发(基础三维+技能题组),必须 patch 假模型:
+    # 本用例的断言点是降级留痕,不是兜底出题质量
+    monkeypatch.setattr(bd, "build_model", lambda *a, **k: _FakeModel())
 
     with caplog.at_level(logging.WARNING):
         envelope = await bd.run_bundle(
