@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import threading
+from contextlib import AbstractContextManager
 from typing import Any
 
 import psycopg
@@ -48,6 +49,16 @@ def reset_pool() -> None:
             _pool = None
 
 
-def _conn() -> psycopg.Connection[dict[str, Any]]:
-    """签出一条池化连接(with 退出自动归还;干净退出提交,异常回滚)。"""
-    return get_pool().connection()
+def _conn() -> AbstractContextManager[psycopg.Connection[dict[str, Any]]]:
+    """签出一条池化连接——**返回上下文管理器,必须 with**,不是连接本身。
+
+    with 退出自动归还池;干净退出提交,异常回滚。标注成 Connection 会让
+    `conn = _conn(); conn.execute(...)`(直连版本的合法写法,未迁移的
+    threads/audit 等模块至今是那个形状)通过类型检查,运行时才炸
+    AttributeError。
+    """
+    # ignore:psycopg_pool 的 ConnectionPool 泛型参数由 connection_class 决定,
+    # 追踪不到运行时 kwargs 里的 row_factory=dict_row,静态推断成
+    # Connection[tuple[...]];实际签出的连接就是 dict_row。窄化到调用方真正
+    # 拿到的类型是有意的——宽松成 Any 就失去了拦住误用的意义。
+    return get_pool().connection()  # type: ignore[return-value]
