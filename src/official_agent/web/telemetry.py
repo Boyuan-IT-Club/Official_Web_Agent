@@ -87,6 +87,9 @@ def collect_sources(tool_msg: ToolMessage, sources: list, seen: set) -> None:
     内容是工具返回的 JSON;解析失败只丢引用,不影响主回复(降级纪律)。
     """
     try:
+        # 流式 updates 里会出现空 content 的占位 ToolMessage,跳过不作失败
+        if not tool_msg.content:
+            return
         data = (
             json.loads(tool_msg.content)
             if isinstance(tool_msg.content, str)
