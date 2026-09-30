@@ -24,7 +24,7 @@ from official_agent.state.evaluation.job_store import (
     requeue_stale,
     requeue_stale_all_cycles,
 )
-from official_agent.state.evaluation.review_queue import list_review_queue
+from official_agent.state.evaluation.review_queue import list_pool_entries, list_review_queue
 from official_agent.state.evaluation.scorecard_store import (
     ensure_evaluation_scorecard_ready,
     ensure_evaluation_tables,
@@ -51,6 +51,7 @@ __all__ = [
     "latest_job",
     "latest_scorecard",
     "list_jobs",
+    "list_pool_entries",
     "list_review_queue",
     "list_scorecards",
     "mark_job",

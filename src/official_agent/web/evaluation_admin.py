@@ -13,8 +13,10 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
+from official_agent.config import get_settings
 from official_agent.evaluation import runner as eval_runner
-from official_agent.evaluation.scoring import ai_level
+from official_agent.evaluation.grading import CardGrades, GradingPolicy, PoolEntry, grade_pool
+from official_agent.evaluation.graph import CARD_SCHEMA_VERSION
 from official_agent.graphs.identity import ResolvedIdentity
 from official_agent.state import audit, evaluation
 from official_agent.state import qbank as qbank_store
@@ -31,8 +33,10 @@ _require_resume_audit = _require_any("resume:audit")
 # 此码(服务账号)。
 _require_evaluation_run = _require_any("evaluation:run")
 
-# AI 评分分级可见:具体分数仅 evaluation:score:view(仅超管)可见,
-# 其余角色只见三档等级(优秀/良好/合格)。权限码由后端种子授予(V47)。
+# AI 初筛只对外给等级:部门匹配度与认真程度各一个「优秀/良好/一般」。
+# 两维的 0-10 分只用于在候选池里排序,仅 evaluation:score:view(仅超管)可见——
+# 分数一露出来,评审就会盯着小数点比较,而等级才是约定的结论口径。
+# 权限码由后端种子授予。
 _SCORE_VIEW_PERMISSION = "evaluation:score:view"
 
 
@@ -40,22 +44,67 @@ def _can_view_score(identity: ResolvedIdentity) -> bool:
     return _SCORE_VIEW_PERMISSION in (identity.get("permission_codes") or [])
 
 
-def _attach_level_and_mask(row: dict[str, Any], *, can_view: bool) -> dict[str, Any]:
-    """就地补 ai_level(所有角色都带);无 view 权限时剥离全部可反推分数的字段。
+def _grading_policy() -> GradingPolicy:
+    settings = get_settings()
+    return GradingPolicy(
+        top_ratio=settings.evaluation_grade_top_ratio,
+        bottom_ratio=settings.evaluation_grade_bottom_ratio,
+        min_pool=settings.evaluation_grade_min_pool,
+    )
 
-    total 可由 traits[].met 组合经 trait_score 确定性精确重建(scoring 权重表
-    公开),volume_ceiling 是卡内自带的封顶值,met_count 直接给出 15 分宽分段
-    ——三者任一留存都等于没藏。最小投影只保留定性内容(summary/态度/引文)。
+
+async def _cycle_grades(cycle_id: int) -> dict[int, CardGrades]:
+    """整个周期的分级结果(按第一志愿分池)。每次读取现算:池子随投递与重评变化。"""
+    rows = await asyncio.to_thread(evaluation.list_pool_entries, cycle_id)
+    entries = [
+        PoolEntry(
+            resume_id=int(r["resume_id"]),
+            first_dept=r.get("first_dept"),
+            match_score=r.get("match_score"),
+            effort_score=r.get("effort_score"),
+            hard_zero=bool(r.get("hard_zero")),
+        )
+        for r in rows
+    ]
+    return grade_pool(entries, _grading_policy())
+
+
+def _attach_grades_and_mask(
+    row: dict[str, Any], grades: CardGrades | None, *, can_view: bool
+) -> dict[str, Any]:
+    """就地补两维等级与分池信息;无 view 权限时剥离全部数值分。
+
+    判定清单(每项达成与否 + 原文依据)人人可见:那是评审核对 AI 判断的证据。
+    旧版卡(单一总分的特质清单)没有两维等级,标 needs_rerun 提示重新初筛,
+    并沿用旧的剥离口径——旧卡的总分可由特质判定精确反推。
     """
-    row["ai_level"] = ai_level(row.get("total"))
-    if not can_view:
-        row["total"] = None
-        card = row.get("card")
-        if isinstance(card, dict):
-            card.pop("total", None)
-            card.pop("met_count", None)
-            card.pop("volume_ceiling", None)
+    card = row.get("card") if isinstance(row.get("card"), dict) else None
+    schema = row.get("card_schema") or (card or {}).get("schema")
+    is_current = schema == CARD_SCHEMA_VERSION
+    row["needs_rerun"] = not is_current
+    shown = grades if is_current else None
+    row["match_level"] = shown.match.level if shown else None
+    row["effort_level"] = shown.effort.level if shown else None
+    row["grade_basis"] = shown.effort.basis if shown else None
+    row["pool"] = shown.pool if shown else None
+    row["pool_size"] = shown.effort.pool_size if shown else None
+    if can_view:
+        return row
+    row["total"] = None
+    row.pop("match_score", None)
+    row.pop("effort_score", None)
+    if card is not None:
+        for key in ("total", "met_count", "volume_ceiling", "match_score", "effort_score"):
+            card.pop(key, None)
+        if not is_current:
             card.pop("traits", None)
+        effort = card.get("effort")
+        if isinstance(effort, dict):
+            effort.pop("score", None)
+            effort.pop("ceiling", None)
+        for m in card.get("match") or []:
+            if isinstance(m, dict):
+                m.pop("score", None)
     return row
 
 
@@ -250,10 +299,10 @@ async def list_question_picks(
 
 
 class AdoptBody(BaseModel):
-    """采纳(AI 参考分或人工改分,以评审本人一票 upsert 后端多人打分)。
+    """采纳(以评审本人一票 upsert 后端多人打分)。
 
-    score 必填:采纳 AI 参考总分传回其 total,改分则传人工分——Agent 不
-    帮任何人决定终分。
+    score 必填且由评审本人给出:AI 初筛只给等级不给分,Agent 不帮任何人
+    决定终分。
     """
 
     resume_id: int = Field(ge=1)
@@ -276,7 +325,10 @@ async def evaluation_queue(
     limit: int = 200,
     offset: int = 0,
 ) -> dict[str, Any]:
-    """评审队列:queue=zero → 初筛不过(hard_zero)子队列;all → 全部评分卡。
+    """评审队列:queue=zero → 需重点复核(hard_zero)子队列;all → 全部评分卡。
+
+    每项带 match_level/effort_level(同部门候选池内的相对等级)与 needs_rerun
+    (旧版卡,需重新初筛才有两维等级)。
 
     每项带 decided_status/decided_version:复评会写一张新 draft 卡把
     `status` 顶回 draft,这对字段保留了该简历历史上的人工决策,前端据此
@@ -291,10 +343,14 @@ async def evaluation_queue(
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail="查询队列失败,请稍后重试") from exc
+    try:
+        grades = await _cycle_grades(cycle_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail="计算初筛等级失败,请稍后重试") from exc
     can_view = _can_view_score(identity)
     for item in items:
-        # 评分分级可见:等级人人可见,具体分数仅 view 权限
-        _attach_level_and_mask(item, can_view=can_view)
+        # 等级人人可见,具体分数仅 view 权限
+        _attach_grades_and_mask(item, grades.get(int(item["resume_id"])), can_view=can_view)
     return {
         "items": items,
         "total": len(items),
@@ -317,8 +373,12 @@ async def get_scorecard_for_review(
     row = await asyncio.to_thread(evaluation.latest_scorecard, resume_id, cycle_id)
     if row is None:
         raise HTTPException(status_code=404, detail="该候选暂无评分卡")
-    # 评分分级可见:卡内具体分数(card.total 与顶层 total)仅 view 权限可见
-    _attach_level_and_mask(row, can_view=_can_view_score(identity))
+    try:
+        grades = await _cycle_grades(cycle_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail="计算初筛等级失败,请稍后重试") from exc
+    # 等级人人可见,卡内具体分数仅 view 权限可见
+    _attach_grades_and_mask(row, grades.get(resume_id), can_view=_can_view_score(identity))
     return row
 
 

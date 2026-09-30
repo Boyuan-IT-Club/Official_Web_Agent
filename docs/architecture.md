@@ -90,7 +90,9 @@ src/official_agent/
 │   ├── bundle.py           #   出题证据线:仓线/评测错因线/奖项线/兜底线 → qbank 信封
 │   ├── explore.py          #   受限 ReAct 仓探索(轮数/墙钟双闸 + dossier 槽位)
 │   ├── judge.py / tech_stack.py / awards.py   # 专项出题
-│   ├── scoring.py          #   量规计算 + ai_level 三档等级
+│   ├── scoring.py          #   绝对卡短路 + 清单派生 0-10 分
+│   ├── grading.py          #   同部门候选池内相对分级(优秀/良好/一般)+ 调剂建议/面试提示
+│   ├── applicant.py        #   报名信息解析(志愿部门/专业/年级)
 │   ├── schema.py           #   数据契约(ScorecardOutput/QbankV2/QuestionGroupV2...)
 │   ├── llm_common.py       #   共享小件:content_text/prompt_version/温度定档/invoke_with_retry
 │   ├── runner 依赖的 github_client / autograding / attribution / dossier
@@ -224,12 +226,19 @@ stateDiagram-v2
 
 ```mermaid
 flowchart LR
-    PRE["precheck<br/>(确定性绝对卡规则)"] -->|"hard_zero"| FH["finalize_hard<br/>零卡不调模型<br/>(traits 全未达成+命中原因)"]
+    PRE["precheck<br/>(确定性绝对卡规则)"] -->|"hard_zero"| FH["finalize_hard<br/>零卡不调模型<br/>(两张清单全未达成+命中原因)"]
     PRE -->|"正常"| LS["llm_score<br/>(校验回灌重试 ×2)"]
     LS --> FIN["finalize<br/>统一卡形状"]
     FH --> FIN
     FIN --> E(["END"])
 ```
+
+初筛看两个维度,互不折算:**部门匹配度**(四个部门的录入标准清单都判,志愿部门那张
+决定匹配度,其余用于调剂建议)与**认真程度**(内容充实/了解社团部门/意愿真挚/成文/
+不套话)。模型只逐项判定达成与否并给原文引文,两维 0-10 分由清单权重派生落卡;
+「优秀/良好/一般」**不落库**,读取时由 `grading.grade_pool` 按「周期 + 第一志愿部门」
+分池相对划分(头尾各约两成;池子不足 15 人改用绝对锚点;媒体部与综合部各自成池)。
+数值分仅 `evaluation:score:view` 可见。
 
 ### 6.3 调查出题子图(route → explore → generate)
 

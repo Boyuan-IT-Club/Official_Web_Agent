@@ -12,6 +12,7 @@ import respx
 
 from official_agent.config import Settings
 from official_agent.evaluation import runner as ev_runner
+from official_agent.evaluation.applicant import ApplicantProfile
 from official_agent.evaluation.runner import EvaluationRunner
 from official_agent.evaluation.scoring import FieldText
 from official_agent.state import evaluation as ev_store
@@ -112,7 +113,7 @@ async def test_run_job_success_marks_succeeded(monkeypatch) -> None:
     seen: dict = {}
 
     async def _fetch(user_id, cycle_id):
-        return 99, _fields(), ""
+        return 99, _fields(), ApplicantProfile()
 
     async def _run_evaluation(fields, *, resume_id, cycle_id, weights=None, **_kw):
         seen["resume_id"] = resume_id
@@ -379,7 +380,7 @@ async def test_eval_usage_log_written_per_job(monkeypatch) -> None:
     seen: dict = {}
 
     async def _fetch(user_id, cycle_id):
-        return 99, _fields(), ""
+        return 99, _fields(), ApplicantProfile()
 
     async def _run_evaluation(fields, *, resume_id, cycle_id, weights=None, **_kw):
         return {"total": 66.0, "hard_zero": False, "dimensions": [], "attitude": {}}
@@ -458,7 +459,7 @@ async def test_run_job_masks_pii_before_models(monkeypatch, caplog) -> None:
                 title="自我介绍",
                 value="电话 13812345678,邮箱 me@x.com,QQ 123456789,学号 2021023456",
             ),
-        ], ""
+        ], ApplicantProfile()
 
     def _values(fields):
         # run_evaluation 收 dict 投影,run_bundle 收 FieldText
@@ -533,7 +534,7 @@ async def test_run_job_sets_correlation_trace_and_structured_logs(caplog) -> Non
         return "someuser"
 
     async def _fetch(user_id, cycle_id):
-        return 99, _fields(), ""
+        return 99, _fields(), ApplicantProfile()
 
     async def _run_evaluation(fields, *, resume_id, cycle_id, weights=None, **_kw):
         seen["trace_during_eval"] = current_trace_id()
@@ -699,6 +700,18 @@ async def test_grade_stays_out_of_scoring_fields() -> None:
                             "fieldValue": "大一",
                         },
                         {
+                            "fieldKey": "expected_departments",
+                            "fieldLabel": "期望部门",
+                            "fieldType": "checkbox",
+                            "fieldValue": '["技术部","无"]',
+                        },
+                        {
+                            "fieldKey": "major",
+                            "fieldLabel": "专业",
+                            "fieldType": "text",
+                            "fieldValue": "软件工程",
+                        },
+                        {
                             "fieldKey": "intro",
                             "fieldLabel": "自我介绍",
                             "fieldType": "textarea",
@@ -721,12 +734,14 @@ async def test_grade_stays_out_of_scoring_fields() -> None:
         )
     )
     try:
-        resume_id, fields, grade = await ev_runner.fetch_scoring_fields(7, 3)
+        resume_id, fields, profile = await ev_runner.fetch_scoring_fields(7, 3)
     finally:
         set_backend_client(None)
 
     assert resume_id == 42
-    assert grade == "大一"  # 元信息独立带出
+    assert profile.grade == "大一"  # 元信息独立带出
+    assert profile.first_dept == "技术部" and profile.second_dept is None
+    assert profile.major == "软件工程"
     assert [f.field_key for f in fields] == ["intro"]  # 评分面里没有年级
 
 

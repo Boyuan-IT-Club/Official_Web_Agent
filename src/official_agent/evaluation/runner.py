@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from official_agent.config import get_effective_settings
+from official_agent.evaluation.applicant import ApplicantProfile, parse_intended_departments
 from official_agent.evaluation.github_client import normalize_github_login
 from official_agent.evaluation.graph import _prompt_version, run_evaluation
 from official_agent.evaluation.scoring import FieldText
@@ -123,39 +124,64 @@ async def fetch_candidate_github(user_id: int) -> str:
         return ""
 
 
-#: 年级字段的识别:键名优先,回退到 label。周期配置里键名不稳定,且 label
+#: 报名信息字段的识别:键名优先,回退到 label。周期配置里键名不稳定,且 label
 #: 可以被改(后端记录过「年级」那一格里存着姓名,label 不可尽信)——两路都试,
-#: 取不到就按「年级缺失」处理,由出题侧走安全默认。
+#: 取不到就按「缺失」处理,由下游走安全默认。
 _GRADE_FIELD_KEYS = ("grade",)
 _GRADE_FIELD_LABELS = ("年级", "大几")
+_MAJOR_FIELD_KEYS = ("major",)
+_MAJOR_FIELD_LABELS = ("专业",)
+_DEPT_FIELD_KEYS = ("expected_departments", "expected_department")
+_DEPT_FIELD_LABELS = ("期望部门", "志愿部门", "意向部门")
 
 
-def _extract_grade(simple_fields: list[dict]) -> str:
-    """从简历字段里取年级**原文**(元信息,不进评分)。
-
-    值可能是「大一」这类选项,也可能被误填成别的内容;这里只做搬运,
-    识别与分档交给 investigate.grade_band(纯函数、可单测)。
-    """
+def _field_value(simple_fields: list[dict], keys: tuple[str, ...], labels: tuple[str, ...]) -> str:
+    """按键名或 label 取第一个非空字段值(原文,只做搬运)。"""
     for f in simple_fields:
         key = str(f.get("fieldKey") or "").strip().casefold()
         label = str(f.get("fieldLabel") or "").strip()
-        if key in _GRADE_FIELD_KEYS or label in _GRADE_FIELD_LABELS:
+        if key in keys or label in labels:
             value = str(f.get("fieldValue") or "").strip()
             if value:
                 return value
     return ""
 
 
-async def fetch_scoring_fields(user_id: int, cycle_id: int) -> tuple[int, list[FieldText], str]:
-    """服务账号取简历详情,映射为打分维度(textarea 型字段)。
+def _extract_grade(simple_fields: list[dict]) -> str:
+    """从简历字段里取年级**原文**(元信息,不进评分正文)。
+
+    值可能是「大一」这类选项,也可能被误填成别的内容;这里只做搬运,
+    识别与分档交给 investigate.grade_band(纯函数、可单测)。
+    """
+    return _field_value(simple_fields, _GRADE_FIELD_KEYS, _GRADE_FIELD_LABELS)
+
+
+def _extract_profile(simple_fields: list[dict]) -> ApplicantProfile:
+    """报名信息:志愿部门(决定按哪个部门看匹配度、进哪个候选池)+ 专业与年级
+    (只用于面试提示)。"""
+    first, second = parse_intended_departments(
+        _field_value(simple_fields, _DEPT_FIELD_KEYS, _DEPT_FIELD_LABELS)
+    )
+    return ApplicantProfile(
+        first_dept=first,
+        second_dept=second,
+        major=_field_value(simple_fields, _MAJOR_FIELD_KEYS, _MAJOR_FIELD_LABELS),
+        grade=_extract_grade(simple_fields),
+    )
+
+
+async def fetch_scoring_fields(
+    user_id: int, cycle_id: int
+) -> tuple[int, list[FieldText], ApplicantProfile]:
+    """服务账号取简历详情,映射为打分维度(textarea 型字段)+ 报名信息。
 
     对应 GET /api/resumes/admin/{userId}/{cycleId}(resume:view 权限走
     服务账号,与评分线的 PII 纪律一致:脱敏由后端返回层+字段面决定,这里
-    只取 textarea 型主观题)。返回 (resume_id, fields, grade)。
+    只取 textarea 型主观题)。返回 (resume_id, fields, profile)。
 
-    grade 是**元信息**:只影响出题深度,不进评分输入(评分仍只吃 textarea
-    字段面)。年级是 select 型,不在这份字段面里,故单列一个返回值带出去,
-    而不是混进 fields——混进去就同时改了评分输入。
+    profile 是**元信息**(志愿部门/专业/年级都是 select 或短文本字段),不在
+    textarea 字段面里,故单列一个返回值带出去,而不是混进 fields——混进去
+    就会被当成简历正文参与引文核对与篇幅计算。
     """
     client = await get_backend_client()
     data = await client.get(f"/api/resumes/admin/{user_id}/{cycle_id}")
@@ -177,7 +203,7 @@ async def fetch_scoring_fields(user_id: int, cycle_id: int) -> tuple[int, list[F
         for f in simple_fields
         if f.get("fieldType") == "textarea"
     ]
-    return resume_id, fields, _extract_grade(simple_fields)
+    return resume_id, fields, _extract_profile(simple_fields)
 
 
 async def fetch_resume_authority(resume_id: int) -> dict:
@@ -257,7 +283,7 @@ async def _do_scoring(
     from official_agent.observability import eval_job_trace_id
 
     t_eval = time.monotonic()
-    fetched_resume_id, fields, grade = await fetch_scoring_fields(job["user_id"], cycle_id)
+    fetched_resume_id, fields, profile = await fetch_scoring_fields(job["user_id"], cycle_id)
     # 硬断言:后端按 user_id+cycle 派生出的简历必须就是本 job
     # 的简历;不一致说明数据错位,立即失败,绝不带病继续。
     if fetched_resume_id != resume_id:
@@ -281,6 +307,7 @@ async def _do_scoring(
         ],
         resume_id=resume_id,
         cycle_id=cycle_id,
+        profile=profile,
         usage_out=scoring_usage,
         correlation_id=eval_job_trace_id(job_id),
     )
@@ -302,7 +329,7 @@ async def _do_scoring(
         input_tokens=scoring_usage.get("input_tokens"),
         output_tokens=scoring_usage.get("output_tokens"),
     )
-    return card, version, fields, grade
+    return card, version, fields, profile.grade
 
 
 async def _do_qbank(

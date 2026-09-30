@@ -1,10 +1,12 @@
 """绝对卡确定性短路纯逻辑单测(进模型前的态度不端硬判)。"""
 
+from official_agent.evaluation.schema import DEPT_MATCH_ITEMS, EFFORT_ITEMS
 from official_agent.evaluation.scoring import (
     FieldText,
+    checklist_score,
     detect_hard_zero,
+    effort_ceiling,
     is_hard_zero_value,
-    weighted_total,
 )
 
 
@@ -53,12 +55,6 @@ def test_detect_hard_zero_empty_when_all_normal() -> None:
     assert detect_hard_zero(fields) == {}
 
 
-def test_weighted_total_uses_configured_weights() -> None:
-    assert weighted_total({"a": 80, "b": 40}, {"a": 3, "b": 1}) == 70.0
-    assert weighted_total({"a": 80}, {}) == 80.0  # 缺省权重 1
-    assert weighted_total({}, {}) == 0.0
-
-
 def test_exact_placeholder_match_is_hard_zero() -> None:
     """接线后有真实 placeholder:全等判,比前缀启发式更准。"""
     ph = "介绍一下你参与过的项目、承担的角色和最终成果"
@@ -67,66 +63,40 @@ def test_exact_placeholder_match_is_hard_zero() -> None:
     assert not is_hard_zero_value("我做过社团官网重构,负责报名页。", placeholder=ph)
 
 
-# ── 特质清单分段(总分由达成项数派生)────────────────────
+# ── 清单派生分数 ───────────────────────────────────
 
 
-def test_trait_score_bands_by_achievement_count() -> None:
-    """达成项数决定分数段;段内按加权达成比例微调。
-
-    分数只由判定结果派生:模型不给分,同一份判定重算必然同分。
-    """
-    from official_agent.evaluation.schema import TRAITS
-    from official_agent.evaluation.scoring import trait_score
-
-    def flags(k: int) -> dict[str, bool]:
-        return {name: i < k for i, name in enumerate(TRAITS)}
-
-    assert trait_score(flags(0)) == 0.0
-    # 全达成落顶段
-    assert trait_score(flags(len(TRAITS))) == 100.0
-    # 每段的下限:达成数跨过阈值就进该段
-    assert 90 <= trait_score(flags(11)) <= 100
-    assert 75 <= trait_score(flags(9)) < 90
-    assert 60 <= trait_score(flags(7)) < 75
-    assert 45 <= trait_score(flags(5)) < 60
-    assert 30 <= trait_score(flags(3)) < 45
-    assert 15 <= trait_score(flags(1)) < 30
+def test_checklist_score_is_sum_of_met_weights() -> None:
+    """分数 = 达成项权重之和(清单权重和为 10)。模型不给分,同一份判定重算必然同分。"""
+    tech = DEPT_MATCH_ITEMS["技术部"]
+    assert checklist_score({}, tech) == 0.0
+    assert checklist_score({n: True for n, _ in tech}, tech) == 10.0
+    assert checklist_score({"技术基础": True}, tech) == 4.0  # 技术能力优先:单项占四成
+    assert checklist_score({"技术基础": True, "探索内驱力": True}, tech) == 7.0
 
 
-def test_trait_score_is_order_independent() -> None:
-    """判定集相同就同分,与模型输出顺序无关。
-
-    回归:先前按**列表位置**加权,而校验只比对集合——模型打乱输出顺序会
-    把权重加到错的项上,同一个判定集换个顺序就换了分数。
-    """
-    from official_agent.evaluation.schema import TRAITS
-    from official_agent.evaluation.scoring import trait_score
-
-    core = {name: i < 9 for i, name in enumerate(TRAITS)}
-    shuffled = dict(reversed(list(core.items())))
-    assert trait_score(core) == trait_score(shuffled)
+def test_checklist_score_is_order_independent() -> None:
+    """判定集相同就同分,与模型输出顺序无关(按项名取值,不按位置)。"""
+    met = {n: i % 2 == 0 for i, (n, _) in enumerate(EFFORT_ITEMS)}
+    shuffled = dict(reversed(list(met.items())))
+    assert checklist_score(met, EFFORT_ITEMS) == checklist_score(shuffled, EFFORT_ITEMS)
 
 
-def test_trait_score_weights_leading_traits_higher() -> None:
-    """同样达成 9 项,达成**靠前**特质的得分高于只达成靠后的。
-
-    靠前的特质是招新更看重的(经验/技术/自学/开源),同数量下应当更高。
-    """
-    from official_agent.evaluation.schema import TRAITS
-    from official_agent.evaluation.scoring import trait_score
-
-    lead = {name: i < 9 for i, name in enumerate(TRAITS)}
-    tail = {name: i >= 3 for i, name in enumerate(TRAITS)}
-    assert sum(lead.values()) == sum(tail.values()) == 9
-    assert trait_score(lead) > trait_score(tail)
+def test_checklist_score_ignores_unknown_items() -> None:
+    """清单外的键不计入 —— 模型自造项名不能虚增分数。"""
+    assert checklist_score({"自造判定项": True}, EFFORT_ITEMS) == 0.0
 
 
-def test_trait_score_ignores_unknown_traits() -> None:
-    """清单外的键不计入 —— 模型自造项名不能虚增达成数。"""
-    from official_agent.evaluation.schema import TRAITS
-    from official_agent.evaluation.scoring import trait_score
+def test_effort_ceiling_bands() -> None:
+    """篇幅封顶:一段话 3、两三行 6、够长不封顶;空简历也封顶(兜底)。"""
 
-    assert trait_score({**{n: False for n in TRAITS}, "自造特质": True}) == 0.0
+    def one(n: int) -> list[FieldText]:
+        return [FieldText(field_key="intro", title="自我介绍", value="字" * n)]
+
+    assert effort_ceiling(one(80)) == 3.0
+    assert effort_ceiling(one(200)) == 6.0
+    assert effort_ceiling(one(400)) is None
+    assert effort_ceiling([]) == 3.0
 
 
 # ── 可选栏留空不算敷衍 ───────────────────────────────
