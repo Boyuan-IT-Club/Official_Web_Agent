@@ -491,6 +491,47 @@ def test_review_queue_carries_user_id(cycle_id: int) -> None:
         _cleanup(cycle_id)
 
 
+def test_pool_entries_take_latest_current_cards_only(cycle_id: int) -> None:
+    """分级输入:每份简历只取最新版;旧版卡(无两维分数)不参与分池排名。"""
+    _cleanup(cycle_id)
+
+    def _v2(match: float, effort: float, dept: str | None) -> dict:
+        return {
+            "schema": "evaluation_scorecard/v2",
+            "intended": {"first": dept, "second": None},
+            "match_score": match,
+            "effort_score": effort,
+            "transfer_hint": {"dept": "媒体部", "is_second_choice": False},
+            "hard_zero": False,
+            "total": None,
+        }
+
+    try:
+        ev_store.save_scorecard(
+            _v2(3.0, 4.0, "技术部"), resume_id=9120, cycle_id=cycle_id, prompt_version="v7"
+        )
+        ev_store.save_scorecard(  # 重评:最新版覆盖旧分
+            _v2(8.0, 9.0, "技术部"), resume_id=9120, cycle_id=cycle_id, prompt_version="v7"
+        )
+        ev_store.save_scorecard(
+            _v2(6.0, 5.0, None), resume_id=9121, cycle_id=cycle_id, prompt_version="v7"
+        )
+        _save_card(9122, cycle_id, total=80.0)  # 旧版卡
+        entries = sorted(ev_store.list_pool_entries(cycle_id), key=lambda r: r["resume_id"])
+        assert [e["resume_id"] for e in entries] == [9120, 9121]
+        assert entries[0]["first_dept"] == "技术部"
+        assert entries[0]["match_score"] == 8.0 and entries[0]["effort_score"] == 9.0
+        assert entries[1]["first_dept"] is None
+
+        queue = {i["resume_id"]: i for i in ev_store.list_review_queue(cycle_id)}
+        assert queue[9120]["card_schema"] == "evaluation_scorecard/v2"
+        assert queue[9120]["intended_first"] == "技术部"
+        assert queue[9120]["transfer_hint"] == {"dept": "媒体部", "is_second_choice": False}
+        assert queue[9122]["card_schema"] is None and queue[9122]["match_score"] is None
+    finally:
+        _cleanup(cycle_id)
+
+
 # ── 自举幂等 ───────────────────────────────────────────
 
 

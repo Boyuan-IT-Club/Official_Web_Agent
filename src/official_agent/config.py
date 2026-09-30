@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     context_compress_threshold_tokens: int = 24000
     context_recent_keep_messages: int = 12
 
+    # 初筛分级:同部门候选池内头部/尾部比例与小池阈值(见 evaluation/grading.py)
+    evaluation_grade_top_ratio: float = 0.2
+    evaluation_grade_bottom_ratio: float = 0.2
+    evaluation_grade_min_pool: int = 15
+
 
 @lru_cache
 def get_settings() -> Settings:

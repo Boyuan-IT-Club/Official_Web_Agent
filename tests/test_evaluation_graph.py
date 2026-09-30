@@ -1,19 +1,27 @@
 """评分子图测试:硬 0 短路不调模型 / 正常路径结构化输出 / 失败进 error。"""
 
 import asyncio
+import json
 from unittest.mock import patch
 
 import pytest
 
 from official_agent.evaluation import graph as ev
+from official_agent.evaluation.applicant import ApplicantProfile
+from official_agent.evaluation.schema import (
+    DEPARTMENTS,
+    DEPT_MATCH_ITEMS,
+    EFFORT_ITEMS,
+    item_names,
+)
 
 _FIELDS = [
     {"field_key": "intro", "title": "自我介绍", "value": "我是张三,做过两个 Web 项目。"},
     {"field_key": "reason", "title": "加入理由", "value": "认同社团氛围,想参与招新开发。"},
 ]
 
-#: 篇幅足够的简历(远超封顶线)。断言「达成数 → 分数段」的用例要用它:
-#: `_FIELDS` 只有 29 字,属「一句话」级别,分数会被篇幅封顶盖住,测不到分段本身。
+#: 篇幅足够的简历(远超封顶线)。断言认真程度分数本身的用例要用它:
+#: `_FIELDS` 只有 29 字,属「一句话」级别,认真程度会被篇幅封顶盖住。
 _FIELDS_FULL = [
     {
         "field_key": "intro",
@@ -28,6 +36,7 @@ _FIELDS_FULL = [
 ]
 
 _WEIGHTS = {"intro": 3.0, "reason": 1.0}
+_TECH = ApplicantProfile(first_dept="技术部", second_dept="项目部", major="软件工程", grade="大一")
 
 
 def _fields_all_bad() -> list[dict[str, str]]:
@@ -50,32 +59,36 @@ def _fake_model(payload: str):
     return _M()
 
 
-def _traits_json(
-    *, met_traits: tuple[str, ...] | None = None, reason: str = "做过两个 Web 项目"
-) -> str:
-    """按清单生成 traits 数组;met_traits 里的判达成,其余判未达成。
-
-    缺省全达成 —— 需要特定达成集的用例自己传。
-    """
-    from official_agent.evaluation.schema import TRAITS
-
-    met_traits = TRAITS if met_traits is None else met_traits
-    items = ",".join(
-        '{{"trait": "{n}", "met": {m}, "quote": "{q}", "reason": "{r}"}}'.format(
-            n=name,
-            m=str(name in met_traits).lower(),
-            q=reason if name in met_traits else "",
-            r=reason,
-        )
-        for name in TRAITS
-    )
-    return f'{{"traits": [{items}], "summary": "强在项目,弱在开源", '
+def _verdict(name: str, met: bool, quote: str) -> dict:
+    return {"item": name, "met": met, "quote": quote if met else "", "reason": "做过两个 Web 项目"}
 
 
-_GOOD_JSON = (
-    _traits_json()
-    + '"attitude": {"verdict": "sincere", "reason": "认真"}}'
-)
+def _payload(
+    *,
+    met: dict[str, set[str]] | None = None,
+    effort_met: set[str] | None = None,
+    quote: str = "做过两个 Web 项目",
+    verdict: str = "sincere",
+    attitude_reason: str = "认真",
+    summary: str = "与技术部对得上,缺分享经历",
+) -> dict:
+    """按清单生成模型输出。met:{部门: 达成项集合};缺省全部达成。"""
+    match = []
+    for dept in DEPARTMENTS:
+        names = item_names(DEPT_MATCH_ITEMS[dept])
+        chosen = set(names) if met is None else met.get(dept, set())
+        match.append({"dept": dept, "items": [_verdict(n, n in chosen, quote) for n in names]})
+    names = item_names(EFFORT_ITEMS)
+    chosen = set(names) if effort_met is None else effort_met
+    return {
+        "match": match,
+        "effort": [_verdict(n, n in chosen, quote) for n in names],
+        "summary": summary,
+        "attitude": {"verdict": verdict, "reason": attitude_reason},
+    }
+
+
+_GOOD_JSON = json.dumps(_payload(), ensure_ascii=False)
 
 
 def _settings():
@@ -97,66 +110,132 @@ async def test_hard_zero_short_circuits_without_model() -> None:
         patch.object(ev, "get_effective_settings", _settings),
     ):
         card = await ev.run_evaluation(
-            _fields_all_bad(), resume_id=1, cycle_id=2026, weights=_WEIGHTS
+            _fields_all_bad(), resume_id=1, cycle_id=2026, weights=_WEIGHTS, profile=_TECH
         )
     assert card["hard_zero"] is True
-    assert card["total"] == 0.0
+    assert card["match_score"] == 0.0
+    assert card["effort_score"] == 0.0
     assert card["attitude"]["verdict"] == "bad_faith"
-    assert all(tv["met"] is False for tv in card["traits"])
-    assert "单字符重复" in json_of_reasons(card)
-    assert card["versions"]["prompt"] == "evaluation_scoring/v6"
-
-
-def json_of_reasons(card: dict) -> str:
-    return str(card["hard_zero_reasons"])
+    assert all(not it["met"] for m in card["match"] for it in m["items"])
+    assert all(not it["met"] for it in card["effort"]["items"])
+    assert card["transfer_hint"] is None
+    assert "单字符重复" in str(card["hard_zero_reasons"])
+    assert card["versions"]["prompt"] == "evaluation_scoring/v7"
+    assert card["schema"] == "evaluation_scorecard/v2"
 
 
 @pytest.mark.asyncio
-async def test_normal_path_scores_and_weights_total() -> None:
+async def test_normal_path_derives_both_scores() -> None:
     with (
         patch.object(ev, "build_model", lambda *a, **k: _fake_model(_GOOD_JSON)),
         patch.object(ev, "get_effective_settings", _settings),
     ):
-        card = await ev.run_evaluation(_FIELDS_FULL, resume_id=2, cycle_id=2026, weights=_WEIGHTS)
+        card = await ev.run_evaluation(
+            _FIELDS_FULL, resume_id=2, cycle_id=2026, weights=_WEIGHTS, profile=_TECH
+        )
     assert card["hard_zero"] is False
-    assert card["attitude"]["verdict"] == "sincere"
-    assert card["met_count"] == 12  # 清单全部达成
-    assert card["total"] >= 90.0  # 全部达成落 90-100 段
-    assert card["volume_ceiling"] is None  # 篇幅够,不封顶
-    assert card["traits"][0]["reason"] == "做过两个 Web 项目"
-    assert card["schema"] == "evaluation_scorecard/v1"
-
-
-def test_volume_ceiling_bands() -> None:
-    """篇幅封顶:一段话 29、两三行 59、够长不封顶。"""
-
-    def _text(n: int) -> str:
-        return "字" * n
-
-    def _one(n: int):
-        return [{"field_key": "intro", "title": "自我介绍", "value": _text(n)}]
-
-    assert ev.volume_ceiling(ev._as_field_texts(_one(80))) == 29.0  # 一句话
-    assert ev.volume_ceiling(ev._as_field_texts(_one(200))) == 59.0  # 两三行
-    assert ev.volume_ceiling(ev._as_field_texts(_one(400))) is None  # 够长
-    assert ev.volume_ceiling([]) == 29.0  # 空简历也封顶(硬 0 轮不到它,兜底)
+    assert card["intended"] == {"first": "技术部", "second": "项目部"}
+    assert card["match_score"] == 10.0  # 技术部清单全部达成
+    assert [m["dept"] for m in card["match"]] == list(DEPARTMENTS)
+    assert all(m["score"] == 10.0 for m in card["match"])
+    assert card["effort_score"] == 10.0
+    assert card["effort"]["ceiling"] is None  # 篇幅够,不封顶
+    assert card["total"] is None  # 新卡没有总分
+    assert card["transfer_hint"] is None  # 志愿部门已经满分,无需调剂
 
 
 @pytest.mark.asyncio
-async def test_short_resume_is_capped_by_volume() -> None:
-    """一句话的简历即便模型把 12 项全判达成,也进不了 60 分以上的档。
+async def test_card_lists_items_in_checklist_order() -> None:
+    """模型打乱部门与判定项顺序时,落卡仍按清单顺序(展示与复核按固定顺序)。"""
+    shuffled = _payload()
+    shuffled["match"] = list(reversed(shuffled["match"]))
+    for m in shuffled["match"]:
+        m["items"] = list(reversed(m["items"]))
+    shuffled["effort"] = list(reversed(shuffled["effort"]))
+    with (
+        patch.object(
+            ev, "build_model", lambda *a, **k: _fake_model(json.dumps(shuffled, ensure_ascii=False))
+        ),
+        patch.object(ev, "get_effective_settings", _settings),
+    ):
+        card = await ev.run_evaluation(_FIELDS_FULL, resume_id=2, cycle_id=2026, profile=_TECH)
+    assert [m["dept"] for m in card["match"]] == list(DEPARTMENTS)
+    assert [it["item"] for it in card["match"][0]["items"]] == list(
+        item_names(DEPT_MATCH_ITEMS["技术部"])
+    )
+    assert [it["item"] for it in card["effort"]["items"]] == list(item_names(EFFORT_ITEMS))
 
-    达成项数是模型判的:一句话照样能被判出「真诚」「表达与结构」这类不吃篇幅
-    的项。篇幅是确定性的,用它封顶——这是「一句话不该压过两三行」的保证。
+
+@pytest.mark.asyncio
+async def test_mismatched_dept_yields_transfer_hint() -> None:
+    """报技术部但简历全是媒体经历 → 调剂建议指向媒体部,并提示技术基础缺失。"""
+    payload = _payload(
+        met={"媒体部": set(item_names(DEPT_MATCH_ITEMS["媒体部"]))},
+        effort_met={"内容充实", "表达成文"},
+    )
+    with (
+        patch.object(
+            ev, "build_model", lambda *a, **k: _fake_model(json.dumps(payload, ensure_ascii=False))
+        ),
+        patch.object(ev, "get_effective_settings", _settings),
+    ):
+        card = await ev.run_evaluation(_FIELDS_FULL, resume_id=3, cycle_id=2026, profile=_TECH)
+    assert card["match_score"] == 0.0
+    assert card["transfer_hint"] == {"dept": "媒体部", "is_second_choice": False}
+    hints = " ".join(card["interview_hints"])
+    assert "未体现技术基础" in hints
+    assert "更贴合媒体部" in hints
+    assert card["hard_zero"] is False  # 有达成项,不进重点复核队列
+
+
+@pytest.mark.asyncio
+async def test_no_intended_dept_has_no_match_score() -> None:
+    """没填志愿:没有「志愿部门的匹配度」,各部门分数仍在,并提示先确认意愿部门。"""
+    with (
+        patch.object(ev, "build_model", lambda *a, **k: _fake_model(_GOOD_JSON)),
+        patch.object(ev, "get_effective_settings", _settings),
+    ):
+        card = await ev.run_evaluation(_FIELDS_FULL, resume_id=4, cycle_id=2026)
+    assert card["match_score"] is None
+    assert card["intended"] == {"first": None, "second": None}
+    assert all(m["score"] == 10.0 for m in card["match"])
+    assert any("未填志愿部门" in h for h in card["interview_hints"])
+
+
+@pytest.mark.asyncio
+async def test_applicant_info_goes_into_data_zone() -> None:
+    """报名信息进 prompt,且包在数据区里(候选人填的内容同样是不可信输入)。"""
+    calls: list[str] = []
+
+    class _M:
+        async def ainvoke(self, messages, config=None):
+            calls.append(messages[0].content)
+            return _FakeMsg(_GOOD_JSON)
+
+    with (
+        patch.object(ev, "build_model", lambda *a, **k: _M()),
+        patch.object(ev, "get_effective_settings", _settings),
+    ):
+        await ev.run_evaluation(_FIELDS, resume_id=5, cycle_id=2026, profile=_TECH)
+    zone = calls[0].split('<data source="applicant">', 1)[1].split("</data>", 1)[0]
+    assert "第一志愿:技术部" in zone and "专业:软件工程" in zone
+
+
+@pytest.mark.asyncio
+async def test_short_resume_caps_effort() -> None:
+    """一句话的简历即便认真程度全判达成,也被篇幅封顶在 3 分。
+
+    判定项是模型判的:一句话照样能被判出「表达成文」。篇幅是确定性的,
+    用它封顶——这是「一句话不该和两三行一样认真」的保证。匹配度不受篇幅影响。
     """
     with (
         patch.object(ev, "build_model", lambda *a, **k: _fake_model(_GOOD_JSON)),
         patch.object(ev, "get_effective_settings", _settings),
     ):
-        card = await ev.run_evaluation(_FIELDS, resume_id=5, cycle_id=2026, weights=_WEIGHTS)
-    assert card["met_count"] == 12
-    assert card["total"] == 29.0  # 未被封顶时是 90+
-    assert card["volume_ceiling"] == 29.0
+        card = await ev.run_evaluation(_FIELDS, resume_id=5, cycle_id=2026, profile=_TECH)
+    assert card["effort_score"] == 3.0
+    assert card["effort"]["ceiling"] == 3.0
+    assert card["match_score"] == 10.0
     assert card["hard_zero"] is False  # 封顶不等于淘汰
 
 
@@ -181,9 +260,7 @@ async def test_temperature_low_on_scorer() -> None:
 
     def _fake_build(settings, model=None, stream_usage=False, temperature=None):
         captured["temperature"] = temperature
-        payload = _traits_json(reason="e")
-        payload += '"attitude": {"verdict": "sincere", "reason": "r"}}'
-        return _fake_model(payload)
+        return _fake_model(_GOOD_JSON)
 
     with (
         patch.object(ev, "build_model", _fake_build),
@@ -203,42 +280,51 @@ def test_extract_json_tolerates_fences_and_noise() -> None:
         ev._extract_json("模型打摆了,没有 JSON")
 
 
-def test_trait_incompleteness_raises() -> None:
-    """模型漏项 → error 态,绝不落'看起来完整'的卡(漏项会拉低达成数、冤判)。"""
-    bad = (
-        '{"traits": [{"trait": "经验丰富", "met": true, "reason": "做过两个 Web 项目"}],'
-        '"summary": "x", "attitude": {"verdict": "sincere", "reason": "r"}}'
-    )
+def _run_expecting(payload: dict, match: str) -> None:
     with (
-        patch.object(ev, "build_model", lambda *a, **k: _fake_model(bad)),
+        patch.object(
+            ev, "build_model", lambda *a, **k: _fake_model(json.dumps(payload, ensure_ascii=False))
+        ),
         patch.object(ev, "get_effective_settings", _settings),
-        pytest.raises(RuntimeError, match="特质集不符"),
+        pytest.raises(RuntimeError, match=match),
     ):
         asyncio.run(ev.run_evaluation(_FIELDS, resume_id=5, cycle_id=2026))
 
 
+def test_missing_dept_raises() -> None:
+    """模型漏判一个部门 → error 态(漏部门就发现不了调剂人选)。"""
+    payload = _payload()
+    payload["match"] = payload["match"][:3]
+    _run_expecting(payload, "部门判定项不符")
+
+
+def test_item_incompleteness_raises() -> None:
+    """某部门漏判定项 → error 态,绝不落「看起来完整」的卡(漏项会冤判)。"""
+    payload = _payload()
+    payload["match"][1]["items"] = payload["match"][1]["items"][:2]
+    _run_expecting(payload, "项目部判定项不符")
+
+
+def test_effort_incompleteness_raises() -> None:
+    payload = _payload()
+    payload["effort"] = payload["effort"][:1]
+    _run_expecting(payload, "认真程度判定项不符")
+
+
 def test_fabricated_evidence_raises() -> None:
     """达成项依据非原文 → error 态(凭空断言不得落卡)。"""
-    from official_agent.evaluation.schema import TRAITS
+    _run_expecting(_payload(quote="我获得过图灵奖"), "引文非原文")
 
-    items = ",".join(
-        '{{"trait": "{n}", "met": {met}, "quote": "{q}", "reason": "{why}"}}'.format(
-            n=n,
-            met=str(n == "经验丰富").lower(),
-            q="我获得过图灵奖" if n == "经验丰富" else "",
-            why="我获得过图灵奖" if n == "经验丰富" else "无",
-        )
-        for n in TRAITS
-    )
-    bad = '{"traits": [' + items + '], "summary": "x", '
-    bad += '"attitude": {"verdict": "sincere", "reason": "r"}}'
 
-    with (
-        patch.object(ev, "build_model", lambda *a, **k: _fake_model(bad)),
-        patch.object(ev, "get_effective_settings", _settings),
-        pytest.raises(RuntimeError, match="引文非原文"),
-    ):
-        asyncio.run(ev.run_evaluation(_FIELDS, resume_id=6, cycle_id=2026))
+def test_met_without_quote_raises() -> None:
+    payload = _payload()
+    payload["effort"][0]["quote"] = ""
+    _run_expecting(payload, "达成项缺原文引文")
+
+
+def test_perfunctory_caps_effort_items() -> None:
+    """perfunctory 时认真程度至多达成 2 项:态度与判定要对得上。"""
+    _run_expecting(_payload(verdict="perfunctory"), "perfunctory")
 
 
 @pytest.mark.asyncio
@@ -267,20 +353,25 @@ async def test_placeholder_flows_into_hard_zero() -> None:
 
 
 @pytest.mark.asyncio
-async def test_all_zero_llm_card_marks_hard_zero() -> None:
-    """AI 全 0 分卡也要落 hard_zero(0 分队列靠它捞)。"""
-    payload = (
-        _traits_json(met_traits=(), reason="整份无实质内容")
-        + '"atmm": "x", "attitude": {"verdict": "bad_faith",'
-        ' "reason": "整份敷衍,原文引述:我是张三,做过两个 Web 项目。"}}'
-    ).replace('"atmm": "x", ', '"summary": "整份无实质内容,不建议进入面试。", ')
+async def test_nothing_met_marks_hard_zero() -> None:
+    """两张清单一项都没达成也要落 hard_zero(重点复核队列靠它捞)。"""
+    payload = _payload(
+        met={},
+        effort_met=set(),
+        verdict="bad_faith",
+        attitude_reason="整份敷衍,原文引述:我是张三,做过两个 Web 项目。",
+        summary="整份无实质内容。",
+    )
     with (
-        patch.object(ev, "build_model", lambda *a, **k: _fake_model(payload)),
+        patch.object(
+            ev, "build_model", lambda *a, **k: _fake_model(json.dumps(payload, ensure_ascii=False))
+        ),
         patch.object(ev, "get_effective_settings", _settings),
     ):
-        card = await ev.run_evaluation(_FIELDS, resume_id=8, cycle_id=2026)
+        card = await ev.run_evaluation(_FIELDS, resume_id=8, cycle_id=2026, profile=_TECH)
     assert card["hard_zero"] is True
-    assert card["total"] == 0.0
+    assert card["effort_score"] == 0.0
+    assert "_attitude" in card["hard_zero_reasons"]
 
 
 # ── 评分 token 经 usage_out 回传 + correlation_id 进 config metadata ──
@@ -402,10 +493,9 @@ def test_evidence_accepts_quote_with_narrative_wrapper() -> None:
 @pytest.mark.asyncio
 async def test_extra_key_triggers_corrective_retry() -> None:
     """attitude 多塞键 → 第一次被 extra=forbid 拒,纠正重试后修正并落卡。"""
-    bad = (
-        _traits_json()
-        + '"attitude": {"verdict": "sincere", "reason": "认真", "reason_note": ""}}'
-    )
+    bad_payload = _payload()
+    bad_payload["attitude"]["reason_note"] = ""
+    bad = json.dumps(bad_payload, ensure_ascii=False)
     calls: list[str] = []
 
     class _M:
@@ -440,13 +530,10 @@ async def test_corrective_error_text_stays_inside_data_zone() -> None:
         },
         {"field_key": "reason", "title": "加入理由", "value": "认同社团氛围,想参与招新开发。"},
     ]
-    # 模型把 intro 的 payload 当成 reason 的依据(位置判错)→ 依据非原文
-    bad = (
-        '{"traits": ['
-        '{"trait": "经验丰富", "met": true, "quote": "做过两个 Web 项目", "reason": "r"},'
-        f'{{"trait": "技术能力", "met": true, "quote": "{payload}", "reason": "r"}}],'
-        '"summary": "x", "attitude": {"verdict": "sincere", "reason": "认真"}}'
-    )
+    # 模型把 intro 的 payload 以外的编造内容当依据 → 依据非原文,诊断里带着 payload
+    bad_payload = _payload()
+    bad_payload["match"][0]["items"][0]["quote"] = f"{payload}我还拿过图灵奖"
+    bad = json.dumps(bad_payload, ensure_ascii=False)
     calls: list[str] = []
 
     class _M:
@@ -469,24 +556,22 @@ async def test_corrective_error_text_stays_inside_data_zone() -> None:
     assert card["attitude"]["verdict"] == "sincere"
 
 
-def test_duplicate_trait_reports_which_one() -> None:
-    """重复特质的报错必须点名具体项。
+def test_duplicate_item_reports_which_one() -> None:
+    """重复判定项的报错必须点名具体项。
 
-    回归:旧实现用 set 差算 missing/extra,而判定用 list 比较——模型重复
-    输出同一项时 list 不等但两个 set 差都为空,于是报「缺 [],多 []」,
-    既无从排查,回灌给模型的纠正诊断也形同空文。
+    用 set 差算 missing/extra 时,模型重复输出同一项会让两个 set 差都为空,
+    报「缺 [],多 []」——既无从排查,回灌给模型的纠正诊断也形同空文。
     """
-    dup = (
-        '{"traits": ['
-        '{"trait": "经验丰富", "met": true, "reason": "做过两个 Web 项目"},'
-        '{"trait": "经验丰富", "met": false, "reason": "做过两个 Web 项目"}],'
-        '"summary": "x", "attitude": {"verdict": "sincere", "reason": "r"}}'
-    )
+    payload = _payload()
+    items = payload["match"][0]["items"]
+    items[1] = dict(items[0])  # 技术基础出现两次,探索内驱力缺失
     with (
-        patch.object(ev, "build_model", lambda *a, **k: _fake_model(dup)),
+        patch.object(
+            ev, "build_model", lambda *a, **k: _fake_model(json.dumps(payload, ensure_ascii=False))
+        ),
         patch.object(ev, "get_effective_settings", _settings),
         pytest.raises(RuntimeError) as ei,
     ):
         asyncio.run(ev.run_evaluation(_FIELDS, resume_id=15, cycle_id=2026))
     msg = str(ei.value)
-    assert "重复" in msg and "经验丰富" in msg, f"报错未点出重复项:{msg}"
+    assert "重复" in msg and "技术基础" in msg, f"报错未点出重复项:{msg}"

@@ -30,7 +30,10 @@ def list_review_queue(
 ) -> list[dict[str, Any]]:
     """评审队列投影:每简历最新卡 + 关联 user_id(勾选重评需要)。
 
-    queue=zero → 仅初筛不过(hard_zero)子队列;all → 全部。
+    queue=zero → 仅需重点复核(hard_zero)子队列;all → 全部。
+
+    card_schema/intended_first/match_score/effort_score/transfer_hint 从卡内
+    提出来,列表页据此分级与筛选,不必逐份拉整张卡。旧版卡没有这些键,取出为 NULL。
 
     decided_status/decided_version:该简历在本周期**历史上**最后一次人工
     决策(adopted/rejected)落在哪一版。复评会写一张新的 draft 卡,
@@ -46,12 +49,17 @@ def list_review_queue(
             SELECT latest.resume_id, latest.card_version, latest.status,
                    latest.hard_zero, latest.total, latest.prompt_version,
                    latest.created_at, j.user_id,
+                   latest.card->>'schema' AS card_schema,
+                   latest.card->'intended'->>'first' AS intended_first,
+                   (latest.card->>'match_score')::real AS match_score,
+                   (latest.card->>'effort_score')::real AS effort_score,
+                   latest.card->'transfer_hint' AS transfer_hint,
                    decided.status AS decided_status,
                    decided.card_version AS decided_version
             FROM (
                 SELECT DISTINCT ON (s.resume_id)
                     s.resume_id, s.card_version, s.status, s.hard_zero, s.total,
-                    s.prompt_version, s.created_at
+                    s.prompt_version, s.created_at, s.card
                 FROM evaluation_scorecard s WHERE s.cycle_id = %s
                 ORDER BY s.resume_id, s.card_version DESC
             ) latest
@@ -77,5 +85,32 @@ def list_review_queue(
                 max(1, min(limit, _MAX_PAGE)),
                 max(0, offset),
             ),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_pool_entries(cycle_id: int) -> list[dict[str, Any]]:
+    """整个周期每份简历最新卡的分级输入:第一志愿 + 两维分数 + hard_zero。
+
+    分级是候选池内的相对位置,必须拿**全周期**的卡来算,不能只拿评审队列
+    当前这一页。只取新版卡(有 match_score/effort_score 的);旧版卡不参与排名,
+    免得一批没有两维分数的卡把池子撑大、稀释比例。
+    """
+    _ensure_bootstrapped()
+    with _connection._conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT latest.resume_id, latest.hard_zero,
+                   latest.card->'intended'->>'first' AS first_dept,
+                   (latest.card->>'match_score')::real AS match_score,
+                   (latest.card->>'effort_score')::real AS effort_score
+            FROM (
+                SELECT DISTINCT ON (s.resume_id) s.resume_id, s.hard_zero, s.card
+                FROM evaluation_scorecard s WHERE s.cycle_id = %s
+                ORDER BY s.resume_id, s.card_version DESC
+            ) latest
+            WHERE latest.card ? 'effort_score'
+            """,
+            (cycle_id,),
         ).fetchall()
         return [dict(r) for r in rows]

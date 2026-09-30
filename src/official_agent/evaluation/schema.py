@@ -5,49 +5,82 @@ strict 语义:extra="forbid" + 字段约束。输出轨为提示词 JSON + 本 s
 与强制 tool_choice 都被 400 拒)——schema 即提示词的一部分,字段名/枚举值
 改一个字模型行为就变,所以本文件是 prompt 级资产。
 
-**一份简历一个总分**,不再逐栏打分:逐栏平均会把「哪一栏长」当成「人好不好」,
-一句话的候选人只要那一句写得顺就能追平有开源项目的人。改为按**特质清单**
-逐项判定达成与否,达成项数决定分数段——总分对应的是「这个人具备几项我们
-看重的品质」,而不是「他的字写得好不好」。
+初筛看**两件事**,各自一张清单,互不折算:
+- **部门匹配度**:简历内容与部门录入标准对得上多少。四个部门**都判**——
+  志愿部门的那张决定匹配度,其余几张用来发现「简历好但志愿不对口」的调剂人选;
+- **认真程度**:这份简历是不是认真写的(内容、对社团的了解、意愿、成文度)。
+
+模型只逐项判定达成与否并给原文依据;分数由代码按清单权重派生,
+等级(优秀/良好/一般)再由代码在同部门候选池里相对划分。
 """
 
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-#: 招新看重的特质清单。**顺序即权重递减**,也是 prompt 里逐项判定的顺序。
-#: 收项原则:能凭简历原文**判定达成与否**的才收(「真诚」「有热情」这类无法
-#: 从文字证伪的,归到最后一项「内容详实」里一并体现)。
-TRAITS: tuple[str, ...] = (
-    "经验丰富",  # 有可讲的真实项目/实习/竞赛经历
-    "技术能力",  # 会写代码:coding / vibe-coding / 工程工具链
-    "自学能力",  # 主动学过课外的技术,有路径有产出
-    "开源精神",  # 公开作品、提交记录、文档沉淀
-    "一技之长",  # 技术之外的手艺:运营/剪辑/设计/洽谈/统筹
-    "对技术的热情",  # 主动钻研的痕迹(读源码、打 CTF、造轮子)
-    "对社团的热情",  # 想清楚为什么来这个社团、能带来什么
-    "责任心",  # 有始有终、带过人、担过责
-    "学业表现",  # 绩点/奖学金/学业类奖项
-    "内容详实",  # 每栏都写、有细节有数字,不是一两句敷衍
-    "真诚",  # 不套话不夸大,写自己的真实水平与动机
-    "表达与结构",  # 条理清楚,读得下去
+#: 社团部门。媒体部与综合部虽然合并面试,录入标准不同,各自一张清单、各自一个候选池。
+DEPARTMENTS: tuple[str, ...] = ("技术部", "项目部", "媒体部", "综合部")
+
+#: 各部门的匹配清单:(判定项, 权重)。权重和为 10,达成项权重之和即 0-10 分。
+#: 判定项取自各部门的录入标准,只收**能凭简历原文判断**的项(胆量、临场反应
+#: 这类只能面试里看的不收)。清单顺序即 prompt 里逐项判定的顺序。
+DEPT_MATCH_ITEMS: dict[str, tuple[tuple[str, int], ...]] = {
+    # 技术能力优先:技术基础一项占四成
+    "技术部": (
+        ("技术基础", 4),  # 有技术栈且有用它做出来的东西
+        ("探索内驱力", 3),  # 课外主动学、主动钻研,有路径或产出
+        ("分享意愿", 2),  # 愿意分享技术:博客、开源、技术分享、带人
+        ("社团参与意愿", 1),  # 愿意参加社团活动、参与技术分享
+    ),
+    "项目部": (
+        ("组织统筹经历", 3),  # 组织过活动/竞赛/项目,说了自己统筹了什么
+        ("沟通协调能力", 3),  # 与不同年龄身份的人对接、协调过,有事例
+        ("项目管理兴趣", 2),  # 对项目从需求到交付的全流程有兴趣或了解
+        ("持久投入意愿", 2),  # 愿意为团队贡献、长期投入
+    ),
+    "媒体部": (
+        ("媒体方向兴趣", 3),  # 摄影/图文排版/平面设计/剪辑/UI 至少一项有兴趣
+        ("相关经历作品", 3),  # 海报、推文、账号运营、剪辑、摄影等实际经历或作品
+        ("主动学习宣发", 2),  # 愿意主动学宣发技能、不敷衍交差
+        ("入社归属意愿", 2),  # 有强烈入社意愿、对社团有归属感
+    ),
+    "综合部": (
+        ("活动策划经历", 3),  # 策划/组织过活动,说了具体做了什么
+        ("人际交往能力", 3),  # 处理人际、调解分歧、带动气氛,有事例
+        ("了解部门职能", 2),  # 知道综合部做什么、自己能贡献什么
+        ("参与策划意愿", 2),  # 热爱社团、想参与活动策划
+    ),
+}
+
+#: 认真程度清单:(判定项, 权重),权重和为 10。对应招新简历评分的 A/P/F 判据:
+#: 内容充实、了解过社团部门、加入意愿真挚、成文——而不是「能力强不强」。
+EFFORT_ITEMS: tuple[tuple[str, int], ...] = (
+    ("内容充实", 3),  # 各栏都写了具体事项,有细节
+    ("了解社团部门", 2),  # 写出了对社团或志愿部门的具体了解,不是随手投递
+    ("加入意愿真挚", 2),  # 说清为什么来、想做什么、能带来什么,不是模板话
+    ("表达成文", 2),  # 条理清楚、成句成段,读得下去
+    ("具体不套话", 1),  # 写自己的真实水平与经历,不堆砌自我评价词
 )
 
 
-class TraitVerdict(BaseModel):
-    """一项特质的判定结果。
+def item_names(items: tuple[tuple[str, int], ...]) -> tuple[str, ...]:
+    """清单 → 判定项名(按清单顺序)。"""
+    return tuple(name for name, _ in items)
+
+
+class ItemVerdict(BaseModel):
+    """一个判定项的结果。
 
     两个字段分工明确,**不要混**:
     - `reason`:自然语言依据,写给人看(判 false 时写**缺什么**,不许空着)。
       它是总结,不是引文,机器不逐字校验——总结本来就不该等于原文。
     - `quote`:判定所依据的**原文逐字片段**,判 true 时必填。机器只校验这一项:
-      编造的原文在简历里找不到。分开之后,「防编造」与「用自然语言解释」
-      各走各的字段,不会因为要求人话说得像原文而互相打架。
+      编造的原文在简历里找不到。
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    trait: str = Field(min_length=1, description=f"特质名,取值:{' / '.join(TRAITS)}")
+    item: str = Field(min_length=1, description="判定项名,与清单一字不差")
     met: bool
     quote: str = Field(
         default="",
@@ -57,8 +90,17 @@ class TraitVerdict(BaseModel):
     reason: str = Field(min_length=1, description="自然语言依据;判 false 时写缺什么")
 
 
+class DeptMatchVerdict(BaseModel):
+    """一个部门的匹配清单判定。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dept: str = Field(min_length=1, description=f"部门名,取值:{' / '.join(DEPARTMENTS)}")
+    items: list[ItemVerdict] = Field(min_length=1)
+
+
 class AttitudeVerdict(BaseModel):
-    """态度结论:端正(sincere)/敷衍(perfunctory,总分压低)/不端(bad_faith,整份 0)。"""
+    """态度结论:端正(sincere)/敷衍(perfunctory)/不端(bad_faith)。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -67,15 +109,12 @@ class AttitudeVerdict(BaseModel):
 
 
 class ScorecardOutput(BaseModel):
-    """模型结构化输出整体;与确定性规则合并后落 evaluation_scorecard 卡。
-
-    分数由**达成项数**派生(代码算,不让模型直接给分):模型只负责逐项判定
-    达成与否,把「给几分」这种容易漂移的判断换成可核对的清单。
-    """
+    """模型结构化输出整体;与确定性规则合并后落 evaluation_scorecard 卡。"""
 
     model_config = ConfigDict(extra="forbid")
 
-    traits: list[TraitVerdict] = Field(min_length=1)
+    match: list[DeptMatchVerdict] = Field(min_length=1)
+    effort: list[ItemVerdict] = Field(min_length=1)
     summary: str = Field(min_length=1, description="2-4 句整体评价,给面试官看的理由")
     attitude: AttitudeVerdict
 

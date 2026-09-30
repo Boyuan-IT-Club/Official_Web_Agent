@@ -4,8 +4,11 @@
 纯数字标点 / placeholder 同文(请输入…/字段名本身/无)。任一打分维命中
 → 整份硬 0(attitude=bad_faith),不调模型(确定性规则优先)。
 
-误判兜底:硬 0 只是**初筛不过**信号(入 0 分队列,不自动拒),人工评审
+误判兜底:硬 0 只是**重点复核**信号(入 0 分队列,不自动拒),人工评审
 可改判——规则宁可略严,由人工评审队列兜底。
+
+模型判完清单后,分数也在这里派生(checklist_score / effort_ceiling):
+分数只用于在候选池里排序分级,不直接给人看。
 """
 
 from __future__ import annotations
@@ -110,106 +113,41 @@ def _reason_of(value: str, title: str, placeholder: str = "") -> str:
     return "命中绝对卡规则"
 
 
-#: 达成项数 → 分数段的边界。自高而低,命中第一个不高于达成数的下限即为该段。
-#: 分段而非线性(12 项 × 固定分):**顶部要挤、底部要宽**。招新真正想捞的是
-#: 「广度都够」的人,所以 11 项以上才进 90 档;而 5 项以下是明显没写东西的
-#: 区间,粗分即可。
-_BAND_STEPS: tuple[tuple[int, int, int], ...] = (
-    # (最低达成数, 分数下限, 分数上限)
-    (11, 90, 100),
-    (9, 75, 89),
-    (7, 60, 74),
-    (5, 45, 59),
-    (3, 30, 44),
-    (1, 15, 29),
-    (0, 0, 14),
-)
+def checklist_score(met: dict[str, bool], items: tuple[tuple[str, int], ...]) -> float:
+    """清单判定 → 0-10 分:达成项的权重之和(清单权重和为 10)。
 
-
-def trait_score(met: dict[str, bool]) -> float:
-    """特质达成情况 → 0-100 分(派生,不由模型给分)。
-
-    模型只做逐项判定(达成/未达成 + 依据),分数在这里算:同一份简历重跑,
-    只要判定一致分数就一致,不会因为模型这次「心情」不同而漂移。
-
-    met 的键是**特质名**(不是位置):模型偶尔会打乱输出顺序,按位置加权
-    会把权重加到错的项上 —— 于是同一个判定集换个顺序就换了分数。
-    段内按达成比例微调,同段内也有区分度;前段特质达成得多的落在段内偏高。
+    模型只做逐项判定(达成/未达成 + 原文依据),分数在这里算:同一份简历重跑,
+    只要判定一致分数就一致。met 的键是**判定项名**,不认位置——模型偶尔打乱
+    输出顺序,按位置取值会把权重算到错的项上。清单外的键(模型改了名)不计入。
     """
-    if not met:
+    total_weight = sum(weight for _, weight in items)
+    if not total_weight:
         return 0.0
-    # 只统计清单内的项:多余键(模型改名)不计入,避免虚增达成数
-    from official_agent.evaluation.schema import TRAITS
-
-    flags = [bool(met.get(name, False)) for name in TRAITS]
-    n = len(flags)
-    # 权重按**清单顺序**递减(第一项最重):靠前的特质是招新更看重的
-    weights = [n - i for i in range(n)]
-    met_count = sum(1 for m in flags if m)
-    weighted = sum(w for w, m in zip(weights, flags, strict=True) if m)
-    weighted_max = sum(weights)
-
-    for min_met, low, high in _BAND_STEPS:
-        if met_count >= min_met:
-            ratio = weighted / weighted_max if weighted_max else 0.0
-            return round(low + (high - low) * ratio, 1)
-    return 0.0
+    got = sum(weight for name, weight in items if met.get(name, False))
+    return round(10 * got / total_weight, 1)
 
 
-#: 简历实质篇幅 → 分数上限。分数由**达成项数**派生,而达成项数是模型判的:
-#: 一句话的简历照样会被判出「真诚」「表达与结构」这类不吃篇幅的项,于是拿到
-#: 中等分。篇幅是确定性的,用它封顶,保证材料不到两三行的简历进不了「内容
-#: 完整」的高分档。
+#: 简历实质篇幅 → 认真程度上限(0-10)。认真程度的判定项是模型判的:一句话的
+#: 简历也可能被判出「表达成文」「具体不套话」而拿到中等分。篇幅是确定性的,
+#: 用它封顶,保证材料不到两三行的简历够不上「认真」的档位。
 #:
 #: 边界按本地样本校准(实质字符数):一段话级别 94-104、两三行 143-269、
-#: 完整 429-662。
-#:
-#: 只在**极短**时封顶,不是「越长分越高」:材料长但言之无物的简历照样是低分
-#: (实测 259 字的长而空简历判 0 达成、0 分)。篇幅是必要条件,不是充分条件。
-_VOLUME_CEILINGS: tuple[tuple[int, float], ...] = (
-    (130, 29.0),  # 一段话:封顶在「1-2 项达成」档内
-    (280, 59.0),  # 两三行:封顶在「5-6 项达成」档内,够不到 60 以上的完整档
+#: 完整 429-662。只在**极短**时封顶,不是「越长越认真」:长而空的简历照样
+#: 判不出「内容充实」。篇幅是必要条件,不是充分条件。
+_EFFORT_CEILINGS: tuple[tuple[int, float], ...] = (
+    (130, 3.0),  # 一段话
+    (280, 6.0),  # 两三行
 )
 
 
-def volume_ceiling(fields: list[FieldText]) -> float | None:
-    """简历篇幅 → 分数上限;None = 不封顶。纯函数,零 IO。
+def effort_ceiling(fields: list[FieldText]) -> float | None:
+    """简历篇幅 → 认真程度分上限;None = 不封顶。纯函数,零 IO。
 
     只量**实质字符数**(原始长度,不做占位剔除):占位与敷衍内容由绝对卡在
     进模型前就拦掉了,这里再剔一遍只会把「短但具体」的简历误伤。
     """
     total = sum(len((f.value or "").strip()) for f in fields)
-    for limit, ceiling in _VOLUME_CEILINGS:
+    for limit, ceiling in _EFFORT_CEILINGS:
         if total < limit:
             return ceiling
     return None
-
-
-def weighted_total(scores: dict[str, int], weights: dict[str, float]) -> float:
-    """加权总分(派生,非模型输出):Σ 分×权 / Σ 权;权重缺省 1.0。
-
-    保留给仍按维度给分的调用方(周期级维度配置);简历初筛已改用
-    `trait_score` 的清单分段。
-    """
-    num = 0.0
-    den = 0.0
-    for key, score in scores.items():
-        w = float(weights.get(key, 1.0))
-        num += score * w
-        den += w
-    return round(num / den, 1) if den else 0.0
-
-
-def ai_level(total: float | None) -> str | None:
-    """AI 参考总分 → 三档等级(对外展示用;具体分数仅 evaluation:score:view 可见)。
-
-    档位边界:优秀 [75,100],良好 [35,75),合格 [0,35)。
-    total 为 None(无分)→ None。
-    """
-    if total is None:
-        return None
-    if total >= 75:
-        return "优秀"
-    if total >= 35:
-        return "良好"
-    return "合格"
