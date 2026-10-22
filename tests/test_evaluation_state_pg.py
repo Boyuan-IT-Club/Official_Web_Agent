@@ -532,6 +532,62 @@ def test_pool_entries_take_latest_current_cards_only(cycle_id: int) -> None:
         _cleanup(cycle_id)
 
 
+# ── 原子领取(多副本不双跑)──────────────────────────────
+
+
+def _age_jobs(cycle_id: int, seconds: int) -> None:
+    with psycopg.connect(PG_URL) as conn:
+        conn.execute(
+            "UPDATE evaluation_job SET updated_at = now() - make_interval(secs => %s) "
+            "WHERE cycle_id = %s",
+            (seconds, cycle_id),
+        )
+        conn.commit()
+
+
+def test_claim_job_only_once(cycle_id: int) -> None:
+    _cleanup(cycle_id)
+    try:
+        (job_id,) = ev_store.create_jobs([(9301, 701)], cycle_id)
+        assert ev_store.claim_job(job_id) is True
+        assert ev_store.claim_job(job_id) is False  # 第二个执行者领不到
+        assert ev_store.get_job(job_id)["attempts"] == 1
+        assert ev_store.release_claim(job_id) is True
+        job = ev_store.get_job(job_id)
+        assert job["status"] == "pending" and job["attempts"] == 0
+    finally:
+        _cleanup(cycle_id)
+
+
+def test_claim_next_pending_skips_locked_excluded_and_fresh(cycle_id: int) -> None:
+    import threading
+
+    _cleanup(cycle_id)
+    try:
+        ids = ev_store.create_jobs([(9302, 702), (9303, 703), (9304, 704)], cycle_id)
+        # 刚提交的不领:给本机派发留时间(库里可能有别的用例残留,只看本用例的 job)
+        fresh = ev_store.claim_next_pending(older_than_seconds=60, exclude=[])
+        assert fresh is None or fresh["job_id"] not in ids
+        _age_jobs(cycle_id, 120)
+        # 两个执行者并发领:SKIP LOCKED 保证各领各的
+        got: list = []
+
+        def _claim() -> None:
+            row = ev_store.claim_next_pending(older_than_seconds=60, exclude=[ids[2]])
+            got.append(row["job_id"] if row else None)
+
+        threads = [threading.Thread(target=_claim) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        mine = [g for g in got if g in ids]
+        assert len(mine) == 2 and len(set(mine)) == 2
+        assert ids[2] not in mine  # exclude 的不领
+    finally:
+        _cleanup(cycle_id)
+
+
 # ── 自举幂等 ───────────────────────────────────────────
 
 

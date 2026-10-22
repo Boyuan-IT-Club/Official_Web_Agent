@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import secrets
 import time
@@ -415,16 +416,26 @@ async def _do_qbank(
     return "succeeded", None, qbank_version
 
 
+#: 后台领取循环:pending 超过这么久还没人执行才去领(给本机派发留时间)
+_CLAIM_AFTER_SECONDS = 60
+
+
 class EvaluationRunner:
-    """进程内单例:提交/并发控制/重试。状态真源在 evaluation_job 表。"""
+    """进程内单例:提交/并发控制/重试。状态真源在 evaluation_job 表。
+
+    执行前一律原子领取(pending → running,state.evaluation.claim_job):同一个
+    job 无论被派发几次、被几个副本看到,只有领到的那个执行。后台领取循环
+    (claim_loop)周期性领走「等了一阵没人执行」的 pending job——多副本时
+    负载自然分摊,某个副本提交后崩溃留下的 job 也不必等到重启恢复。
+    """
 
     def __init__(self) -> None:
         self._sem = asyncio.Semaphore(_MAX_CONCURRENCY)
         # asyncio 只持任务弱引用:不保存会被 GC,job 静默卡死
         self._tasks: set[asyncio.Task] = set()
         # 幂等派发:进程内在跑 job 登记——create_jobs 幂等复用活跃 job_id
-        # 后,submit/重试若再无条件派发会双跑同一简历。单 worker 语义;跨副本
-        # 由 DB 唯一活跃索引 + attempts 上限兜底(扩副本前需外置)。
+        # 后,submit/重试若再无条件派发会双跑同一简历。跨副本由执行前的
+        # 原子领取兜住(claim_job)。
         self._inflight: set[int] = set()
 
     def _spawn(self, coro) -> None:
@@ -432,7 +443,9 @@ class EvaluationRunner:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    def _try_dispatch(self, job_id: int, cycle_id: int, *, trigger_user_id: int) -> bool:
+    def _try_dispatch(
+        self, job_id: int, cycle_id: int, *, trigger_user_id: int, claimed: bool = False
+    ) -> bool:
         """同 job 进程内只派发一次;返回是否实际派发。
 
         已在执行(含并发双击、重试双发、stale 恢复撞上在跑慢 job)→ 跳过;
@@ -444,7 +457,9 @@ class EvaluationRunner:
 
         async def _guarded() -> None:
             try:
-                await self._run_job(job_id, cycle_id, trigger_user_id=trigger_user_id)
+                await self._run_job(
+                    job_id, cycle_id, trigger_user_id=trigger_user_id, claimed=claimed
+                )
             finally:
                 self._inflight.discard(job_id)
 
@@ -495,7 +510,9 @@ class EvaluationRunner:
             logging.getLogger(__name__).warning("触发审计写入失败(jobs=%s)", job_ids, exc_info=True)
         return job_ids
 
-    async def _run_job(self, job_id: int, cycle_id: int, *, trigger_user_id: int) -> None:
+    async def _run_job(
+        self, job_id: int, cycle_id: int, *, trigger_user_id: int, claimed: bool = False
+    ) -> None:
         from official_agent.observability import (
             eval_job_trace_id,
             reset_turn_trace_id,
@@ -506,17 +523,26 @@ class EvaluationRunner:
         # traceparent、审计 trace_id、结构化日志四面同 id(确定性可复算)。
         trace_token = set_turn_trace_id(eval_job_trace_id(job_id))
         try:
-            await self._execute_job(job_id, cycle_id, trigger_user_id=trigger_user_id)
+            await self._execute_job(
+                job_id, cycle_id, trigger_user_id=trigger_user_id, claimed=claimed
+            )
         finally:
             reset_turn_trace_id(trace_token)
 
-    async def _execute_job(self, job_id: int, cycle_id: int, *, trigger_user_id: int) -> None:
+    async def _execute_job(
+        self, job_id: int, cycle_id: int, *, trigger_user_id: int, claimed: bool = False
+    ) -> None:
         started = time.monotonic()
         job = await asyncio.to_thread(evaluation.get_job, job_id)
         if job is None:
             return
         async with self._sem:
-            await asyncio.to_thread(evaluation.mark_job, job_id, "running")
+            # 拿到并发槽后才领取:排队期间 job 保持 pending,别的副本可以先领走
+            if not claimed and not await asyncio.to_thread(evaluation.claim_job, job_id):
+                logging.getLogger(__name__).info(
+                    "job %s 已被其他执行者领取或不在待执行状态,跳过", job_id
+                )
+                return
             resume_id = int(job["resume_id"])
             _log_event(
                 job_id,
@@ -653,6 +679,39 @@ class EvaluationRunner:
 
 
 _runner: EvaluationRunner | None = None
+
+
+async def _claim_once(runner: EvaluationRunner) -> bool:
+    """领一个久等的 pending job 并派发;返回是否领到(领到就立刻再试,直到没有)。"""
+    if len(runner._inflight) >= _MAX_CONCURRENCY:
+        return False
+    row = await asyncio.to_thread(
+        evaluation.claim_next_pending,
+        older_than_seconds=_CLAIM_AFTER_SECONDS,
+        exclude=list(runner._inflight),
+    )
+    if row is None:
+        return False
+    job_id, cycle_id = int(row["job_id"]), int(row["cycle_id"])
+    if not runner._try_dispatch(job_id, cycle_id, trigger_user_id=0, claimed=True):
+        # 查询与派发之间本进程恰好派发了同一 job:退回 pending,交给那边执行
+        await asyncio.to_thread(evaluation.release_claim, job_id)
+        return False
+    _log_event(job_id, cycle_id, 0, "claimed_by_loop")
+    return True
+
+
+async def claim_loop(stop: asyncio.Event, *, interval_seconds: int) -> None:
+    """后台领取循环(lifespan 启动):每隔 interval 扫一次,fail-open。"""
+    runner = get_runner()
+    while not stop.is_set():
+        try:
+            while await _claim_once(runner):
+                pass
+        except Exception:  # noqa: BLE001 — 领取失败不挡服务,下一轮再试
+            logging.getLogger(__name__).warning("job 领取循环本轮失败(已忽略)", exc_info=True)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
 
 
 def get_runner() -> EvaluationRunner:

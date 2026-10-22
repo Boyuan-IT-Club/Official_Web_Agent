@@ -383,6 +383,65 @@ def _requeue_stale_rows(
     return [dict(r) for r in rows]
 
 
+def claim_job(job_id: int) -> bool:
+    """原子领取:pending → running(attempts+1)。返回是否领到。
+
+    多个执行者(同进程重复派发、多副本、后台领取循环)抢同一个 job 时,只有一个
+    UPDATE 能命中 status='pending' 的行——领不到的直接放弃,不会双跑。
+    """
+    _ensure_bootstrapped()
+    with _connection._conn() as conn:
+        cur = conn.execute(
+            "UPDATE evaluation_job SET status = 'running', attempts = attempts + 1, "
+            "updated_at = now() WHERE job_id = %s AND status = 'pending'",
+            (job_id,),
+        )
+        return cur.rowcount > 0
+
+
+def claim_next_pending(
+    *, older_than_seconds: int, exclude: list[int]
+) -> dict[str, Any] | None:
+    """后台领取循环用:领一个「等了一阵还没人执行」的 pending job。
+
+    FOR UPDATE SKIP LOCKED:多副本同时扫,各自跳过别人正锁着的行,不排队不重复。
+    older_than_seconds 给刚提交的 job 留出本机派发的时间;exclude 是本进程已经
+    排队等执行的 job,不抢自己的。
+    """
+    _ensure_bootstrapped()
+    with _connection._conn() as conn:
+        row = conn.execute(
+            """
+            UPDATE evaluation_job SET status = 'running', attempts = attempts + 1,
+                updated_at = now()
+            WHERE job_id = (
+                SELECT job_id FROM evaluation_job
+                WHERE status = 'pending' AND attempts < %s
+                  AND updated_at < now() - make_interval(secs => %s)
+                  AND NOT (job_id = ANY(%s))
+                ORDER BY job_id
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+            )
+            RETURNING job_id, cycle_id
+            """,
+            (_MAX_ATTEMPTS, older_than_seconds, list(exclude)),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def release_claim(job_id: int) -> bool:
+    """领到却没能派发(撞上本进程已在跑同一 job)时退回 pending,不计执行次数。"""
+    _ensure_bootstrapped()
+    with _connection._conn() as conn:
+        cur = conn.execute(
+            "UPDATE evaluation_job SET status = 'pending', attempts = GREATEST(attempts - 1, 0), "
+            "updated_at = now() WHERE job_id = %s AND status = 'running'",
+            (job_id,),
+        )
+        return cur.rowcount > 0
+
+
 def requeue_failed(cycle_id: int) -> list[int]:
     """失败 job 重回 pending(手动重试入口)。
 
