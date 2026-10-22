@@ -3,21 +3,27 @@
 docstring 契约(ADR-0003):写「何时用」而非「能做什么」,列边界条件,
 关键工具附真实调用示例。docstring 即模型看到的工具描述。
 
-返回投影(在本文件先行应用最小集):
-- 长列表透传后端的摘要语义(简历是字段值表驱动,字段白名单待后续
-  用真实字段键统一裁剪,这里不猜字段名);
-- 聚合工具(get_recruit_statistics)只回计数与下钻提示,不回明细。
+返回投影(tools/projection.py):每个工具只回回答问题要用的字段——后端为
+管理页面设计的响应是全量的(检索列表每项都带整份简历与邮箱),原样进上下文
+既浪费 token 又扩大隐私暴露面。姓名不进列表,人工打分不进客服面。
+聚合工具(get_recruit_statistics)只回计数与下钻提示,不回明细。
 
-PII 红线:get_resume_detail 返回层已就地脱敏(与 conversation_log 共用
-security/pii.py 规则表)——trace 上报的是脱敏后数据。其余工具与 trace
-采集点二次脱敏/留存策略尚未定。
+PII 红线:简历详情投影后整体过 mask_pii_deep(与 conversation_log 共用
+security/pii.py 规则表)——trace 上报的是脱敏后数据。
+
+短时缓存:开放周期是全员相同的公开信息,统计是整表翻页聚合,二者在同一轮
+对话里常被反复调用;按 (工具, 参数, 来问者) 缓存 60 秒。
 """
 
 import asyncio
+import hashlib
+import time
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any
 
+from official_agent.tools import projection
 from official_agent.tools.client import BackendClient, BackendError
 
 _client: BackendClient | None = None
@@ -63,6 +69,39 @@ async def _read(path: str, params: dict[str, Any] | None = None) -> Any:
     return await client.get(path, **query)
 
 
+#: 短时缓存:键 → (过期时刻, 值)。进程内、有界,超量时整体清空(条目很少)。
+_CACHE_TTL_SECONDS = 60.0
+_CACHE_MAX = 256
+_cache: dict[tuple[Any, ...], tuple[float, Any]] = {}
+
+
+def clear_cache() -> None:
+    """清空短时缓存(测试隔离用)。"""
+    _cache.clear()
+
+
+async def _cached(key: tuple[Any, ...], load: Callable[[], Awaitable[Any]]) -> Any:
+    """按键缓存 60 秒。键必须含来问者身份(见 _asker_key):同一工具对不同权限
+    的人可能返回不同结果,跨人复用就是越权。"""
+    now = time.monotonic()
+    hit = _cache.get(key)
+    if hit is not None and hit[0] > now:
+        return hit[1]
+    value = await load()
+    if len(_cache) >= _CACHE_MAX:
+        _cache.clear()
+    _cache[key] = (now + _CACHE_TTL_SECONDS, value)
+    return value
+
+
+def _asker_key() -> str:
+    """来问者身份的缓存键片段:token 的摘要(不存原文),无作用域时为服务账号。"""
+    token = _ASKER_TOKEN.get()
+    if token is None:
+        return "service"
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
 async def get_backend_client() -> BackendClient:
     """进程内共享单例:token 缓存与登录锁不分裂。测试经 set_backend_client 注入。"""
     global _client
@@ -84,7 +123,12 @@ async def get_open_cycle() -> dict | list:
 
     对应 GET /api/cycles/open。返回周期基本信息(注意:无 status 字段)。
     """
-    return await _read("/api/cycles/open")
+
+    async def load() -> Any:
+        return projection.open_cycles(await _read("/api/cycles/open"))
+
+    # 开放周期对所有登录用户相同,但仍按来问者分键:未登录/令牌失效要各自报错
+    return await _cached(("open_cycle", _asker_key()), load)
 
 
 async def search_resumes(
@@ -96,9 +140,10 @@ async def search_resumes(
     page: int = 1,
     size: int = 20,
 ) -> dict:
-    """按志愿部门/姓名/专业/状态分页检索简历,返回分页结构
-    (content=摘要列表,totalElements=总数;不含简历全文)。
+    """按志愿部门/姓名/专业/状态分页检索简历,返回 {total, items}。
 
+    items 每项是摘要:resumeId/userId/status/提交时间/专业/年级/志愿部门;
+    不含简历正文与姓名(按姓名检索仍可用,结果用 resumeId 指代)。
     需要单份简历详情时用 get_resume_detail 下钻。
     对应 GET /api/resumes/search(department 映射到查询参数 expectedDepartment)。
     示例:search_resumes(cycle_id=2, department="技术部", status="1")。
@@ -115,11 +160,8 @@ async def search_resumes(
         params["major"] = major
     if status is not None:
         params["status"] = status
-    data = await _read("/api/resumes/search", params=params)
-    # 后端分页为 Spring Page 结构:content/totalElements
-    if data is None:
-        return {"content": [], "totalElements": 0}
-    return data
+    # 后端分页为 Spring Page 结构:content/totalElements;data 为 null 时给空结构
+    return projection.resume_page(await _read("/api/resumes/search", params=params))
 
 
 async def get_resume_detail(user_id: int, cycle_id: int) -> dict:
@@ -127,16 +169,12 @@ async def get_resume_detail(user_id: int, cycle_id: int) -> dict:
 
     对应 GET /api/resumes/admin/{userId}/{cycleId}(不存在按 resumeId 直查的端点;
     resumeId 需先经 search_resumes 拿到对应 userId)。
-    PII:返回层就地脱敏(mask_pii_deep,与 conversation_log 共用规则表)——
-    完整简历进模型上下文即进 Langfuse trace,工具层脱敏后 trace 侧闭环;
-    面向候选人的回答本就不复述隐私字段(assistant.md)。
-    trace 采集点二次脱敏/留存策略尚未定。
+    返回 {resumeId, userId, status, submittedAt, fields: {栏目名: 内容}};照片与
+    附件不返回。PII:投影后整体脱敏(mask_pii_deep,与 conversation_log 共用规则
+    表,「姓名」栏键级掩码)——完整简历进模型上下文即进 trace,工具层脱敏后
+    trace 侧闭环。
     """
-    result = await _read(f"/api/resumes/admin/{user_id}/{cycle_id}")
-
-    from official_agent.security.pii import mask_pii_deep
-
-    return mask_pii_deep(result)
+    return projection.resume_detail(await _read(f"/api/resumes/admin/{user_id}/{cycle_id}"))
 
 
 async def get_my_interview(cycle_id: int, user_token: str) -> dict | None:
@@ -166,12 +204,15 @@ async def find_available_sessions(
     data = await _read(f"/api/interview/admin/cycles/{cycle_id}/available-sessions", params=params)
     if date and isinstance(data, list):
         data = [s for s in data if str(s.get("interviewDate", "")).startswith(date)]
-    return data
+    return projection.sessions(data)
 
 
 async def list_unassigned(cycle_id: int) -> dict | list:
-    """尚未分配面试的候选人列表。对应 GET /api/interview/admin/cycles/{id}/unassigned。"""
-    return await _read(f"/api/interview/admin/cycles/{cycle_id}/unassigned")
+    """尚未分配面试的候选人列表(resumeId + 志愿 + 未分配原因,不含姓名)。
+
+    对应 GET /api/interview/admin/cycles/{id}/unassigned。
+    """
+    return projection.unassigned(await _read(f"/api/interview/admin/cycles/{cycle_id}/unassigned"))
 
 
 async def list_reschedule_requests(cycle_id: int, status: int | None = 0) -> dict | list:
@@ -184,7 +225,9 @@ async def list_reschedule_requests(cycle_id: int, status: int | None = 0) -> dic
     params: dict[str, Any] = {"cycleId": cycle_id}
     if status is not None:
         params["status"] = status
-    return await _read("/api/interview/reschedule/admin/list", params=params)
+    return projection.reschedule_requests(
+        await _read("/api/interview/reschedule/admin/list", params=params)
+    )
 
 
 # 决策码语义(InterviewResultItem.decision):0 待定 / 1 通过 / 2 不通过 / 3 待调剂
@@ -201,6 +244,12 @@ async def get_recruit_statistics(cycle_id: int) -> dict:
     看个人明细用 search_resumes / list_unassigned 下钻。
     """
 
+    return await _cached(
+        ("recruit_statistics", cycle_id, _asker_key()), lambda: _recruit_statistics(cycle_id)
+    )
+
+
+async def _recruit_statistics(cycle_id: int) -> dict:
     items: list[dict] = []
     page = 1
     while True:

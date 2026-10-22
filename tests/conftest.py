@@ -30,6 +30,16 @@
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _clear_tool_cache():
+    """只读工具有 60 秒进程内缓存;用例之间换了后端替身,不清就会读到上一个用例的数据。"""
+    from official_agent.tools import readonly
+
+    readonly.clear_cache()
+    yield
+    readonly.clear_cache()
+
+
 @pytest.fixture
 def web_no_real_pg(monkeypatch: pytest.MonkeyPatch) -> None:
     """让 create_app() 的 lifespan 与路由侧审计都不落真 PG(checkpointer 由调用方自备)。"""

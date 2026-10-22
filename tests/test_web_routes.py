@@ -644,11 +644,22 @@ def test_get_resume_detail_masks_pii_in_payload() -> None:
     class _FakeClient:
         async def get(self, url):
             return {
-                "resume": {"resume_id": 1},
-                "fieldValues": [
-                    {"fieldKey": "phone", "fieldValue": "13812345678"},
-                    {"fieldKey": "extra_id", "fieldValue": "310101199001011234"},
-                    {"fieldKey": "intro", "fieldValue": "我的 QQ 是 123456789"},
+                "resumeId": 1,
+                "simpleFields": [
+                    {"fieldKey": "name", "fieldLabel": "姓名", "fieldValue": "张三"},
+                    {"fieldKey": "phone", "fieldLabel": "手机", "fieldValue": "13812345678"},
+                    {
+                        "fieldKey": "extra_id",
+                        "fieldLabel": "证件号",
+                        "fieldValue": "310101199001011234",
+                    },
+                    {
+                        "fieldKey": "intro",
+                        "fieldLabel": "自我介绍",
+                        "fieldValue": "我的 QQ 是 123456789",
+                    },
+                    {"fieldKey": "photo", "fieldLabel": "个人照片", "fieldType": "image",
+                     "fieldValue": "data:image/png;base64,AAAA"},
                 ],
             }
 
@@ -658,10 +669,12 @@ def test_get_resume_detail_masks_pii_in_payload() -> None:
         return await readonly.get_resume_detail(7, 3)
 
     result = asyncio.run(run())
-    values = [fv["fieldValue"] for fv in result["fieldValues"]]
-    assert values[0] == "138****5678"
-    assert values[1] == "3101**********1234"
-    assert "123456789" not in values[2]
+    fields = result["fields"]
+    assert fields["姓名"] == "〔姓名〕"  # 栏目名为键,键级姓名掩码生效
+    assert fields["手机"] == "138****5678"
+    assert fields["证件号"] == "3101**********1234"
+    assert "123456789" not in fields["自我介绍"]
+    assert "个人照片" not in fields  # 照片不进模型
     readonly.set_backend_client(None)
 
 

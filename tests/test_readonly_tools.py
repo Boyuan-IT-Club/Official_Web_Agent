@@ -53,9 +53,11 @@ async def test_get_open_cycle(mock_client: BackendClient) -> None:
     route.side_effect = ok([{"cycleId": 2}])
 
     data = await get_open_cycle()
+    again = await get_open_cycle()
 
-    assert data == [{"cycleId": 2}]
-    assert route.call_count == 1
+    assert data[0]["cycleId"] == 2
+    assert again == data
+    assert route.call_count == 1  # 60 秒内复用,不重复打后端
 
 
 @respx.mock
@@ -83,7 +85,69 @@ async def test_search_resumes_empty_backend_response(mock_client: BackendClient)
         200, json={"code": 200, "message": "ok", "data": None}
     )
 
-    assert await search_resumes() == {"content": [], "totalElements": 0}
+    assert await search_resumes() == {"total": 0, "items": []}
+
+
+@respx.mock
+async def test_search_resumes_projects_away_body_and_name(mock_client: BackendClient) -> None:
+    """检索结果只留摘要:正文、姓名、邮箱、打分记录都不进模型上下文。"""
+    respx.post(LOGIN).side_effect = login_ok()
+    respx.get(f"{BASE}/api/resumes/search").side_effect = ok(
+        {
+            "totalElements": 1,
+            "content": [
+                {
+                    "resumeId": 9,
+                    "userId": 3,
+                    "cycleId": 2,
+                    "status": 1,
+                    "userName": "张三",
+                    "userEmail": "zs@example.com",
+                    "resumeScore": 88,
+                    "scoreEntries": [{"score": 88}],
+                    "simpleFields": [
+                        {"fieldKey": "name", "fieldLabel": "姓名", "fieldValue": "张三"},
+                        {"fieldKey": "major", "fieldLabel": "专业", "fieldValue": "软件工程"},
+                        {
+                            "fieldKey": "expected_departments",
+                            "fieldLabel": "期望部门",
+                            "fieldValue": '["技术部","无"]',
+                        },
+                        {"fieldKey": "intro", "fieldLabel": "自我介绍", "fieldValue": "很长的正文"},
+                    ],
+                }
+            ],
+        }
+    )
+    page = await search_resumes(cycle_id=2)
+    assert page["total"] == 1
+    item = page["items"][0]
+    assert item["resumeId"] == 9 and item["major"] == "软件工程"
+    assert item["intendedDepartments"] == ["技术部"]
+    flat = str(page)
+    for leaked in ("张三", "zs@example.com", "88", "很长的正文"):
+        assert leaked not in flat
+
+
+@respx.mock
+async def test_get_recruit_statistics_is_cached_per_asker(mock_client: BackendClient) -> None:
+    """统计按来问者分键缓存:同一人 60 秒内复用,换个人(令牌)必须重新查。"""
+    respx.post(LOGIN).side_effect = login_ok()
+    list_route = respx.get(f"{BASE}/api/interview/result/list")
+    list_route.side_effect = lambda request: ok({"total": 0, "interviewResults": []})
+    respx.get(f"{BASE}/api/interview/evaluation/cycles/2/summary").side_effect = (
+        lambda request: ok({"candidates": []})
+    )
+    respx.get(f"{BASE}/api/resumes/search").side_effect = lambda request: ok(
+        {"content": [], "totalElements": 0}
+    )
+    async with asker_scope("token-a"):
+        await get_recruit_statistics(cycle_id=2)
+        await get_recruit_statistics(cycle_id=2)
+    assert list_route.call_count == 1
+    async with asker_scope("token-b"):
+        await get_recruit_statistics(cycle_id=2)
+    assert list_route.call_count == 2
 
 
 @respx.mock

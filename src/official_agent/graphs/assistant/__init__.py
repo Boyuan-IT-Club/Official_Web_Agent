@@ -36,6 +36,7 @@ from official_agent.config import get_effective_settings
 from official_agent.graphs.identity import ResolvedIdentity
 from official_agent.security.injection_guard import mount_input_guard
 from official_agent.tools import knowledge, readonly
+from official_agent.tools.envelope import mount_error_envelope
 
 _PROMPT_FILE = Path(__file__).parent.parent.parent / "prompts" / "assistant.md"
 
@@ -107,14 +108,16 @@ def assemble_tools(identity: ResolvedIdentity, user_token: str = "") -> list:
     """按 role 装配工具集(粗粒度三档)。
 
     get_my_interview 需要用户本人令牌:装配时闭包绑定,模型侧签名只剩
-    cycle_id——凭证不进模型可见面。
+    cycle_id——凭证不进模型可见面。每个工具外包两层:错误信封(tools/envelope.py)
+    与注入守卫。
     """
     names = _ROLE_TOOL_NAMES.get(identity.get("role", "unknown"), ())
     tools = []
     for name in names:
         raw = _bind_my_interview(user_token) if name == "get_my_interview" else _ALL_TOOLS[name]
-        # 工具返回出口统一过注入守卫(数据区标签+确定性扫描)
-        tools.append(mount_input_guard(raw))
+        # 先装信封(后端业务错误转成可行动结构,不让单个工具报错打断整轮),
+        # 再过注入守卫(数据区标签+确定性扫描)——守卫在外层,错误文案同样被包进数据区
+        tools.append(mount_input_guard(mount_error_envelope(raw)))
     return tools
 
 
