@@ -80,6 +80,11 @@ def web_no_real_pg(monkeypatch: pytest.MonkeyPatch) -> None:
     # ── 3) 路由侧 fail-closed 审计写入(adopt/reject 前置门)──
     monkeypatch.setattr("official_agent.state.audit.write_audit", lambda **_k: None)
 
+    # ── 4) 长期记忆:建表、召回、提取都会连 PG;路由测试一律关闭(记忆有专门用例)──
+    monkeypatch.setattr("official_agent.memory.store.ensure_memory_table", lambda: None)
+    monkeypatch.setattr("official_agent.memory.store.purge_expired", lambda: 0)
+    monkeypatch.setattr("official_agent.memory.recall.memory_enabled_for", lambda _i: False)
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _close_evaluation_pool():
@@ -87,7 +92,9 @@ def _close_evaluation_pool():
     退出会报 PythonFinalizationError(join at shutdown),显式关掉。"""
     yield
     from official_agent.kb import store as kb_store
+    from official_agent.state import pools
     from official_agent.state.evaluation import _connection
 
     _connection.reset_pool()
     kb_store.reset_pools()
+    pools.reset_pools()

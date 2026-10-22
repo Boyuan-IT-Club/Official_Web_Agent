@@ -37,6 +37,7 @@ from official_agent.graphs.assistant.compression import (
     summarize_messages,
 )
 from official_agent.graphs.identity import ResolvedIdentity
+from official_agent.memory import recall as memory_recall
 from official_agent.observability import langfuse_callbacks
 from official_agent.security.pii import ReplyPiiMasker
 from official_agent.state.threads import create_thread, new_thread_id, resolve_thread
@@ -487,14 +488,19 @@ async def _consume_model_stream(
     *,
     masker: ReplyPiiMasker | None,
     acc: _TurnAccum,
+    memories: list[str] | None = None,
 ) -> AsyncIterator[str]:
     """消费 astream 双模式流:吐 SSE 事件,就地更新 acc(回复/工具/引用/usage)。
 
     graph_input:新一轮是 {"messages": [...]};确认续跑是 Command(resume=...)。
+    memories:本轮召回的长期记忆,经运行时上下文进 system prompt(不进 checkpoint)。
     """
     last_usage: dict[str, int | None] | None = None
     async for mode, payload in agent.astream(
-        graph_input, config=config, stream_mode=["messages", "updates"]
+        graph_input,
+        config=config,
+        context={"memories": memories or []},
+        stream_mode=["messages", "updates"],
     ):
         if mode == "messages":
             chunk, _meta = payload
@@ -539,6 +545,50 @@ def _usage_out(usage_acc: dict[str, int | None]) -> dict[str, int | None]:
     if any(usage_acc.values()):
         return usage_acc
     return {k: None for k in usage_acc}
+
+
+#: 后台记忆提取任务的引用(create_task 返回值必须持有,否则可能被回收而中途取消)
+_background_tasks: set[asyncio.Task] = set()
+
+
+async def _schedule_memory_extraction(session: session_store.SessionState, config: dict) -> None:
+    """每隔几轮,把本会话里用户**本人的发言**交给记忆提取器(后台跑,不拖慢本轮)。
+
+    只取用户消息:助手回复与工具结果里是按本人权限查到的业务数据,不进记忆。
+    """
+    from official_agent.config import get_effective_settings
+    from official_agent.graphs.assistant import build_model
+    from official_agent.graphs.assistant.compression import is_summary_message
+    from official_agent.memory.extract import extract_and_store
+
+    identity = session.identity
+    if not memory_recall.memory_enabled_for(identity):
+        return
+    settings = await asyncio.to_thread(get_effective_settings)
+    every = max(int(settings.memory_extract_every_turns), 1)
+    if session.turns % every:
+        return
+    try:
+        state = await session.agent.aget_state(config)
+    except Exception:  # noqa: BLE001 — 记忆是增值能力,取不到上下文就跳过
+        logger.warning("记忆提取取会话状态失败(已跳过)", exc_info=True)
+        return
+    messages = (getattr(state, "values", None) or {}).get("messages") or []
+    user_said = [
+        m.content
+        for m in messages
+        if getattr(m, "type", None) == "human"
+        and isinstance(m.content, str)
+        and not is_summary_message(m)
+    ]
+    model = build_model(settings, model=settings.model_compress or None).bind(temperature=0)
+    task = asyncio.create_task(
+        extract_and_store(
+            int(identity.get("user_id") or 0), session.session_id, user_said, model=model
+        )
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 _CANCELLED_BY_NEW_MESSAGE = json.dumps(
@@ -681,8 +731,19 @@ async def _stream_turn(
                     async with asyncio.timeout(max(int(_settings.turn_wall_clock_timeout), 1)):
                         if resume is None and checkpointer is not None:
                             await _cancel_pending_confirmation(session.agent, config)
+                        # 长期记忆按本轮问题召回(确认续跑不是新问题,不召回);fail-open
+                        memories = (
+                            await memory_recall.recall_for(session.identity, message)
+                            if resume is None
+                            else []
+                        )
                         async for event in _consume_model_stream(
-                            session.agent, graph_input, config, masker=masker, acc=acc
+                            session.agent,
+                            graph_input,
+                            config,
+                            masker=masker,
+                            acc=acc,
+                            memories=memories,
                         ):
                             yield event
             except asyncio.CancelledError:
@@ -747,6 +808,9 @@ async def _stream_turn(
             prefix_hash=p_hash,
             compress_event=compress_event,
         )
+        # 记忆提取放在落账之后、done 之前触发(后台任务,不阻塞本轮收尾)
+        if error_code is None and acc.confirm is None and resume is None:
+            await _schedule_memory_extraction(session, config)
         if error_code is None:
             if acc.sources:
                 # 引用锚契约:delta 上新增可选 sources,不改消息 type 枚举——
@@ -993,6 +1057,10 @@ async def delete_my_session(
         try:
             await asyncio.to_thread(purge_thread_checkpoints, thread_id)
             await asyncio.to_thread(delete_thread_conversations, thread_id)
+            # 该会话里整理出的长期记忆一并删除:删会话即撤回这段对话的一切留存
+            from official_agent.memory import store as memory_store
+
+            await asyncio.to_thread(memory_store.delete_by_thread, int(user_id), thread_id)
         except Exception as exc:  # noqa: BLE001 — 删除不完整必须如实暴露
             raise HTTPException(
                 status_code=500, detail="会话数据清理失败,请稍后重试或联系管理员"

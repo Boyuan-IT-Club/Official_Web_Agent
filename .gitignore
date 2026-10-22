@@ -28,6 +28,8 @@ last_qbank_judge_report.json
 !evals/datasets/cv_dive_report.yaml
 # 评分门禁:合成简历,无真实学生数据
 !evals/datasets/scoring_probes.yaml
+# 记忆提取门禁:合成对话,无真实数据
+!evals/datasets/memory_probes.yaml
 # CV 深挖报告逐字引用简历原文(防编造设计使然),与样本同级敏感:整体忽略,
 # 防误 add 把 PII 带进仓库。
 evals/reports/cv_dive_report.md

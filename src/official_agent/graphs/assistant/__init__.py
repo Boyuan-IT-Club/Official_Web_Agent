@@ -27,9 +27,10 @@ system prompt 纪律:
 """
 
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import ModelRequest, dynamic_prompt
 from langchain_anthropic import ChatAnthropic
 from pydantic import SecretStr
 
@@ -282,6 +283,24 @@ def build_model(
     )
 
 
+class AssistantContext(TypedDict, total=False):
+    """每轮随调用传入的运行时上下文(不进 checkpoint)。memories:本轮召回的长期记忆。"""
+
+    memories: list[str]
+
+
+def _with_memories(base_prompt: str) -> Any:
+    """system prompt 中间件:静态 prompt 末尾拼上本轮召回的长期记忆(没有则原样)。"""
+    from official_agent.memory.recall import memory_section
+
+    @dynamic_prompt
+    def _prompt(request: ModelRequest) -> str:
+        context = getattr(request.runtime, "context", None) or {}
+        return base_prompt + memory_section(list(context.get("memories") or []))
+
+    return _prompt
+
+
 def build_assistant_agent(
     identity: ResolvedIdentity,
     user_token: str = "",
@@ -300,12 +319,17 @@ def build_assistant_agent(
     stream_usage:openai-compatible 端点只许 stream_options 随 stream=true 出现,
     非流式 ainvoke 调用方(如 eval runner)必须传 False。
     allow_write:装配写工具(仅官网 web 通道);没有 checkpointer 时强制关闭——
-    写操作要挂起等确认,挂不住就不该让模型看见写工具。"""
+    写操作要挂起等确认,挂不住就不该让模型看见写工具。
+    长期记忆经运行时上下文 context={"memories": [...]} 传入,由中间件拼在
+    system prompt 末尾(memory/recall.py);不传则与无记忆时完全一致。"""
     settings = get_effective_settings()
     writable = allow_write and checkpointer is not None
+    system_prompt = build_system_prompt(identity, allow_write=writable)
     return create_agent(
         build_model(settings, stream_usage=stream_usage),
         tools=assemble_tools(identity, user_token, allow_write=writable),
-        system_prompt=build_system_prompt(identity, allow_write=writable),
+        system_prompt=system_prompt,
+        middleware=[_with_memories(system_prompt)],
+        context_schema=AssistantContext,
         checkpointer=checkpointer,
     )

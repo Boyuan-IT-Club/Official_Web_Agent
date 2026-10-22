@@ -112,7 +112,8 @@ src/official_agent/
 │   ├── envelope.py         #   统一信封 {status: ok|error|unavailable, hint}
 │   ├── write.py            #   写工具(官网通道:确认卡片 → 指纹核对 → 意图审计 → 本人令牌执行 → 结果审计)
 │   └── knowledge.py        #   search_knowledge(知识库检索,降级契约)
-├── kb/                     # 知识库:chunking / embedding / schema / store
+├── kb/                     # 知识库:chunking / embedding / keywords(分词) / schema / store(混合检索)
+├── memory/                 # 长期记忆:store(agent_memory 表) / extract(后台提取+闸门) / recall(注入 system 末尾)
 ├── security/               # 横切:pii(脱敏)/ injection_guard(数据区+扫描)/ fabrication_guard
 ├── prompts/                # prompt 唯一权威(一图一节点一文件 + frontmatter,ADR-0004)
 ├── evals/                  # eval 集 + 统一 runner(python -m evals / evals/run_evals.py)

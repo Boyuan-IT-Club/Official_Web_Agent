@@ -88,6 +88,13 @@ class Settings(BaseSettings):
     context_compress_threshold_tokens: int = 24000
     context_recent_keep_messages: int = 12
 
+    # 长期记忆(memory/):管理员与社员跨会话记住偏好与事实。每隔几轮从用户本人的
+    # 发言里提取一次;召回条数;保质期(天)。memory_enabled=False 整体关闭
+    memory_enabled: bool = True
+    memory_extract_every_turns: int = 3
+    memory_recall_limit: int = 3
+    memory_ttl_days: int = 180
+
     # 初筛分级:同部门候选池内头部/尾部比例与小池阈值(见 evaluation/grading.py)
     evaluation_grade_top_ratio: float = 0.2
     evaluation_grade_bottom_ratio: float = 0.2
