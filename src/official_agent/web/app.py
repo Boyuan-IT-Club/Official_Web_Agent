@@ -66,6 +66,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "启动建表自举失败,降级为无 checkpointer(记忆/落账不可用)", exc_info=True
             )
             app.state.checkpointer = None
+        # 长期记忆表:单独 try——记忆是增值能力,建表失败(如 pgvector 扩展缺失)
+        # 只让记忆不可用,不能连带把 checkpointer 降级掉
+        try:
+            from official_agent.memory import store as memory_store
+
+            memory_store.ensure_memory_table()
+            memory_store.mark_ready()
+        except Exception:  # noqa: BLE001 — 记忆不可用不挡服务启动
+            logging.getLogger(__name__).warning(
+                "长期记忆表自举失败,记忆功能本次不可用", exc_info=True
+            )
         # 启动自动恢复:进程重启后,PG 里残留的 pending/running job
         # 由 lifespan 全量扫回并重派(超 10 分钟 + attempts 未满;达上限的
         # 转 failed 交人工)。失败 fail-open——PG 未起时跳过,下次重启再恢复。
@@ -106,15 +117,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         ttl_task = asyncio.create_task(_session_ttl_loop())
 
-        # 挂起载荷 24h TTL 清理 job(每 6h 一轮,fail-open)
+        # 挂起载荷 24h TTL + 长期记忆保质期清理 job(每 6h 一轮,fail-open)
         purge_stop = asyncio.Event()
 
         async def _purge_loop() -> None:
+            from official_agent.memory import store as memory_store
             from official_agent.state.pg import purge_expired_interrupts
 
             while not purge_stop.is_set():
                 with contextlib.suppress(Exception):
                     await asyncio.to_thread(purge_expired_interrupts, max_age_hours=24)
+                # 长期记忆超保质期清理(同一轮次,各自 fail-open)
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(memory_store.purge_expired)
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(purge_stop.wait(), timeout=6 * 3600)
 
@@ -187,6 +202,10 @@ def create_app() -> FastAPI:
     from official_agent.web.evaluation_admin import router as evaluation_admin_router
 
     app.include_router(evaluation_admin_router, prefix="/api/agent")
+
+    from official_agent.web.memory_routes import router as memory_router
+
+    app.include_router(memory_router, prefix="/api/agent")
 
     @app.get("/health")
     async def health() -> dict[str, str]:
