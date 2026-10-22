@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     embed_api_key: str = ""
     embed_model: str = ""
     embed_dim: int = 0  # 0=不校验;>0 时与端点返回维度强校验
+    # 知识库检索门槛:向量相似度低于 kb_min_score、且问题关键词字面命中比例低于
+    # kb_keyword_min_ratio 的块不返回。0.45 按 Qwen3-Embedding-0.6B 实测:
+    # 正例 top1 最低 0.54,明显无关的问题最高 0.45;换 embedding 模型须重校
+    kb_min_score: float = 0.45
+    kb_keyword_min_ratio: float = 0.5
 
     # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)
     postgres_url: str = "postgresql://localhost:5432/official_agent"

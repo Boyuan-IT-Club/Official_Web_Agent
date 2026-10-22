@@ -34,7 +34,16 @@ async def test_search_knowledge_ok_maps_hits() -> None:
     assert r["source_id"] == "kb_a1"
     assert r["title"] == "技术部介绍"
     assert r["heading"] == "技术部 > 职责"
-    assert len(r["snippet"]) <= 200  # 块截断
+    assert r["snippet"] == _hit().chunk_text  # 前两条给完整块
+
+
+async def test_search_knowledge_truncates_lower_ranked_hits() -> None:
+    hits = [_hit(source_id=f"kb_{i}") for i in range(4)]
+    with patch.object(knowledge.kb_store, "search", return_value=hits):
+        result = await knowledge.search_knowledge("技术部做什么")
+    lengths = [len(r["snippet"]) for r in result["results"]]
+    assert lengths[0] == lengths[1] == len(_hit().chunk_text)
+    assert lengths[2] <= 300 and lengths[3] <= 300
 
 
 async def test_search_knowledge_not_found(monkeypatch) -> None:

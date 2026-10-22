@@ -23,6 +23,14 @@ def _mock_conn(fetchone=None, fetchall=None, rowcount=1):
     return conn
 
 
+@pytest.fixture(autouse=True)
+def _fresh_schema_cache():
+    """建表结果按进程缓存;每个用例 patch 的 ensure 返回值不同,先清缓存。"""
+    store.reset_schema_cache()
+    yield
+    store.reset_schema_cache()
+
+
 def _source(**over) -> SourceInput:
     base = {
         "title": "技术部介绍",
@@ -207,51 +215,111 @@ def test_list_sources_applies_kind_and_keyword_filters() -> None:
 # ── 检索 ────────────────────────────────────────────────
 
 
-def test_search_excludes_test_and_disabled_by_default(monkeypatch) -> None:
-    conn = _mock_conn(
-        fetchall=[
-            {
-                "source_id": "kb_a",
-                "source_title": "标题",
-                "chunk_text": "片段",
-                "heading_path": "",
-                "score": 0.87,
-            }
-        ]
-    )
+def _patch_search(monkeypatch, conn, version=7) -> None:
     monkeypatch.setattr(store, "_conn", lambda: conn)
     monkeypatch.setattr(
         "official_agent.kb.store.current_embed_target", lambda: ("fake-model", 4)
     )
     monkeypatch.setattr(
         "official_agent.kb.store.ensure_kb_schema",
-        lambda conn, *, embed_model, dim: 7,
+        lambda conn, *, embed_model, dim: version,
     )
-    hits = store._search_sync([0.1, 0.2], top_k=4, include_test=False)
+
+
+def _row(source_id: str, score: float, matched: int = 0, ordinal: int = 0) -> dict:
+    return {
+        "source_id": source_id,
+        "source_title": f"标题{source_id}",
+        "chunk_text": "片段",
+        "heading_path": "",
+        "chunk_ordinal": ordinal,
+        "score": score,
+        "matched": matched,
+    }
+
+
+def test_search_excludes_test_and_disabled_by_default(monkeypatch) -> None:
+    conn = _mock_conn(fetchall=[_row("kb_a", 0.87)])
+    _patch_search(monkeypatch, conn)
+    hits = store._search_sync([0.1, 0.2], top_k=4, include_test=False, query="技术部做什么")
     assert len(hits) == 1
     assert hits[0].source_id == "kb_a" and hits[0].score == pytest.approx(0.87)
     sql = conn.execute.call_args.args[0]
     assert "kind = 'normal'" in sql  # test 条目隔离
     assert "s.enabled" in sql  # 停用退出生检索
-    assert "model_version = %s" in sql  # 禁跨模型混排
+    assert "model_version = %(version)s" in sql  # 禁跨模型混排
     params = conn.execute.call_args.args[1]
-    assert params[1] == 7  # version 过滤
-    assert params[3] == 4  # top_k
+    assert params["version"] == 7  # version 过滤
+    assert params["patterns"] == ["%技术部%"]  # 疑问词不进字面匹配
 
 
 def test_search_include_test_drops_kind_filter(monkeypatch) -> None:
+    conn = _mock_conn(fetchall=[])
+    _patch_search(monkeypatch, conn)
+    store._search_sync([0.1], top_k=2, include_test=True)
+    sql = conn.execute.call_args.args[0]
+    assert "kind = 'normal'" not in sql
+
+
+def test_schema_bootstrap_runs_once_per_process(monkeypatch) -> None:
+    """建表只在第一次检索时跑;之后的检索不再执行任何 DDL(no-op DDL 也持表锁)。"""
+    calls: list[int] = []
     conn = _mock_conn(fetchall=[])
     monkeypatch.setattr(store, "_conn", lambda: conn)
     monkeypatch.setattr(
         "official_agent.kb.store.current_embed_target", lambda: ("fake-model", 4)
     )
+
+    def _ensure(conn, *, embed_model, dim):
+        calls.append(1)
+        return 3
+
+    monkeypatch.setattr("official_agent.kb.store.ensure_kb_schema", _ensure)
+    for _ in range(3):
+        store._search_sync([0.1], top_k=2, include_test=False)
+    assert len(calls) == 1
+    # 换模型 → 重新建表(版本会 bump,缓存不能沿用)
     monkeypatch.setattr(
-        "official_agent.kb.store.ensure_kb_schema",
-        lambda conn, *, embed_model, dim: 7,
+        "official_agent.kb.store.current_embed_target", lambda: ("other-model", 4)
     )
-    store._search_sync([0.1], top_k=2, include_test=True)
-    sql = conn.execute.call_args.args[0]
-    assert "kind = 'normal'" not in sql
+    store._search_sync([0.1], top_k=2, include_test=False)
+    assert len(calls) == 2
+
+
+def test_fuse_drops_candidates_below_threshold() -> None:
+    """门槛生效:不相关的问题要能返回空表,「查不到」才可能被模型说出来。"""
+    rows = [_row("kb_a", 0.31), _row("kb_b", 0.28)]
+    assert store._fuse(rows, n_terms=2, top_k=4, min_score=0.45, keyword_min_ratio=0.5) == []
+
+
+def test_fuse_keyword_hit_rescues_low_vector_score() -> None:
+    """专有名词兜底:向量分不够,但问题关键词过半字面出现在块里,照样召回。"""
+    rows = [_row("kb_a", 0.40, matched=2), _row("kb_b", 0.42, matched=0)]
+    hits = store._fuse(rows, n_terms=3, top_k=4, min_score=0.45, keyword_min_ratio=0.5)
+    assert [h.source_id for h in hits] == ["kb_a"]
+    assert hits[0].keyword_score == pytest.approx(0.667)
+
+
+def test_fuse_rrf_prefers_hits_strong_on_both_arms() -> None:
+    """两路都靠前的块胜过只在一路第一的块。"""
+    rows = [
+        _row("vec_only", 0.80, matched=0),
+        _row("both", 0.78, matched=2),
+        _row("other", 0.70, matched=0),
+        _row("kw_only", 0.50, matched=3),
+    ]
+    hits = store._fuse(rows, n_terms=3, top_k=4, min_score=0.45, keyword_min_ratio=0.5)
+    assert hits[0].source_id == "both"
+
+
+def test_fuse_tiebreak_is_deterministic() -> None:
+    rows = [_row("kb_b", 0.6, ordinal=1), _row("kb_a", 0.6, ordinal=0)]
+    hits = store._fuse(rows, n_terms=0, top_k=2, min_score=0.0, keyword_min_ratio=0.5)
+    assert [h.source_id for h in hits] == ["kb_a", "kb_b"]
+
+
+def test_escape_like_neutralises_wildcards() -> None:
+    assert store._escape_like("100%_a\\b") == "100\\%\\_a\\\\b"
 
 
 def test_to_pgvector_format() -> None:

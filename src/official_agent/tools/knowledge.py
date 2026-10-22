@@ -4,7 +4,8 @@ docstring 契约(ADR-0003):写「何时用」+ 边界,docstring 即模型看到�
 
 降级契约:0 命中/服务不可用/EMBED 未配置都不抛异常——返回结构化
 状态由模型转述(查不到明说/引导官网),检索故障不阻塞对话。
-引用锚是 source_id+title(条目级);snippet 截断只供作答参考。
+引用锚是 source_id+title(条目级)。最相关的前两条给完整块(块本身不超过
+800 字),其余截短——前两条是作答主依据,截成 200 字常常把答案截掉。
 """
 
 from typing import Any
@@ -13,7 +14,8 @@ from official_agent.kb import store as kb_store
 from official_agent.kb.embedding import EmbeddingError
 
 _TOP_K = 4
-_SNIPPET_CHARS = 200
+_FULL_HITS = 2
+_SNIPPET_CHARS = 300
 
 _UNAVAILABLE = {
     "status": "unavailable",
@@ -32,6 +34,9 @@ async def search_knowledge(query: str) -> dict[str, Any]:
     「知识库里没有这部分,建议查看官网或报名说明」,绝不凭常识编造社团
     细节;status=unavailable 时如实说明检索暂不可用并引导官网。
     这里没有候选人个人数据(个人进度/面试安排走其他工具)。
+
+    query 要写成**不依赖上下文的完整问题**:用户追问「那它呢」「这个要多久」时,
+    把指代换成具体对象再查(如「媒体部的面试要多久」),否则检索不到。
 
     示例:search_knowledge(query="技术部主要负责什么")
     """
@@ -54,8 +59,8 @@ async def search_knowledge(query: str) -> dict[str, Any]:
                 "source_id": h.source_id,
                 "title": h.title,
                 "heading": h.heading_path or None,
-                "snippet": h.chunk_text[:_SNIPPET_CHARS],
+                "snippet": h.chunk_text if i < _FULL_HITS else h.chunk_text[:_SNIPPET_CHARS],
             }
-            for h in hits
+            for i, h in enumerate(hits)
         ],
     }

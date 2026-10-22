@@ -112,6 +112,7 @@ def default_registry() -> dict[str, SuiteSpec]:
         kb_probes,
         qbank_judge,
         qbank_probes,
+        scoring_probes,
         tool_selection,
     )
 
@@ -127,6 +128,9 @@ def default_registry() -> dict[str, SuiteSpec]:
         "qbank_judge": SuiteSpec(run=qbank_judge.run_suite, env_blocker=qbank_judge.env_blocker),
         "cv_dive_report": SuiteSpec(
             run=cv_dive_report.run_suite, env_blocker=cv_dive_report.env_blocker
+        ),
+        "scoring_probes": SuiteSpec(
+            run=scoring_probes.run_suite, env_blocker=scoring_probes.env_blocker
         ),
     }
 

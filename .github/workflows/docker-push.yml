@@ -142,7 +142,7 @@ jobs:
           host: ${{ secrets.DEPLOY_HOST_A }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          source: "deploy/*"
+          source: "deploy/*,evals/datasets/scoring_probes.yaml"
           target: "${{ env.DEPLOY_DIR }}"
           overwrite: true
           strip_components: 0
@@ -227,5 +227,13 @@ jobs:
             code=$(curl -s -o /dev/null -w '%{http_code}' -m 8 http://$AGENT_HOST:8001/api/agent/sessions)
             test "$code" = "401" || { echo "业务路由异常:/api/agent/sessions 返回 $code(预期 401)" >&2; exit 1; }
             echo "部署完成:${{ needs.build.outputs.version }}"
+
+            # 评分评测冒烟:CI 拿不到模型密钥,评分 prompt 只能在这里用生产配置跑真实
+            # 模型。只报告不回滚——模型输出有正常波动,不该因此撤掉一次健康的部署;
+            # 结果看本步骤日志。数据集随上一步同步到服务器(镜像里不带 evals/)。
+            echo "评分评测冒烟(只报告):"
+            $DC exec -T agent python -m official_agent.evals.scoring_probes /dev/stdin \
+              < ${{ env.DEPLOY_DIR }}/evals/datasets/scoring_probes.yaml \
+              || echo "::warning::评分评测未达门槛,请查看上方逐条结果"
 
             docker image prune -f --filter "until=168h" >/dev/null 2>&1 || true
