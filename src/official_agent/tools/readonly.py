@@ -49,6 +49,11 @@ async def asker_scope(token: str):
         _ASKER_TOKEN.reset(tok)
 
 
+def current_asker_token() -> str | None:
+    """本轮来问者本人的 JWT(写工具以本人身份执行要用);无作用域时为 None。"""
+    return _ASKER_TOKEN.get()
+
+
 async def _read(path: str, params: dict[str, Any] | None = None) -> Any:
     """只读 GET 的统一出口:以当前协程链的 asker 身份或服务账号单例取数。
 

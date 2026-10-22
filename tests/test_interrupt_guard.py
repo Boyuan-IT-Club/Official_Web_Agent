@@ -131,11 +131,11 @@ async def test_reject_resume_cancels() -> None:
 
 @pytest.mark.asyncio
 async def test_write_tool_outside_graph_fails_closed() -> None:
-    """非图上下文直接调写工具 → ConfirmationRequired(写路径 fail-closed)。"""
+    """非图上下文直接调写工具 → 不执行,返回 cancelled(写路径 fail-closed)。"""
     from official_agent.tools.write import assign_interview
 
-    with pytest.raises(ConfirmationRequired):
-        await assign_interview(resume_id=1, target_session_id=2)
+    result = await assign_interview(resume_id=1, target_session_id=2)
+    assert result["status"] == "cancelled"
 
 
 @pytest.mark.asyncio

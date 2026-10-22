@@ -19,16 +19,16 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import AIMessageChunk, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langgraph.types import Command
 from pydantic import BaseModel
 
 from official_agent.graphs.assistant import (
-    _ROLE_TOOL_NAMES,  # noqa: PLC2701 — 同模块装配表(prefix_hash 证据)
     build_assistant_agent,
     tool_roster,
 )
@@ -54,6 +54,11 @@ logger = logging.getLogger(__name__)
 _SESSION_RESUME_REJECT = "会话不存在、已结束或无权访问"
 
 
+def _build_web_agent(identity: ResolvedIdentity, *, user_token: str, checkpointer: Any) -> Any:
+    """官网通道的 agent:开放写工具(装配层再按角色/权限码/checkpointer 收紧)。"""
+    return build_assistant_agent(
+        identity, user_token=user_token, checkpointer=checkpointer, allow_write=True
+    )
 
 
 async def _get_or_create_session(
@@ -88,7 +93,7 @@ async def _get_or_create_session(
             # thread_id 不变(记忆在 checkpointer,agent 无会话态,ADR-0006 token 有生命周期)。
             if existing.user_token != user_token:
                 checkpointer = getattr(request.app.state, "checkpointer", None)
-                existing.agent = build_assistant_agent(
+                existing.agent = _build_web_agent(
                     identity, user_token=user_token, checkpointer=checkpointer
                 )
                 existing.user_token = user_token
@@ -118,9 +123,7 @@ async def _get_or_create_session(
                 raise HTTPException(
                     status_code=503, detail="会话恢复暂时不可用,请稍后重试"
                 )
-            agent = build_assistant_agent(
-                identity, user_token=user_token, checkpointer=checkpointer
-            )
+            agent = _build_web_agent(identity, user_token=user_token, checkpointer=checkpointer)
             session = session_store.SessionState(session_id, identity, user_token, agent)
             session.applied_config_fingerprint = await asyncio.to_thread(
                 agent_factory.config_fingerprint
@@ -145,7 +148,7 @@ async def _get_or_create_session(
 
         # checkpointer:进程级共享(app lifespan 建立,fail-open)。thread_id 隔离会话。
         checkpointer = getattr(request.app.state, "checkpointer", None)
-        agent = build_assistant_agent(identity, user_token=user_token, checkpointer=checkpointer)
+        agent = _build_web_agent(identity, user_token=user_token, checkpointer=checkpointer)
         session = session_store.SessionState(session_id, identity, user_token, agent)
         # 新建即记录当前配置指纹,避免首轮热生效比对误重建
         session.applied_config_fingerprint = await asyncio.to_thread(
@@ -178,7 +181,9 @@ async def chat(
 
     首次(session_id 空)→ 服务端生成 session_id 并随流返回;续传带原 session_id。
     SSE 事件(data 为 JSON):session(带 created) / delta(role,content) /
-    tool(role,name) / done / error(code,message)。
+    tool(role,name) / confirm(写操作待确认:summary,tool,fingerprint) / done /
+    error(code,message)。收到 confirm 后本轮结束,用户在卡片上的决定经
+    POST /chat/confirm 续跑;不确认直接发新消息 = 取消该操作。
     """
     identity, user_token = auth
     message = body.message.strip()
@@ -192,6 +197,54 @@ async def chat(
     checkpointer = getattr(request.app.state, "checkpointer", None)
     return StreamingResponse(
         _stream_turn(session, message, is_new, checkpointer),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+class ConfirmBody(BaseModel):
+    """POST /chat/confirm 入参:用户在确认卡片上的决定。
+
+    fingerprint 是确认卡片上带来的操作指纹(确认令牌):批准时必须与会话里
+    挂起的操作一致,旧卡片/篡改的请求在这里就被拒,工具侧还会再核一次。
+    """
+
+    session_id: str
+    decision: Literal["approve", "reject"]
+    fingerprint: str = ""
+
+
+@router.post("/chat/confirm")
+async def confirm(
+    request: Request,
+    body: ConfirmBody,
+    auth: Annotated[tuple[ResolvedIdentity, str], Depends(_authenticate)],
+) -> StreamingResponse:
+    """对挂起的写操作做出决定并续跑本轮(SSE 流,事件同 /chat)。
+
+    - 会话里没有待确认的操作 → 409(已处理、已被新消息取消、或从未挂起)
+    - 批准但指纹与挂起的操作不一致 → 409(确认卡片已过期)
+    """
+    identity, user_token = auth
+    checkpointer = getattr(request.app.state, "checkpointer", None)
+    if checkpointer is None:
+        raise HTTPException(status_code=503, detail="确认服务暂时不可用,请稍后重试")
+    session, _ = await _get_or_create_session(request, identity, user_token, body.session_id)
+    config = {"configurable": {"thread_id": session.session_id}}
+    pending = await _pending_confirmation(session.agent, config)
+    if pending is None:
+        raise HTTPException(status_code=409, detail="没有待确认的操作(可能已处理或已取消)")
+    if body.decision == "approve" and pending.get("fingerprint") != body.fingerprint:
+        raise HTTPException(status_code=409, detail="确认卡片已过期,请以最新的确认卡片为准")
+    verb = "确认执行" if body.decision == "approve" else "取消"
+    return StreamingResponse(
+        _stream_turn(
+            session,
+            f"[{verb}] {pending.get('summary', '')}",
+            False,
+            checkpointer,
+            resume={"decision": body.decision, "fingerprint": body.fingerprint},
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -353,6 +406,8 @@ class _TurnAccum:
             ("input_tokens", "output_tokens", "cache_hit_tokens", "cache_miss_tokens"), 0
         )
     )
+    # 本轮停在写操作确认处(interrupt 挂起):载荷原样给前端渲染确认卡片
+    confirm: dict[str, Any] | None = None
 
 
 def _feed_text_chunk(
@@ -397,6 +452,18 @@ def _drain_updates(payload: Any, acc: _TurnAccum) -> list[dict[str, Any]]:
     """updates 模式:收集 tool 事件载荷与 search_knowledge 引用锚。"""
     events: list[dict[str, Any]] = []
     for _ns, node_update in payload.items():
+        if _ns == "__interrupt__":
+            # 写工具挂起等确认:每个挂起点一张确认卡片(载荷已在工具侧脱敏)
+            for item in node_update or ():
+                value = getattr(item, "value", None)
+                if isinstance(value, dict) and value.get("confirm"):
+                    acc.confirm = {
+                        "summary": value.get("summary", ""),
+                        "tool": value.get("tool"),
+                        "fingerprint": value.get("fingerprint"),
+                    }
+                    events.append({"type": "confirm", **acc.confirm})
+            continue
         if not isinstance(node_update, dict):
             continue
         for m in node_update.get("messages") or []:
@@ -412,16 +479,19 @@ def _drain_updates(payload: Any, acc: _TurnAccum) -> list[dict[str, Any]]:
 
 async def _consume_model_stream(
     agent: Any,
-    messages: list,
+    graph_input: Any,
     config: dict,
     *,
     masker: ReplyPiiMasker | None,
     acc: _TurnAccum,
 ) -> AsyncIterator[str]:
-    """消费 astream 双模式流:吐 SSE 事件,就地更新 acc(回复/工具/引用/usage)。"""
+    """消费 astream 双模式流:吐 SSE 事件,就地更新 acc(回复/工具/引用/usage)。
+
+    graph_input:新一轮是 {"messages": [...]};确认续跑是 Command(resume=...)。
+    """
     last_usage: dict[str, int | None] | None = None
     async for mode, payload in agent.astream(
-        {"messages": messages}, config=config, stream_mode=["messages", "updates"]
+        graph_input, config=config, stream_mode=["messages", "updates"]
     ):
         if mode == "messages":
             chunk, _meta = payload
@@ -468,10 +538,60 @@ def _usage_out(usage_acc: dict[str, int | None]) -> dict[str, int | None]:
     return {k: None for k in usage_acc}
 
 
+_CANCELLED_BY_NEW_MESSAGE = json.dumps(
+    {"status": "cancelled", "message": "用户没有确认,而是发了新消息,该操作已取消,未执行"},
+    ensure_ascii=False,
+)
+
+
+async def _pending_confirmation(agent: Any, config: dict) -> dict[str, Any] | None:
+    """会话里挂起待确认的写操作载荷;没有则 None。"""
+    state = await agent.aget_state(config)
+    for item in getattr(state, "interrupts", None) or ():
+        value = getattr(item, "value", None)
+        if isinstance(value, dict) and value.get("confirm"):
+            return value
+    return None
+
+
+async def _cancel_pending_confirmation(agent: Any, config: dict) -> bool:
+    """用户没理确认卡片就发了新消息:把挂起的工具调用补成「已取消」,再开新一轮。
+
+    不补的话,挂起点上的 AI 消息带着没有结果的 tool_calls,下一次调模型会被
+    端点以「tool_calls 后必须跟工具结果」拒掉。以 tools 节点身份写入取消结果,
+    挂起随之解除,不多调一次模型。返回是否做了取消。
+    """
+    if await _pending_confirmation(agent, config) is None:
+        return False
+    state = await agent.aget_state(config)
+    messages = (getattr(state, "values", None) or {}).get("messages") or []
+    calls = getattr(messages[-1], "tool_calls", None) if messages else None
+    if not calls:
+        return False
+    await agent.aupdate_state(
+        config,
+        {
+            "messages": [
+                ToolMessage(_CANCELLED_BY_NEW_MESSAGE, tool_call_id=tc["id"], name=tc["name"])
+                for tc in calls
+            ]
+        },
+        as_node="tools",
+    )
+    return True
+
+
 async def _stream_turn(
-    session: session_store.SessionState, message: str, is_new: bool, checkpointer: Any = None
+    session: session_store.SessionState,
+    message: str,
+    is_new: bool,
+    checkpointer: Any = None,
+    *,
+    resume: dict[str, Any] | None = None,
 ) -> AsyncIterator[str]:
     """跑一轮:流式吐 SSE。is_new 仅作 SSE session 事件的 created 标记。
+
+    resume 给定 = 写操作确认续跑(message 只作日志里的人类可读记录)。
 
     编排序:锁 → 热生效 → session 事件 → 受闸流消费 → 守卫/尾冲 → 压缩 →
     落账 → sources/done(或 error)。每轮结束在 conversation_log 落一行:
@@ -488,7 +608,7 @@ async def _stream_turn(
     try:
         # 配置热生效:配置指纹变了 → 重建 agent(新 model/provider 立即作用于本轮)
         await agent_factory.ensure_fresh_agent(
-            session, checkpointer=checkpointer, build_agent=build_assistant_agent
+            session, checkpointer=checkpointer, build_agent=_build_web_agent
         )
         # 轮计数(1 起),压缩事件「触发轮」留痕用
         session.turns += 1
@@ -509,7 +629,11 @@ async def _stream_turn(
         # 身份/权限上下文已移入 system prompt(build_system_prompt),
         # 不再作为首条用户消息注入——checkpointer 不再存内部指令,历史回看
         # 不会把它渲染成用户气泡。直接以用户原文开轮。
-        messages: list = [HumanMessage(content=message)]
+        graph_input: Any = (
+            Command(resume=resume)
+            if resume is not None
+            else {"messages": [HumanMessage(content=message)]}
+        )
 
         # 首事件 session(带 created 标记新/续传)
         yield _sse({"type": "session", "session_id": session.session_id, "created": is_new})
@@ -552,8 +676,10 @@ async def _stream_turn(
                     )
                 else:
                     async with asyncio.timeout(max(int(_settings.turn_wall_clock_timeout), 1)):
+                        if resume is None and checkpointer is not None:
+                            await _cancel_pending_confirmation(session.agent, config)
                         async for event in _consume_model_stream(
-                            session.agent, messages, config, masker=masker, acc=acc
+                            session.agent, graph_input, config, masker=masker, acc=acc
                         ):
                             yield event
             except asyncio.CancelledError:
@@ -599,11 +725,14 @@ async def _stream_turn(
         # 在 done 事件前执行:失败 fail-open 返回 None,不阻断 done。
         # 失败/超时/断连轮次不压缩——失败轮的残缺上下文不值得进摘要。
         compress_event = None
-        if error_code is None:
+        # 停在确认处时不压缩:挂起点的 tool_calls 还没有结果,改写消息会破坏恢复
+        if error_code is None and acc.confirm is None:
             compress_event = await _compress_if_needed(session, config, message)
-        role = session.identity.get("role") or "unknown"
-        tool_names = list(_ROLE_TOOL_NAMES.get(role, ()))
-        p_hash = telemetry.prefix_hash(build_system_prompt(session.identity), tool_names)
+        writable = checkpointer is not None
+        tool_names = tool_roster(session.identity, allow_write=writable)
+        p_hash = telemetry.prefix_hash(
+            build_system_prompt(session.identity, allow_write=writable), tool_names
+        )
         telemetry.log_conversation(
             session,
             user_message=message,

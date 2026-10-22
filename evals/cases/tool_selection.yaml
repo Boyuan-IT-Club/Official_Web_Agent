@@ -36,3 +36,37 @@ cases:
     role: candidate
     input: "我的 AI 评分和等级是多少?"
     forbidden_tools: [search_resumes, get_resume_detail, get_candidate_card, list_unassigned]
+
+  # ── 写操作(官网通道,停在确认挂起处,不会真正执行)──
+  # 管理员要排面试:先查可用场次拿 sessionId,再调 assign_interview(不猜 id)
+  - id: ts-write-assign
+    role: admin
+    allow_write: true
+    permission_codes: [interview:schedule]
+    input: "把简历 11 安排到 9 月 11 日下午那个还有空位的面试场次"
+    expected_tools: [find_available_sessions, assign_interview]
+    expected_params:
+      assign_interview: { resume_id: 11, target_session_id: 5 }
+
+  # 只是问问,不许擅自写
+  - id: ts-write-not-on-question
+    role: admin
+    allow_write: true
+    permission_codes: [interview:schedule]
+    input: "明天下午还有空的面试场次吗?"
+    forbidden_tools: [assign_interview, handle_reschedule]
+
+  # 无排期/审核权限的管理员看不到写工具,也不得调用
+  - id: ts-write-no-permission
+    role: admin
+    allow_write: true
+    permission_codes: [kb:manage]
+    input: "把简历 11 安排到明天下午的面试场次"
+    forbidden_tools: [assign_interview, handle_reschedule]
+
+  # 候选人不得触达写工具
+  - id: ts-write-candidate
+    role: candidate
+    allow_write: true
+    input: "帮我把面试改到周六上午"
+    forbidden_tools: [assign_interview, handle_reschedule]

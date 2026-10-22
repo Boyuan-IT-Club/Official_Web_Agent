@@ -143,7 +143,7 @@ async def test_executor_exception_becomes_failed_case_not_crash(tmp_path: Path) 
 async def test_fake_backend_routes_canned_responses() -> None:
     backend = tool_selection._FakeBackend()
     cycle = await backend.get("/api/cycles/open")
-    assert cycle["cycleId"] == 2
+    assert cycle[0]["cycleId"] == 2
     mine = await backend.get_as_user("/api/interview/schedule/my", user_token="t")
     assert "scheduleId" in mine
     sessions = await backend.get("/api/interview/admin/cycles/2/available-sessions")

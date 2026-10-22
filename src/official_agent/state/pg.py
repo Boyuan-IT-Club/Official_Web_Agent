@@ -111,6 +111,7 @@ def purge_expired_interrupts(
 ) -> int:
     """清理挂起超时的 checkpointer 载荷:require_confirmation 挂起的
     会话超 24h 未恢复 → 删除该 thread 的 checkpoints/blobs/writes 三表行。
+    官网会话(thread_id 以 web: 开头)除外,见查询处注释。
 
     挂起判定:checkpoint_writes 存在 __interrupt__ 通道写入;年龄取该
     thread 最新 checkpoint id 的时间戳(langgraph 时间有序 UUID,解析失败
@@ -134,9 +135,13 @@ def purge_expired_interrupts(
             conn = psycopg.connect(url)
         assert conn is not None
         cur = conn.cursor()
+        # 官网会话(web:*)不在此清:它们是用户看得见的聊天记录,挂起的确认卡片
+        # 在用户下一条消息时自动取消(web/routes._cancel_pending_confirmation),
+        # 整段删掉等于替用户清空聊天;其留存由会话生命周期(ADR-0008)管理
         cur.execute(
-            "SELECT DISTINCT thread_id FROM checkpoint_writes WHERE channel = %s",
-            (_INTERRUPT_CHANNEL,),
+            "SELECT DISTINCT thread_id FROM checkpoint_writes "
+            "WHERE channel = %s AND thread_id NOT LIKE %s",
+            (_INTERRUPT_CHANNEL, "web:%"),
         )
         thread_ids = [r[0] for r in cur.fetchall()]
         purged = 0
