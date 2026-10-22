@@ -1,8 +1,16 @@
 """会话压缩:超阈值后摘要回写,注入侧只喂「摘要 + 近几轮」。
 
 策略:感知查询意图的批量摘要
-(ContextAware + citations)+ tiktoken 强计数,摘要走 model_light、
-temperature 0(reasoning-safe:确定性输出,不引入创造性漂移)。
+(ContextAware + citations)+ tiktoken 强计数,temperature 0(reasoning-safe:
+确定性输出,不引入创造性漂移)。摘要模型由 model_compress 配置,缺省同主模型。
+
+滚动摘要:第二次及以后的压缩,上一份摘要不再当成一条普通旧消息重新概括
+(每压一次就再损失一层细节),而是作为「已有摘要」单独交给摘要器,只把新增
+的旧消息并进去。摘要固定带「关键事实」段,周期/简历/场次编号等原样保留。
+
+摘要消息的身份:以 HumanMessage 承载(部分模型端点只接受首条 system),但带
+history_summary 标记——该标记只存 checkpoint、不发给模型;历史回看据此跳过,
+不把摘要当成用户自己说的话展示出来。
 
 回写与全量可回溯:压缩结果经 update_state 写成 checkpoint 新版本
 (先 REMOVE_ALL_MESSAGES 再加「摘要 + 近几轮」);PostgresSaver 不删
@@ -33,6 +41,13 @@ DEFAULT_RECENT_KEEP = 12
 SUMMARY_MAX_TOKENS = 1024
 # 压缩熔断器(ADR-0004):连续 N 次失败即停,降级并告警(人工从日志发现)
 _MAX_CONSECUTIVE_FAILURES = 3
+
+#: 摘要消息的标记键(additional_kwargs 里):回看投影与滚动摘要靠它识别
+SUMMARY_FLAG = "history_summary"
+#: 摘要消息正文前缀:告诉模型这是系统生成的摘要,不是用户本轮的话
+SUMMARY_PREFIX = "[历史摘要:系统根据较早的对话生成,不是用户本轮的发言]"
+#: 旧版摘要前缀(标记出现之前写进 checkpoint 的摘要),滚动时同样识别
+_LEGACY_PREFIX = "[历史摘要]"
 
 _ENCODING: Any = None
 
@@ -121,21 +136,50 @@ async def maybe_compress(
     )
 
 
+def is_summary_message(message: BaseMessage) -> bool:
+    """是否压缩产出的摘要消息(含标记出现之前的旧版摘要)。"""
+    if (getattr(message, "additional_kwargs", None) or {}).get(SUMMARY_FLAG):
+        return True
+    return message.type == "human" and _content_text(message).startswith(_LEGACY_PREFIX)
+
+
+def _summary_body(message: BaseMessage) -> str:
+    text = _content_text(message)
+    for prefix in (SUMMARY_PREFIX, _LEGACY_PREFIX):
+        if text.startswith(prefix):
+            return text[len(prefix) :].strip()
+    return text.strip()
+
+
+def summary_message(summary: str) -> HumanMessage:
+    """包装摘要正文为带标记的消息(压缩后序列的首条)。"""
+    return HumanMessage(
+        content=f"{SUMMARY_PREFIX}\n{summary}", additional_kwargs={SUMMARY_FLAG: True}
+    )
+
+
 async def summarize_messages(older: Sequence[BaseMessage], query: str, model: Any) -> HumanMessage:
     """生成摘要消息:感知当前查询意图(ContextAware)+ [T#] 引用标记。
 
-    引用编号按传入顺序 T1..Tn 对应 older 消息,便于排查时回溯原文
-    (checkpointer 全量可查)。prompt 来自 prompts/compression.md(ADR-0004
-    版本化;{query}/{numbered} 占位符由代码填充),输出为 [历史摘要] 前缀的
-    HumanMessage,作为压缩后序列首条注入。
+    引用编号按传入顺序 T1..Tn 对应**新增**旧消息,便于排查时回溯原文
+    (checkpointer 全量可查)。older 首条若是上一份摘要,作为「已有摘要」单独
+    交给摘要器合并,不参与编号(滚动摘要,见模块说明)。prompt 来自
+    prompts/compression.md(ADR-0004 版本化;{query}/{previous}/{numbered}
+    占位符由代码填充)。
     """
+    previous = ""
+    rest = list(older)
+    if rest and is_summary_message(rest[0]):
+        previous = _summary_body(rest[0])
+        rest = rest[1:]
     numbered = "\n".join(
-        f"[T{i}] {type(m).__name__}: {_content_text(m)}" for i, m in enumerate(older, start=1)
+        f"[T{i}] {type(m).__name__}: {_content_text(m)}" for i, m in enumerate(rest, start=1)
     )
-    prompt = load_prompt("compression.md").format(query=query or "未提供", numbered=numbered)
+    prompt = load_prompt("compression.md").format(
+        query=query or "未提供", previous=previous or "(无,这是第一次压缩)", numbered=numbered
+    )
     response = await model.ainvoke(prompt)
-    summary = _content_text(response).strip()
-    return HumanMessage(content=f"[历史摘要]\n{summary}")
+    return summary_message(_content_text(response).strip())
 
 
 # ── 压缩熔断器(ADR-0004:连续 N 次压缩失败即停,降级并告警) ─────────────

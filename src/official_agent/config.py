@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     model_light: str = "claude-haiku-4-5-20251001"  # 降档预留;当前无消费方
     model_strong: str = "claude-sonnet-5"
+    # 会话压缩摘要用的模型;空 = 同 model_strong。改成便宜模型前必须先跑
+    # evals/benchmarks/compress_benchmark.py 证明压缩后可答性不降(ADR-0004)
+    model_compress: str = ""
 
     # Embedding:独立配置组,与 build_model 平行,不塞 llm_base_url——
     # 密钥只存 env 不入库,HOT_KEYS 仅收对话模型路由的键。
