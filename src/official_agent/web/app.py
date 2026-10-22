@@ -134,6 +134,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     await asyncio.wait_for(purge_stop.wait(), timeout=6 * 3600)
 
         purge_task = asyncio.create_task(_purge_loop())
+
+        # 初筛 job 后台领取循环:多副本分摊、提交后崩溃留下的 job 不必等重启
+        claim_stop = asyncio.Event()
+        claim_task: asyncio.Task | None = None
+        claim_interval = int(get_settings().evaluation_claim_interval_seconds)
+        if claim_interval > 0 and getattr(app.state, "checkpointer", None) is not None:
+            from official_agent.evaluation.runner import claim_loop
+
+            claim_task = asyncio.create_task(
+                claim_loop(claim_stop, interval_seconds=claim_interval)
+            )
         try:
             yield
         finally:
@@ -141,6 +152,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             ttl_task.cancel()
             purge_stop.set()
             purge_task.cancel()
+            claim_stop.set()
+            if claim_task is not None:
+                claim_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, TimeoutError):
                 await ttl_task
             with contextlib.suppress(asyncio.CancelledError, TimeoutError):

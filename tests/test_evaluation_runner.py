@@ -21,6 +21,12 @@ from official_agent.tools.readonly import set_backend_client
 
 BASE = "http://backend.test"
 
+
+@pytest.fixture(autouse=True)
+def _claim_always_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """执行前的原子领取缺省视为领到;专门测领取语义的用例自己覆盖。"""
+    monkeypatch.setattr(ev_runner.evaluation, "claim_job", lambda job_id: True)
+
 # ── store 层(mock 连接) ────────────────────────────────
 
 
@@ -165,7 +171,7 @@ async def test_run_job_success_marks_succeeded(monkeypatch) -> None:
         patch("official_agent.state.conversation.write_conversation", lambda **k: None),
     ):
         await runner._run_job(1, 2026, trigger_user_id=9)
-    assert seen["marks"] == ["running", "succeeded"]
+    assert seen["marks"] == ["succeeded"]  # running 由原子领取(claim_job)写入
     assert seen["resume_id"] == 99  # 以取回的 resumeId 为准(job 存的是取数键)
     assert seen["saved"] == (99, 66.0)
     # 接线:github_key 从档案取、GITHUB_TOKEN 从 settings 传参进 bundle
@@ -234,7 +240,9 @@ async def test_recover_stale_dispatches_with_original_cycle(monkeypatch) -> None
     dispatched: list[tuple[int, int]] = []
     spawned: list = []
 
-    async def _record_run(self, job_id: int, cycle_id: int, *, trigger_user_id: int) -> None:
+    async def _record_run(
+        self, job_id: int, cycle_id: int, *, trigger_user_id: int, claimed: bool = False
+    ) -> None:
         dispatched.append((job_id, cycle_id))
 
     monkeypatch.setattr(ev_runner.evaluation, "requeue_stale_all_cycles", lambda **k: rows)
@@ -253,7 +261,7 @@ async def test_try_dispatch_dedupes_until_completion(monkeypatch) -> None:
     started = asyncio.Event()
     release = asyncio.Event()
 
-    async def _fake_run(self, job_id, cycle_id, *, trigger_user_id) -> None:
+    async def _fake_run(self, job_id, cycle_id, *, trigger_user_id, claimed=False) -> None:
         started.set()
         await release.wait()
 
@@ -276,7 +284,7 @@ async def test_submit_double_click_runs_job_once(monkeypatch) -> None:
     runs: list[int] = []
     release = asyncio.Event()
 
-    async def _record_run(self, job_id, cycle_id, *, trigger_user_id) -> None:
+    async def _record_run(self, job_id, cycle_id, *, trigger_user_id, claimed=False) -> None:
         runs.append(job_id)
         # 模拟慢 job:第二次提交到达时第一次仍在执行
         await release.wait()
@@ -368,7 +376,7 @@ async def test_failure_marks_full_timeline_and_audits() -> None:
         patch.object(ev_runner.asyncio, "to_thread", _fake_to_thread([])),
     ):
         await runner._run_job(1, 2026, trigger_user_id=9)
-    assert [m[0] for m in marks] == ["running", "failed"]
+    assert [m[0] for m in marks] == ["failed"]  # running 由原子领取写入,不经 mark_job
     assert audit_calls == ["scorecard_generated"] or audit_calls == []  # 失败路径无完成审计
     assert marks[-1][0] == "failed"
 
@@ -498,8 +506,7 @@ async def test_run_job_masks_pii_before_models(monkeypatch, caplog) -> None:
         caplog.at_level(_logging.WARNING, logger="official_agent.evaluation.runner"),
     ):
         await runner._run_job(1, 2026, trigger_user_id=9)
-    assert seen["marks"][0] == ("running", {})
-    assert seen["marks"][1][0] == "succeeded", f"job 不应走失败路径:{seen['marks']}"
+    assert seen["marks"][0][0] == "succeeded", f"job 不应走失败路径:{seen['marks']}"
 
     joined_scoring = " ".join(seen["scoring"])
     joined_qbank = " ".join(seen["qbank"])
@@ -755,3 +762,74 @@ def test_extract_grade_ignores_non_grade_fields() -> None:
         {"fieldKey": "major", "fieldLabel": "专业", "fieldType": "text", "fieldValue": "软件工程"},
     ]
     assert ev_runner._extract_grade(simple) == ""
+
+
+# ── 原子领取与后台领取循环 ─────────────────────────────
+
+
+async def test_job_claimed_elsewhere_is_skipped(monkeypatch) -> None:
+    """领不到(别的副本/重复派发已领走)→ 直接放弃,不取数、不评分。"""
+    fetched: list = []
+    monkeypatch.setattr(ev_runner.evaluation, "claim_job", lambda job_id: False)
+    monkeypatch.setattr(
+        ev_runner.evaluation, "get_job", lambda jid: {"job_id": jid, "user_id": 1, "resume_id": 9}
+    )
+
+    async def _fetch(*a, **k):
+        fetched.append(a)
+        raise AssertionError("领不到的 job 不得执行")
+
+    monkeypatch.setattr(ev_runner, "fetch_scoring_fields", _fetch)
+    await EvaluationRunner()._execute_job(5, 2026, trigger_user_id=0)
+    assert fetched == []
+
+
+async def test_claim_once_dispatches_claimed_job(monkeypatch) -> None:
+    runner = EvaluationRunner()
+    dispatched: list = []
+    monkeypatch.setattr(
+        ev_runner.evaluation,
+        "claim_next_pending",
+        lambda **k: {"job_id": 11, "cycle_id": 2026},
+    )
+    monkeypatch.setattr(
+        runner,
+        "_try_dispatch",
+        lambda job_id, cycle_id, *, trigger_user_id, claimed=False: dispatched.append(
+            (job_id, cycle_id, claimed)
+        )
+        or True,
+    )
+    assert await ev_runner._claim_once(runner) is True
+    assert dispatched == [(11, 2026, True)]  # 已领取,执行时不再领一次
+
+
+async def test_claim_once_releases_when_already_inflight(monkeypatch) -> None:
+    """领到的 job 恰好本进程已在跑:退回 pending,不留一条没人执行的 running。"""
+    runner = EvaluationRunner()
+    released: list = []
+    monkeypatch.setattr(
+        ev_runner.evaluation, "claim_next_pending", lambda **k: {"job_id": 11, "cycle_id": 1}
+    )
+    monkeypatch.setattr(ev_runner.evaluation, "release_claim", lambda jid: released.append(jid))
+    monkeypatch.setattr(runner, "_try_dispatch", lambda *a, **k: False)
+    assert await ev_runner._claim_once(runner) is False
+    assert released == [11]
+
+
+async def test_claim_once_respects_capacity_and_excludes_own(monkeypatch) -> None:
+    runner = EvaluationRunner()
+    seen: dict = {}
+
+    def _claim(**kwargs):
+        seen.update(kwargs)
+        return None
+
+    monkeypatch.setattr(ev_runner.evaluation, "claim_next_pending", _claim)
+    runner._inflight.update({1, 2})
+    assert await ev_runner._claim_once(runner) is False
+    assert sorted(seen["exclude"]) == [1, 2]  # 不抢本进程已排队的
+    runner._inflight.update(range(100, 100 + ev_runner._MAX_CONCURRENCY))
+    seen.clear()
+    assert await ev_runner._claim_once(runner) is False
+    assert seen == {}  # 满载时不去领
