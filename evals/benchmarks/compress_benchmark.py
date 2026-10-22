@@ -3,6 +3,8 @@
 对照两种候选策略在同一长会话上的「压缩后可答性」:
 - S0 naive-truncate:直接丢弃 older,只保留近几轮(无摘要)
 - S1 context-aware:ContextAware 摘要 + [T#] 引用(线上采用的策略)
+- S2 rolling-twice:同一会话压缩两次(先压前半段,再连同上一份摘要压后续),
+  考察最早段的事实能否熬过多轮压缩——长会话的真实形态
 
 流程:构造含可回收事实的长会话 → 各策略压缩 → 强模型分别回答 3 个探针问题
 (前 2 个答案在被压缩掉的 older 段,后 1 个在保留的近轮)→ 强模型按
@@ -111,6 +113,15 @@ async def _context_aware(messages: list[BaseMessage], model: Any) -> list[BaseMe
     return [summary, *messages[-6:]]
 
 
+async def _rolling_twice(messages: list[BaseMessage], model: Any) -> list[BaseMessage]:
+    half = len(messages) // 2
+    first = await summarize_messages(messages[:half], query="压缩后继续客服对话", model=model)
+    second = await summarize_messages(
+        [first, *messages[half:-6]], query="压缩后继续客服对话", model=model
+    )
+    return [second, *messages[-6:]]
+
+
 async def main() -> None:
     from official_agent.graphs.assistant import build_model
 
@@ -123,6 +134,7 @@ async def main() -> None:
     strategies = {
         "S0 naive-truncate": _naive_truncate(convo),
         "S1 context-aware": await _context_aware(convo, model),
+        "S2 rolling-twice": await _rolling_twice(convo, model),
     }
 
     totals = {name: 0 for name in strategies}

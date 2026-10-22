@@ -361,9 +361,12 @@ async def _compress_if_needed(
         if not messages:
             return None
         settings = await asyncio.to_thread(get_effective_settings)
-        # 摘要用 strong 模型(ADR-0004「压缩即理解」,降 light 须 eval 证明);
+        # 摘要缺省用 strong 模型(ADR-0004「压缩即理解」);model_compress 可改配
+        # 更便宜的模型,但须先用 evals/benchmarks/compress_benchmark.py 证明可答性不降;
         # 温度 0 + 输出预算 = reasoning-safe
-        summarizer = build_model(settings).bind(temperature=0, max_tokens=SUMMARY_MAX_TOKENS)
+        summarizer = build_model(settings, model=settings.model_compress or None).bind(
+            temperature=0, max_tokens=SUMMARY_MAX_TOKENS
+        )
         result = await maybe_compress(
             messages,
             summarize_fn=lambda older, query: summarize_messages(older, query, summarizer),
@@ -856,11 +859,16 @@ async def get_admin_conversation_detail(
 def _project_messages(raw_messages: list) -> list[dict[str, str]]:
     """checkpointer 消息 → [{role, content}]:只保留 user/assistant 文本。
 
-    工具调用中间态(tool/system/空内容)不进回看面——原文回看是给「人读对话」,
-    不是调试轨迹(轨迹走 Langfuse)。
+    工具调用中间态(tool/system/空内容)与压缩摘要不进回看面——原文回看是给
+    「人读对话」,不是调试轨迹(轨迹走 Langfuse)。
     """
+    from official_agent.graphs.assistant.compression import is_summary_message
+
     out: list[dict[str, str]] = []
     for m in raw_messages or []:
+        # 压缩摘要不是用户说的话:回看面不展示(否则会以用户气泡出现)
+        if is_summary_message(m):
+            continue
         role = getattr(m, "type", None)
         if role == "human":
             role = "user"

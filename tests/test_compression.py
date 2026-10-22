@@ -148,13 +148,51 @@ async def test_summarize_messages_prompt_intent_and_citations() -> None:
     assert "[T1]" in prompt and "[T2]" in prompt  # 逐条编号
     assert "面试结果怎么算" in prompt  # 感知当前查询意图
     assert "我的面试安排是什么" in prompt  # 原文进 prompt
-    # 回写消息:摘要 + 保留引用标记
+    # 回写消息:带标记的摘要 + 保留引用标记
     assert isinstance(result, HumanMessage)
-    assert result.content.startswith("[历史摘要]")
+    assert result.content.startswith("[历史摘要")
+    assert result.additional_kwargs.get("history_summary") is True
+    assert "不是用户本轮的发言" in result.content  # 告诉模型这不是用户说的
     assert "[T1]" in result.content
 
 
 def test_summarize_messages_sync_entry() -> None:
     model = _FakeModel()
     result = asyncio.run(summarize_messages([HumanMessage(content="q")], query="意图", model=model))
-    assert result.content.startswith("[历史摘要]")
+    assert result.content.startswith("[历史摘要")
+
+
+async def test_rolling_summary_merges_previous_instead_of_renumbering() -> None:
+    """第二次压缩:上一份摘要作为「已有摘要」单独给摘要器,不再被当成 T1 重新概括。"""
+    from official_agent.graphs.assistant.compression import summary_message
+
+    model = _FakeModel()
+    previous = summary_message("关键事实:周期 2,简历 #9\n对话要点:用户在排面试")
+    older = [previous, HumanMessage(content="改到周六"), AIMessage(content="已查到周六场次")]
+    await summarize_messages(older, query="排面试", model=model)
+    prompt = model.prompts[0]
+    assert "已有摘要:\n关键事实:周期 2,简历 #9" in prompt
+    assert "[T1] HumanMessage: 改到周六" in prompt  # 新增消息从 T1 编号
+    assert "[T2] AIMessage: 已查到周六场次" in prompt  # 旧摘要不占编号
+
+
+async def test_legacy_summary_is_recognised_for_rolling() -> None:
+    """标记出现之前写进 checkpoint 的旧版摘要同样按「已有摘要」处理。"""
+    model = _FakeModel()
+    older = [HumanMessage(content="[历史摘要]\n旧摘要内容"), HumanMessage(content="新问题")]
+    await summarize_messages(older, query="", model=model)
+    assert "已有摘要:\n旧摘要内容" in model.prompts[0]
+
+
+def test_history_projection_hides_summary_message() -> None:
+    """回看面不展示压缩摘要(否则会以用户气泡出现)。"""
+    from official_agent.graphs.assistant.compression import summary_message
+    from official_agent.web.routes import _project_messages
+
+    projected = _project_messages(
+        [summary_message("摘要"), HumanMessage(content="你好"), AIMessage(content="你好呀")]
+    )
+    assert projected == [
+        {"role": "user", "content": "你好"},
+        {"role": "assistant", "content": "你好呀"},
+    ]
