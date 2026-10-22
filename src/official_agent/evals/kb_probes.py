@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -58,7 +59,9 @@ async def run_suite(
                 status="SKIP",
                 notes=[f"kb.store 不可导入({exc}),本分支不跑 KB 门禁"],
             )
-        search = kb_search
+        # 门禁量的是原始相似度分布(阈值校准依据),关掉检索门槛:
+        # 开着门槛时负例直接返回空,分布就看不到了
+        search = functools.partial(kb_search, min_score=0.0)
 
     data = _load_yaml(path)
     defaults = data.get("defaults", {})

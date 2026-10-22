@@ -6,6 +6,9 @@ Anthropic 无 embedding → 托管中文模型(Qwen3-Embedding-0.6B/BGE-M3 等);
 端点与维度落在 kb_meta(schema.py),换模型 = 全量 reindex。
 """
 
+import asyncio
+import weakref
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 
 import httpx
@@ -24,6 +27,42 @@ class EmbeddingNotConfiguredError(EmbeddingError):
     """EMBED_* 未配置——检查点①:需用户提供托管 embedding 端点。"""
 
 
+#: 每个事件循环一个共享客户端:检索每次都要算一次问题向量,复用连接省掉
+#: 握手。按循环区分是因为客户端绑定创建它的循环,测试里每个用例一个新循环。
+_clients: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _client() -> httpx.AsyncClient:
+    loop = asyncio.get_running_loop()
+    client = _clients.get(loop)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(timeout=30)
+        _clients[loop] = client
+    return client
+
+
+#: 问题向量缓存:同一个问题(常见问题被反复问)不重复调 embedding 端点。
+#: 键含模型名,换模型后旧向量自然失效。
+_QUERY_CACHE_MAX = 256
+_query_cache: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
+
+
+async def embed_query(text: str) -> list[float]:
+    """单条问题向量(带 LRU 缓存)。检索路径用它;入库走 embed_texts 批量接口。"""
+    key = (get_settings().embed_model, text.strip())
+    cached = _query_cache.get(key)
+    if cached is not None:
+        _query_cache.move_to_end(key)
+        return cached
+    vector = (await embed_texts([text]))[0]
+    _query_cache[key] = vector
+    if len(_query_cache) > _QUERY_CACHE_MAX:
+        _query_cache.popitem(last=False)
+    return vector
+
+
 async def embed_texts(texts: list[str]) -> list[list[float]]:
     """批量嵌入,返回与输入等长且保序的向量列表。
 
@@ -39,12 +78,11 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
     base = settings.embed_base_url.rstrip("/")
     url = base if base.endswith("/embeddings") else f"{base}/embeddings"
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                url,
-                headers={"Authorization": f"Bearer {settings.embed_api_key}"},
-                json={"model": settings.embed_model, "input": texts},
-            )
+        resp = await _client().post(
+            url,
+            headers={"Authorization": f"Bearer {settings.embed_api_key}"},
+            json={"model": settings.embed_model, "input": texts},
+        )
     except httpx.HTTPError as exc:
         raise EmbeddingError(f"embedding 端点连不上:{exc}") from exc
     if resp.status_code != 200:

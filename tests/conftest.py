@@ -73,9 +73,11 @@ def web_no_real_pg(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(scope="session", autouse=True)
 def _close_evaluation_pool():
-    """会话结束关池:psycopg_pool 的后台线程留到解释器退出会报
-    PythonFinalizationError(join at shutdown),显式关掉。"""
+    """会话结束关池(评测线与知识库各一个):psycopg_pool 的后台线程留到解释器
+    退出会报 PythonFinalizationError(join at shutdown),显式关掉。"""
     yield
+    from official_agent.kb import store as kb_store
     from official_agent.state.evaluation import _connection
 
     _connection.reset_pool()
+    kb_store.reset_pools()

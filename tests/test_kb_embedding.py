@@ -104,3 +104,19 @@ async def test_bad_index_raises(monkeypatch) -> None:
     )
     with pytest.raises(EmbeddingError, match="index 非法"):
         await embed_texts(["x"])
+
+
+@respx.mock
+async def test_embed_query_caches_repeated_questions(monkeypatch) -> None:
+    """同一个问题只调一次 embedding 端点(常见问题会被反复问)。"""
+    from official_agent.kb import embedding
+
+    _configured(monkeypatch)
+    monkeypatch.setattr(embedding, "_query_cache", embedding.OrderedDict())
+    route = respx.post(_URL).mock(
+        return_value=Response(200, json={"data": [{"index": 0, "embedding": [0.1, 0.2]}]})
+    )
+    first = await embedding.embed_query("技术部做什么")
+    second = await embedding.embed_query("技术部做什么 ")
+    assert first == second == [0.1, 0.2]
+    assert route.call_count == 1

@@ -1,23 +1,31 @@
-"""KB 数据面:知识条目 CRUD 与向量检索。
+"""KB 数据面:知识条目 CRUD 与混合检索。
 
 - SQL 同步(threads.py 先例:mock 解耦单测,真库往返走集成档);
   异步入口用 asyncio.to_thread 包装,不阻塞事件循环
+- 连接走进程级连接池;建表(ensure_kb_schema)每进程只跑一次、单独提交——
+  no-op 的 DDL 也会在事务里持表锁,放进每次检索会让检索与入库互相堵
 - 入库单事务原子:source + 内容表 + chunks 同生共死
 - kind=test 条目可入库但不进生产检索(search 默认排除;eval 显式 include_test)
 - 检索只回 enabled 且 model_version=当前 meta.version 的块(禁混排的读侧配套)
+- 检索 = 向量一路 + 关键词一路,RRF 合并;低于相似度门槛且字面也对不上的
+  候选直接丢掉——「查不到」必须能真的返回空,否则模型会拿不相关片段硬凑答案
 """
 
 import asyncio
 import secrets
+import threading
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 
 from official_agent.config import get_settings
 from official_agent.kb.chunking import KbChunk, embed_text, split_doc, split_faq
-from official_agent.kb.embedding import Embedder, embed_texts
+from official_agent.kb.embedding import Embedder, embed_query, embed_texts
+from official_agent.kb.keywords import query_terms
 from official_agent.kb.schema import current_embed_target, ensure_kb_schema
 
 _SOURCE_COLUMNS = (
@@ -60,17 +68,85 @@ class SourceRecord:
 
 @dataclass(frozen=True)
 class SearchHit:
-    """一条检索命中。source_id+title 是引用锚;chunk_text 供上下文/摘要。"""
+    """一条检索命中。source_id+title 是引用锚;chunk_text 供上下文/摘要。
+
+    score 是向量相似度(0-1);keyword_score 是问题关键词在该块里字面出现的比例。
+    """
 
     source_id: str
     title: str
     chunk_text: str
     heading_path: str
     score: float
+    keyword_score: float = 0.0
 
 
-def _conn() -> psycopg.Connection[dict[str, Any]]:
-    return psycopg.connect(get_settings().postgres_url, row_factory=dict_row)
+_pools: dict[str, ConnectionPool] = {}
+_pools_lock = threading.Lock()
+
+
+def _conn() -> AbstractContextManager[psycopg.Connection[dict[str, Any]]]:
+    """签出一条池化连接——返回上下文管理器,必须 with。
+
+    池按 postgres_url 分开建:集成测试会把 URL 指到临时库,共用一个池会连错库。
+    """
+    url = get_settings().postgres_url
+    pool = _pools.get(url)
+    if pool is None:
+        with _pools_lock:
+            pool = _pools.get(url)
+            if pool is None:
+                pool = ConnectionPool(
+                    url, min_size=1, max_size=4, open=True, kwargs={"row_factory": dict_row}
+                )
+                _pools[url] = pool
+    # ignore:池的泛型推断不到 kwargs 里的 dict_row,实际签出的就是 dict_row 连接
+    return pool.connection()  # type: ignore[return-value]
+
+
+def reset_pools() -> None:
+    """关闭全部连接池并清空建表缓存(测试收尾/改 URL 后用;生产不调用)。"""
+    with _pools_lock:
+        for pool in _pools.values():
+            pool.close()
+        _pools.clear()
+    reset_schema_cache()
+
+
+#: 最近一次建表的 (库 URL, 模型, 维度) 与得到的 meta.version。只记一份:换模型再
+#: 换回来时必须重跑 ensure(版本已经 +2),按键缓存多份会拿到过期版本。
+_schema_state: tuple[tuple[str, str, int], int] | None = None
+_schema_lock = threading.Lock()
+
+
+def reset_schema_cache() -> None:
+    global _schema_state
+    with _schema_lock:
+        _schema_state = None
+
+
+def _schema_version(*, refresh: bool = False) -> int:
+    """当前生效的向量版本。检索走缓存,首次调用(或换了模型/维度)才真正跑建表;
+    入库传 refresh=True 每次都跑——入库是管理员低频操作,持锁无所谓,而它能
+    及时发现库里 meta 与配置不一致(换模型)并清掉旧向量。
+
+    建表在**独立事务**里提交:若和随后的写入放在同一事务,写入失败回滚会把
+    新建的表一起回滚,而缓存里已经记成「建好了」。
+    """
+    global _schema_state
+    model, dim = current_embed_target()
+    key = (get_settings().postgres_url, model, dim)
+    state = _schema_state
+    if not refresh and state is not None and state[0] == key:
+        return state[1]
+    with _schema_lock:
+        state = _schema_state
+        if not refresh and state is not None and state[0] == key:
+            return state[1]
+        with _conn() as conn:
+            version = ensure_kb_schema(conn, embed_model=model, dim=dim)
+        _schema_state = (key, version)
+        return version
 
 
 def new_source_id() -> str:
@@ -109,10 +185,9 @@ def _write_source(
 ) -> str:
     if len(vectors) != len(chunks):
         raise RuntimeError(f"向量数 {len(vectors)} 与块数 {len(chunks)} 不一致")
-    model, dim = current_embed_target()
+    version = _schema_version(refresh=True)
     sid = source_id or new_source_id()
     with _conn() as conn:
-        version = ensure_kb_schema(conn, embed_model=model, dim=dim)
         conn.execute(
             """
             INSERT INTO kb_source (source_id, source_title, source_type, kind, tags, updated_by)
@@ -230,36 +305,144 @@ def list_sources(
     return {"items": items, "total": total["n"] if total else 0, "page": page, "size": size}
 
 
+#: 每一路先取这么多候选再合并;合并后再按门槛过滤、截 top_k。
+_CANDIDATES = 12
+#: RRF 平滑常数(常用取值 60):排名靠前的差距被压平,两路都靠前的胜出。
+_RRF_K = 60
+
+
 async def search(
-    query: str, *, top_k: int = 4, include_test: bool = False, embedder: Embedder | None = None
+    query: str,
+    *,
+    top_k: int = 4,
+    include_test: bool = False,
+    embedder: Embedder | None = None,
+    min_score: float | None = None,
 ) -> list[SearchHit]:
-    """向量检索 top-k。默认排除 kind=test;0 命中返回空表(降级话术归调用方)。"""
-    do_embed = embedder or embed_texts
-    vectors = await do_embed([query])
-    query_vec = vectors[0]
-    return await asyncio.to_thread(_search_sync, query_vec, top_k, include_test)
+    """混合检索 top-k。默认排除 kind=test;都不达标返回空表(降级话术归调用方)。
+
+    min_score 缺省取配置 kb_min_score;传 0 等于关掉门槛(评测看原始分布用)。
+    """
+    if embedder is None:
+        query_vec = await embed_query(query)
+    else:
+        query_vec = (await embedder([query]))[0]
+    settings = get_settings()
+    threshold = settings.kb_min_score if min_score is None else min_score
+    return await asyncio.to_thread(
+        _search_sync,
+        query_vec,
+        top_k,
+        include_test,
+        query=query,
+        min_score=threshold,
+        keyword_min_ratio=settings.kb_keyword_min_ratio,
+    )
 
 
-def _search_sync(query_vec: list[float], top_k: int, include_test: bool) -> list[SearchHit]:
-    model, dim = current_embed_target()
+def _escape_like(term: str) -> str:
+    """LIKE 模式里 % _ \\ 是元字符;关键词来自用户问题,必须转义成字面量。"""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _search_sync(
+    query_vec: list[float],
+    top_k: int,
+    include_test: bool,
+    *,
+    query: str = "",
+    min_score: float = 0.0,
+    keyword_min_ratio: float = 1.0,
+) -> list[SearchHit]:
+    version = _schema_version()
+    terms = query_terms(query) if query else []
+    kind_filter = "" if include_test else " AND s.kind = 'normal'"
+    vec = _to_pgvector(query_vec)
+    # 两路候选取并集,再对并集里每个块同时算向量分与字面命中数:
+    # 只出现在关键词一路的块也要有向量分,门槛与排序才可比。
+    # 关键词匹配范围含标题与标题链(「部门介绍」这类标题本身就是信号)。
     with _conn() as conn:
-        # 同事务内先自举再查:DDL 可见,且省一次连接建立
-        version = ensure_kb_schema(conn, embed_model=model, dim=dim)
-        kind_filter = "" if include_test else " AND s.kind = 'normal'"
-        # 排序:主序距离升序;次级键 (chunk_ordinal, source_id) 唯一(=chunk_id),
-        # 消同分抖动——否则同分行的顺序由 PG 计划形态(hnsw index vs seqscan)决定,
-        # 注入式确定性向量让同分成为常态。
         rows = conn.execute(
             f"""
-            SELECT s.source_id, s.source_title, c.chunk_text, c.heading_path,
-                   1 - (c.embedding <=> %s::vector) AS score
-            FROM kb_chunks c JOIN kb_source s USING (source_id)
-            WHERE s.enabled AND c.model_version = %s{kind_filter}
-            ORDER BY c.embedding <=> %s::vector, c.chunk_ordinal, c.source_id
-            LIMIT %s
+            WITH q AS (SELECT %(vec)s::vector AS v),
+            vec AS (
+                SELECT c.chunk_id
+                FROM kb_chunks c JOIN kb_source s USING (source_id), q
+                WHERE s.enabled AND c.model_version = %(version)s{kind_filter}
+                ORDER BY c.embedding <=> q.v, c.chunk_ordinal, c.source_id
+                LIMIT %(candidates)s
+            ),
+            kw AS (
+                SELECT c.chunk_id, count(*) AS matched
+                FROM kb_chunks c JOIN kb_source s USING (source_id)
+                JOIN unnest(%(patterns)s::text[]) AS t(pattern)
+                  ON (s.source_title || ' ' || c.heading_path || ' ' || c.chunk_text)
+                     ILIKE t.pattern
+                WHERE s.enabled AND c.model_version = %(version)s{kind_filter}
+                GROUP BY c.chunk_id
+                ORDER BY matched DESC, c.chunk_id
+                LIMIT %(candidates)s
+            )
+            SELECT s.source_id, s.source_title, c.chunk_text, c.heading_path, c.chunk_ordinal,
+                   1 - (c.embedding <=> q.v) AS score, COALESCE(kw.matched, 0) AS matched
+            FROM kb_chunks c JOIN kb_source s USING (source_id) CROSS JOIN q
+            LEFT JOIN kw USING (chunk_id)
+            WHERE c.chunk_id IN (SELECT chunk_id FROM vec UNION SELECT chunk_id FROM kw)
             """,
-            (_to_pgvector(query_vec), version, _to_pgvector(query_vec), top_k),
+            {
+                "vec": vec,
+                "version": version,
+                "candidates": max(_CANDIDATES, top_k),
+                "patterns": [f"%{_escape_like(t)}%" for t in terms],
+            },
         ).fetchall()
+    return _fuse(
+        rows,
+        n_terms=len(terms),
+        top_k=top_k,
+        min_score=min_score,
+        keyword_min_ratio=keyword_min_ratio,
+    )
+
+
+def _fuse(
+    rows: list[dict[str, Any]],
+    *,
+    n_terms: int,
+    top_k: int,
+    min_score: float,
+    keyword_min_ratio: float,
+) -> list[SearchHit]:
+    """两路排名用 RRF 合并,再过门槛。纯函数,单测直接喂行。
+
+    门槛是「或」:向量分达标,或问题关键词有足够比例字面出现在块里。后者兜住
+    专有名词——向量对「计拔」这种词不敏感,但条目里写了它就该召回。
+    同分按 (块序号, source_id) 决胜:否则同分行的顺序由 PG 计划形态决定,结果抖动。
+    """
+
+    def tiebreak(r: dict[str, Any]) -> tuple[int, str]:
+        return (int(r.get("chunk_ordinal") or 0), str(r["source_id"]))
+
+    def keyword_ratio(r: dict[str, Any]) -> float:
+        return int(r.get("matched") or 0) / n_terms if n_terms else 0.0
+
+    by_vector = sorted(rows, key=lambda r: (-float(r["score"]), *tiebreak(r)))
+    by_keyword = sorted(
+        (r for r in rows if int(r.get("matched") or 0) > 0),
+        key=lambda r: (-int(r["matched"]), -float(r["score"]), *tiebreak(r)),
+    )
+    rrf: dict[int, float] = {}
+    for rank, r in enumerate(by_vector, start=1):
+        rrf[id(r)] = 1 / (_RRF_K + rank)
+    for rank, r in enumerate(by_keyword, start=1):
+        rrf[id(r)] = rrf.get(id(r), 0.0) + 1 / (_RRF_K + rank)
+
+    passed = [
+        r
+        for r in rows
+        if float(r["score"]) >= min_score or (n_terms and keyword_ratio(r) >= keyword_min_ratio)
+    ]
+    passed.sort(key=lambda r: (-rrf[id(r)], -float(r["score"]), *tiebreak(r)))
     return [
         SearchHit(
             source_id=r["source_id"],
@@ -267,8 +450,9 @@ def _search_sync(query_vec: list[float], top_k: int, include_test: bool) -> list
             chunk_text=r["chunk_text"],
             heading_path=r["heading_path"],
             score=float(r["score"]),
+            keyword_score=round(keyword_ratio(r), 3),
         )
-        for r in rows
+        for r in passed[:top_k]
     ]
 
 

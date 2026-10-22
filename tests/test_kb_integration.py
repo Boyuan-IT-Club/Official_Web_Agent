@@ -334,3 +334,25 @@ async def test_admin_api_roundtrip_real_pg(monkeypatch) -> None:
             client.get(f"/api/agent/admin/kb/sources/{sid}", headers=auth).status_code
             == 404
         )
+
+
+async def test_hybrid_keyword_rescue_and_threshold_real_pg(kb_env) -> None:
+    """真库混合检索:向量对不上但专有名词字面命中 → 召回;都对不上 → 空表。"""
+    run = secrets.token_hex(3)
+    rescued = await store.ingest_source(
+        SourceInput(
+            title="报名须知", type="doc", content_md="ax0 计拔的同学可以报名任何部门",
+            updated_by=f"it-{run}",
+        ),
+        embedder=_axis_embedder(),
+    )
+    # 问题向量落在 ax1 轴:与 ax0 条目的余弦分是 0,只能靠「计拔」「报名」字面命中召回
+    hits = await store.search(
+        "计拔能报名吗 ax1", embedder=_axis_embedder(), top_k=5, min_score=0.45
+    )
+    rescued_hit = next(h for h in hits if h.source_id == rescued)
+    assert rescued_hit.score < 0.45 and rescued_hit.keyword_score >= 0.5
+
+    # 向量与字面都对不上:返回空,「查不到」才说得出来
+    misses = await store.search("ax1 天气", embedder=_axis_embedder(), top_k=5, min_score=0.45)
+    assert all(h.source_id != rescued for h in misses)
