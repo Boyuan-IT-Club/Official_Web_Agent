@@ -107,8 +107,10 @@ src/official_agent/
 │   └── config_store.py     #   agent_config:热配置(DB 覆盖 env)
 ├── tools/                  # 基础设施:后端 REST 的语义化封装
 │   ├── client.py           #   BackendClient + 异常层级(AuthError/UnavailableError/BackendError)
-│   ├── readonly.py         #   只读工具(按意图命名,返回投影裁剪)
-│   ├── write.py            #   写工具(仅进程内,interrupt 指纹令牌)
+│   ├── readonly.py         #   只读工具(按意图命名,60 秒按来问者缓存)
+│   ├── projection.py       #   工具返回投影(只留回答要用的字段,姓名/打分不进)
+│   ├── envelope.py         #   统一信封 {status: ok|error|unavailable, hint}
+│   ├── write.py            #   写工具(官网通道:确认卡片 → 指纹核对 → 意图审计 → 本人令牌执行 → 结果审计)
 │   └── knowledge.py        #   search_knowledge(知识库检索,降级契约)
 ├── kb/                     # 知识库:chunking / embedding / schema / store
 ├── security/               # 横切:pii(脱敏)/ injection_guard(数据区+扫描)/ fabrication_guard

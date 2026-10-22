@@ -106,30 +106,35 @@ class BackendClient:
     async def put(self, path: str, json: dict[str, Any] | None = None) -> Any:
         return await self._request("PUT", path, json=json)
 
-    async def get_as_user(
-        self, path: str, params: dict[str, Any] | None = None, user_token: str = ""
+    async def request_as_user(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        user_token: str = "",
     ) -> Any:
-        """以最终用户本人令牌裸发请求(get_my_interview 等场景)。
+        """以最终用户本人令牌裸发请求(本人查询、本人投票、对话里的写操作)。
 
-        与服务账号通道语义不同,故不做重登与重试:用户 token 无效/过期
-        是另一类失败,如实抛 BackendError 由调用方引导用户重新登录,
-        绝不能拿服务账号悄悄顶替。
-        出现第三个用户令牌工具时应拆出 UserTokenClient。
+        与服务账号通道语义不同,故不做重登与重试:用户 token 无效/过期是另一类
+        失败,如实抛 BackendAuthError 由入口层引导重新登录,绝不能拿服务账号
+        悄悄顶替。写请求不重试:超时时请求可能已到达后端,重试会重复执行。
         """
         if not user_token:
             raise BackendError("缺少用户本人令牌(user_token),该操作必须以最终用户身份执行")
         try:
             resp = await self._http.request(
-                "GET",
+                method,
                 path,
                 params=params,
+                json=json,
                 headers={
                     "Authorization": f"Bearer {user_token}",
                     **observability.traceparent_header(),
                 },
             )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
-            # 用户令牌通道不自动重试(非幂等语义不明确),只映射成可行动文案
             raise BackendUnavailableError(
                 f"后端连接失败({type(exc).__name__}),稍后重试;持续失败请检查后端状态"
             ) from None
@@ -139,33 +144,23 @@ class BackendClient:
             # body 业务码过期(1001-1003/2004/2006)与 HTTP 401 同文案,不泄漏内部信号
             raise BackendAuthError("用户令牌无效或已过期,需用户重新登录后重试") from None
 
+    async def get_as_user(
+        self, path: str, params: dict[str, Any] | None = None, user_token: str = ""
+    ) -> Any:
+        """本人令牌 GET(get_my_interview、对话内只读查询)。"""
+        return await self.request_as_user("GET", path, params=params, user_token=user_token)
+
     async def put_as_user(
         self, path: str, json: dict[str, Any] | None = None, user_token: str = ""
     ) -> Any:
-        """以最终用户本人令牌发 PUT(本人一票 upsert)。
+        """本人令牌 PUT(本人一票 upsert、对话内写操作)。"""
+        return await self.request_as_user("PUT", path, json=json, user_token=user_token)
 
-        语义与 get_as_user 相同:不重登不重试,令牌失效如实抛错。
-        """
-        if not user_token:
-            raise BackendError("缺少用户本人令牌(user_token),该操作必须以最终用户身份执行")
-        try:
-            resp = await self._http.request(
-                "PUT",
-                path,
-                json=json,
-                headers={
-                    "Authorization": f"Bearer {user_token}",
-                    **observability.traceparent_header(),
-                },
-            )
-        except (httpx.TimeoutException, httpx.TransportError) as exc:
-            raise BackendError(
-                f"后端连接失败({type(exc).__name__}),稍后重试;持续失败请检查后端状态"
-            ) from None
-        try:
-            return _interpret(resp)
-        except _AuthExpired:
-            raise BackendAuthError("用户令牌无效或已过期,需用户重新登录后重试") from None
+    async def post_as_user(
+        self, path: str, json: dict[str, Any] | None = None, user_token: str = ""
+    ) -> Any:
+        """本人令牌 POST(对话内写操作)。"""
+        return await self.request_as_user("POST", path, json=json, user_token=user_token)
 
     async def login(self) -> str:
         """服务账号登录并缓存 token。凭证错误抛 BackendAuthError。"""

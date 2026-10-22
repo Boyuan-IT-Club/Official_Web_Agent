@@ -8,6 +8,8 @@
 - ``forbidden_tools``:任一被调用即 FAIL(权限红线,如候选人触管理工具)
 - ``expected_params``:该工具至少一次调用的参数包含全部期望键值(子集匹配)
 - ``exact: true``    :调用集合必须与 expected_tools 完全相等(默认不要求)
+- ``allow_write`` / ``permission_codes``:写工具用例——按官网通道装配写工具,
+  运行停在确认挂起处,写操作不会执行
 
 确定性边界:LLM 非零温,断言用集合/子集而非轨迹全文以抗抖动;个别 case
 仍可复现性差时应在 case 上加约束或改写输入,不在 runner 里加随机重试。
@@ -46,13 +48,25 @@ def env_blocker() -> str | None:
     return None
 
 
-def _default_factory(identity: Any, user_token: str) -> Any:
+def _default_factory(identity: Any, user_token: str, *, allow_write: bool = False) -> Any:
     """真实装配路径:与产品同一构建函数,仅后端 HTTP 被 fake 顶替。
 
-    非流式 ainvoke,stream_usage 必须 False(openai-compatible 端点约束)。"""
+    非流式 ainvoke,stream_usage 必须 False(openai-compatible 端点约束)。
+    allow_write:写工具用例。配内存 checkpointer 让写工具能挂起——运行停在
+    确认处,写操作永远不会真正执行,评测只看模型有没有选对工具、参数对不对。"""
     from official_agent.graphs.assistant import build_assistant_agent
 
-    return build_assistant_agent(identity, user_token=user_token, stream_usage=False)
+    if not allow_write:
+        return build_assistant_agent(identity, user_token=user_token, stream_usage=False)
+    from langgraph.checkpoint.memory import MemorySaver
+
+    return build_assistant_agent(
+        identity,
+        user_token=user_token,
+        stream_usage=False,
+        checkpointer=MemorySaver(),
+        allow_write=True,
+    )
 
 
 class _FakeBackend(BackendClient):
@@ -70,7 +84,14 @@ class _FakeBackend(BackendClient):
     def _route(self, path: str, params: dict[str, Any] | None) -> Any:
         self.calls.append((path, params))
         if path == "/api/cycles/open":
-            return {"cycleId": 2, "cycleName": "2025 秋招", "isActive": True}
+            return [
+                {
+                    "cycleId": 2,
+                    "cycleName": "2026 秋季招新",
+                    "academicYear": "2026-2027",
+                    "intakeOpen": True,
+                }
+            ]
         if path == "/api/resumes/search":
             return {
                 "content": [
@@ -80,8 +101,18 @@ class _FakeBackend(BackendClient):
                 "totalElements": 2,
             }
         if path.endswith("/available-sessions"):
+            # 字段与后端 InterviewSessionDTO 一致(工具层按真实字段投影)
             return [
-                {"sessionId": 5, "date": "2026-09-11", "startTime": "14:00", "location": "线上"},
+                {
+                    "sessionId": 5,
+                    "interviewDate": "2026-09-11",
+                    "startTime": "14:00",
+                    "endTime": "16:00",
+                    "deptName": "技术部",
+                    "location": "线上",
+                    "capacity": 8,
+                    "remaining": 3,
+                },
             ]
         if path == "/api/interview/schedule/my":
             return {"scheduleId": 9, "interviewTime": "2026-09-11 14:00", "location": "线上"}
@@ -98,8 +129,8 @@ class _FakeBackend(BackendClient):
         return self._route(path, params)
 
 
-def _identity_of(role: str) -> ResolvedIdentity:
-    """评测身份:与 test_assistant 同构,空权限面(权限差异由 forbidden 断言兜)。"""
+def _identity_of(role: str, permission_codes: list[str] | None = None) -> ResolvedIdentity:
+    """评测身份:与 test_assistant 同构;权限码缺省为空(权限差异由 forbidden 断言兜)。"""
     return cast(
         ResolvedIdentity,
         {
@@ -107,7 +138,7 @@ def _identity_of(role: str) -> ResolvedIdentity:
             "name": "评测用户",
             "role": role,
             "role_names": [role],
-            "permission_codes": [],
+            "permission_codes": list(permission_codes or []),
             "source": "eval",
         },
     )
@@ -179,7 +210,10 @@ async def run_suite(
         backend = _FakeBackend()
         readonly.set_backend_client(backend)
         try:
-            agent = build_agent(_identity_of(role), user_token)
+            identity = _identity_of(role, case.get("permission_codes"))
+            # 写工具用例:用例显式声明 allow_write 才走写装配(注入的假工厂不受影响)
+            write_kwargs = {"allow_write": True} if case.get("allow_write") else {}
+            agent = build_agent(identity, user_token, **write_kwargs)
             result = await ainvoke(agent, str(case["input"]))
             calls = _extract_tool_calls(result.get("messages", []))
             passed, detail = _case_passed(case, calls)
@@ -199,4 +233,8 @@ async def run_suite(
 
 
 async def _default_ainvoke(agent: Any, input_text: str) -> dict[str, Any]:
-    return await agent.ainvoke({"messages": [HumanMessage(input_text)]})
+    # thread_id:写工具用例带 checkpointer,必须指定会话;无 checkpointer 时无副作用
+    import secrets
+
+    config = {"configurable": {"thread_id": f"eval:{secrets.token_hex(4)}"}}
+    return await agent.ainvoke({"messages": [HumanMessage(input_text)]}, config)

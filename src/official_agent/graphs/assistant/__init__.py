@@ -12,9 +12,10 @@ role 给工具,否则会把后端 V22 已从社员角色撤下(如 resume:view)�
   供本人取当前开放周期再查本人面试),查询绑定本人 JWT,模型侧不见凭证。
 - unknown:空集(无工具,纯问答;装配层是第一道闸,ADR-0005)
 
-只读通道:本问答助手(官网对话 web 通道)**只读、不装配
-任何写工具** —— 写操作闭环(interrupt 需 checkpointer 支持),
-不在本助手能力面内;后续亦暂不扩展写工具。
+写工具(tools/write.py):只在调用方显式 allow_write 时装配(官网 web 通道),
+且只给持排期/审核权限码的 admin,并要求有 checkpointer——写操作要在图内
+interrupt 挂起等确认,没有 checkpointer 就挂不住,装了也只能 fail-closed。
+CLI / eval 不开 allow_write,行为与只读时代一致。
 
 system prompt 纪律:
 - 静态正文(prompts/assistant.md)与角色无关、字节稳定;
@@ -37,6 +38,7 @@ from official_agent.graphs.identity import ResolvedIdentity
 from official_agent.security.injection_guard import mount_input_guard
 from official_agent.tools import knowledge, readonly
 from official_agent.tools.envelope import mount_error_envelope
+from official_agent.tools.write import WRITE_TOOLS
 
 _PROMPT_FILE = Path(__file__).parent.parent.parent / "prompts" / "assistant.md"
 
@@ -78,6 +80,22 @@ _ALL_TOOLS: dict[str, object] = {
 }
 
 
+#: 装配写工具所需的权限码(与后端写端点的 @PreAuthorize 一致:持其一即可)
+_WRITE_PERMISSIONS = frozenset({"interview:schedule", "resume:audit"})
+
+
+def write_tool_names(identity: ResolvedIdentity, *, allow_write: bool) -> tuple[str, ...]:
+    """该身份可装配的写工具名;调用方未开 allow_write、非 admin 或无权限码 → 空。
+
+    后端仍会按本人令牌复核权限——这里是第一道闸,不让无权限的人看见写工具。
+    """
+    if not allow_write or identity.get("role") != "admin":
+        return ()
+    if not _WRITE_PERMISSIONS & set(identity.get("permission_codes") or []):
+        return ()
+    return tuple(WRITE_TOOLS)
+
+
 def load_system_prompt() -> str:
     """读 prompts/assistant.md,剥离 frontmatter,返回正文。
 
@@ -104,8 +122,10 @@ def _bind_my_interview(user_token: str):
     return get_my_interview
 
 
-def assemble_tools(identity: ResolvedIdentity, user_token: str = "") -> list:
-    """按 role 装配工具集(粗粒度三档)。
+def assemble_tools(
+    identity: ResolvedIdentity, user_token: str = "", *, allow_write: bool = False
+) -> list:
+    """按 role 装配工具集(粗粒度三档),allow_write 时追加有权限的写工具。
 
     get_my_interview 需要用户本人令牌:装配时闭包绑定,模型侧签名只剩
     cycle_id——凭证不进模型可见面。每个工具外包两层:错误信封(tools/envelope.py)
@@ -113,8 +133,13 @@ def assemble_tools(identity: ResolvedIdentity, user_token: str = "") -> list:
     """
     names = _ROLE_TOOL_NAMES.get(identity.get("role", "unknown"), ())
     tools = []
-    for name in names:
-        raw = _bind_my_interview(user_token) if name == "get_my_interview" else _ALL_TOOLS[name]
+    for name in (*names, *write_tool_names(identity, allow_write=allow_write)):
+        if name in WRITE_TOOLS:
+            raw = WRITE_TOOLS[name]
+        elif name == "get_my_interview":
+            raw = _bind_my_interview(user_token)
+        else:
+            raw = _ALL_TOOLS[name]
         # 先装信封(后端业务错误转成可行动结构,不让单个工具报错打断整轮),
         # 再过注入守卫(数据区标签+确定性扫描)——守卫在外层,错误文案同样被包进数据区
         tools.append(mount_input_guard(mount_error_envelope(raw)))
@@ -152,12 +177,15 @@ def identity_message(identity: ResolvedIdentity) -> str:
     )
 
 
-def tool_roster(identity: ResolvedIdentity) -> list[str]:
+def tool_roster(identity: ResolvedIdentity, *, allow_write: bool = False) -> list[str]:
     """当前身份装配到的工具名清单(unknown 档为空)。"""
-    return list(_ROLE_TOOL_NAMES.get(identity.get("role", "unknown"), ()))
+    return [
+        *_ROLE_TOOL_NAMES.get(identity.get("role", "unknown"), ()),
+        *write_tool_names(identity, allow_write=allow_write),
+    ]
 
 
-def tool_contract(identity: ResolvedIdentity) -> str:
+def tool_contract(identity: ResolvedIdentity, *, allow_write: bool = False) -> str:
     """工具契约段:工具清单随角色变化,进 system prompt。
 
     - 有工具档:列清单,只准陈述工具真实返回的内容,失败/被拒必须如实
@@ -168,28 +196,40 @@ def tool_contract(identity: ResolvedIdentity) -> str:
     名单单源 tool_roster(_ROLE_TOOL_NAMES);装配过滤演化时两者仍须一致
     (test_tool_roster_matches_assembly 钉住)。
     """
-    names = tool_roster(identity)
+    names = tool_roster(identity, allow_write=allow_write)
+    writes = write_tool_names(identity, allow_write=allow_write)
     if not names:
         return (
             "你没有可用的数据查询工具:绝不能声称查询过任何数据、给出「查询结果」"
             "或编造数据。用户要求数据时,说明你当前没有查询权限,"
             "引导其通过管理端或人工渠道获取。"
         )
-    return (
-        f"本次会话可用的数据查询工具:{', '.join(names)}。"
+    contract = (
+        f"本次会话可用的数据查询工具:{', '.join(n for n in names if n not in writes)}。"
         "只陈述这些工具真实返回的内容;工具没有返回的信息,不要声称「查询过」。"
         "工具调用失败或被拒绝时,如实说明无法查询并引导人工渠道,不要编造结果。"
     )
+    if writes:
+        contract += (
+            f"可用的写操作工具:{', '.join(writes)}。只在用户明确要求执行时调用,参数必须"
+            "来自查询结果(不要猜 id)。用户已经明确要求、且查询结果能唯一确定参数时,"
+            "**直接调用写工具**——系统会弹出确认卡片让用户点确认,不要先在文字里再问一遍"
+            "「要不要执行」;只有参数确实有歧义(多个候选场次等)时才先问清楚。"
+            "不要在工具返回前说「已完成」;以工具返回的 status 为准:done 才算完成,"
+            "cancelled 是用户取消(不要重复发起),unknown 要提醒用户去管理页核实。"
+        )
+    return contract
 
 
-def build_system_prompt(identity: ResolvedIdentity) -> str:
+def build_system_prompt(identity: ResolvedIdentity, *, allow_write: bool = False) -> str:
     """完整 system prompt = 静态正文 + 身份段 + 工具契约。
 
     身份/契约随角色变化 ⇒ system 前缀不再跨角色字节稳定,prompt cache
     按角色分档命中(同角色会话内仍稳定)。这是身份进 system 的取舍:内部上下文
     绝不进对话消息面,代价是缓存粒度从「全局」降为「按角色」。
     """
-    return f"{load_system_prompt()}\n\n{identity_message(identity)}\n\n{tool_contract(identity)}"
+    contract = tool_contract(identity, allow_write=allow_write)
+    return f"{load_system_prompt()}\n\n{identity_message(identity)}\n\n{contract}"
 
 
 def compose_first_message(user_token: str = "") -> str:
@@ -247,6 +287,7 @@ def build_assistant_agent(
     user_token: str = "",
     checkpointer: Any | None = None,
     stream_usage: bool = True,
+    allow_write: bool = False,
 ) -> Any:
     """构建 A 模块 ReAct agent。调用方(CLI/SSE)负责身份解析与消息装配,
     并把 langfuse_callbacks 挂到 invoke 的 config(fail-open,ADR-0005)。
@@ -257,11 +298,14 @@ def build_assistant_agent(
     checkpointer:传 AsyncPostgresSaver 则启用多轮持久化;
     None 则纯内存(CLI --session 标识仅作 trace 用)。
     stream_usage:openai-compatible 端点只许 stream_options 随 stream=true 出现,
-    非流式 ainvoke 调用方(如 eval runner)必须传 False。"""
+    非流式 ainvoke 调用方(如 eval runner)必须传 False。
+    allow_write:装配写工具(仅官网 web 通道);没有 checkpointer 时强制关闭——
+    写操作要挂起等确认,挂不住就不该让模型看见写工具。"""
     settings = get_effective_settings()
+    writable = allow_write and checkpointer is not None
     return create_agent(
         build_model(settings, stream_usage=stream_usage),
-        tools=assemble_tools(identity, user_token),
-        system_prompt=build_system_prompt(identity),
+        tools=assemble_tools(identity, user_token, allow_write=writable),
+        system_prompt=build_system_prompt(identity, allow_write=writable),
         checkpointer=checkpointer,
     )
