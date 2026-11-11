@@ -826,3 +826,115 @@ async def test_repo_lines_probe_concurrently_in_resume_order(monkeypatch) -> Non
     )
 
     assert pins == [("me", "open1"), ("me", "open2"), ("me", "private1")]
+
+
+# ── 审题:评测线过审,审题用量计入聚合 ─────────────────────
+
+
+def _reviewed(*keys: str, input_tokens: int) -> dict:
+    return {
+        "status": "reviewed",
+        "items": [{"key": key, "verdict": "keep", "reasons": []} for key in keys],
+        "prompt_version": "evaluation_question_review/v1",
+        "usage": {"input_tokens": input_tokens, "output_tokens": 10},
+    }
+
+
+async def test_autograding_line_is_reviewed_against_the_failure_listing(monkeypatch) -> None:
+    """评测线打开审题后:审题者看到失败清单,意见挂在组上,题目原样。"""
+    from official_agent.config import get_settings
+
+    seen: dict = {}
+
+    async def _submission(github_key):
+        return {
+            "id": 7,
+            "total_score": 60,
+            "max_total_score": 100,
+            "tasks": [
+                {"task_name": "task1", "test_results": [{"name": "test_timeout", "passed": False}]}
+            ],
+        }
+
+    async def _skip_investigation(text, **kw):
+        return {"mode": "skipped", "repo_summary": "", "questions": []}
+
+    async def _review(targets, *, material, statement=""):
+        seen["keys"] = [t.key for t in targets]
+        seen["material"] = material
+        return _reviewed(*seen["keys"], input_tokens=300)
+
+    monkeypatch.setattr(get_settings(), "qbank_review_mode", "annotate")
+    monkeypatch.setattr(bd.ig, "run_investigation", _skip_investigation)
+    monkeypatch.setattr(
+        "official_agent.evaluation.autograding.fetch_latest_submission", _submission
+    )
+    monkeypatch.setattr(bd, "build_model", lambda *a, **k: _FakeModel())
+    monkeypatch.setattr(bd, "review_line", _review)
+
+    envelope = await bd.run_bundle(
+        [FieldText(field_key="self_intro", title="自我介绍", value="我是李四。")],
+        resume_id=31,
+        cycle_id=2026,
+        github_key="usergithub",
+    )
+
+    autograding = next(g for g in envelope["groups"] if g["group"] == "autograding")
+    assert seen["keys"] == ["question:0", "question:1"]
+    assert "task1/test_timeout" in seen["material"]
+    assert autograding["review"]["status"] == "reviewed"
+    assert all("review" not in question for question in autograding["questions"])
+    assert envelope["explore_usage_total"]["input_tokens"] == 300
+
+
+async def test_autograding_line_is_not_reviewed_by_default(monkeypatch) -> None:
+    async def _submission(github_key):
+        return {
+            "id": 7,
+            "total_score": 60,
+            "max_total_score": 100,
+            "tasks": [
+                {"task_name": "task1", "test_results": [{"name": "test_timeout", "passed": False}]}
+            ],
+        }
+
+    async def _skip_investigation(text, **kw):
+        return {"mode": "skipped", "repo_summary": "", "questions": []}
+
+    async def _boom(*a, **k):
+        raise AssertionError("审题关闭时不该调审题者")
+
+    monkeypatch.setattr(bd.ig, "run_investigation", _skip_investigation)
+    monkeypatch.setattr(
+        "official_agent.evaluation.autograding.fetch_latest_submission", _submission
+    )
+    monkeypatch.setattr(bd, "build_model", lambda *a, **k: _FakeModel())
+    monkeypatch.setattr(bd, "review_line", _boom)
+
+    envelope = await bd.run_bundle(
+        [FieldText(field_key="self_intro", title="自我介绍", value="我是李四。")],
+        resume_id=32,
+        cycle_id=2026,
+        github_key="usergithub",
+    )
+
+    autograding = next(g for g in envelope["groups"] if g["group"] == "autograding")
+    assert "review" not in autograding
+
+
+async def test_bundle_usage_includes_repo_line_review_calls(monkeypatch) -> None:
+    """仓线的审题调用也花 token:与探索、出题一起进用量聚合。"""
+
+    async def _investigate(text, **kw):
+        return _line_envelope(
+            explore_meta={"turns": 2, "dossier_chars": 500, "input_tokens": 1000},
+            generation_usage={"input_tokens": 200},
+            review=_reviewed("entry", input_tokens=50),
+        )
+
+    monkeypatch.setattr(bd, "GitHubClient", _ReadableGH)
+    monkeypatch.setattr(bd.ig, "run_investigation", _investigate)
+
+    envelope = await bd.run_bundle(_repo_fields("a"), resume_id=33, cycle_id=2026)
+
+    assert envelope["explore_usage_total"]["input_tokens"] == 1000 + 200 + 50

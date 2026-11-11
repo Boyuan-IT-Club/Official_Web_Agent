@@ -98,6 +98,24 @@ class Settings(BaseSettings):
     # 初筛 job 后台领取循环的间隔(秒);0 = 关闭(只靠提交时派发 + 重启恢复)
     evaluation_claim_interval_seconds: int = 30
 
+    # 评估域同时在途的模型调用上限(评分、探索、出题、审题共用一把进程级闸)。
+    # 出题证据线并发、runner 多 job 并行会叠乘;8 是 runner 的 job 并发数的两倍,
+    # 没有按模型供应商的限流实测过,见到 429 就调小
+    evaluation_model_concurrency: int = 8
+
+    # 审题(出题之后逐题给意见,只标注不改题):off = 不审;annotate = 审并把意见
+    # 挂在题库上。默认关:每条有题的证据线多一次 strong 调用,要先在真实模型上跑过
+    # evals/datasets/question_review_probes.yaml 再打开
+    qbank_review_mode: str = "off"
+
+    # 题目向量索引(本包跨线查重 + 跨简历通用题标注,只标注不删题)。默认关:
+    # 两个相似度门槛和「几份简历算通用」都是初值,要先拿现有题库量过分布再打开;
+    # 打开还需要 EMBED_* 已配置、题库所在的库装有 pgvector
+    qbank_index_enabled: bool = False
+    qbank_duplicate_min_similarity: float = 0.9
+    qbank_generic_min_similarity: float = 0.9
+    qbank_generic_min_resumes: int = 3
+
     # 初筛分级:同部门候选池内头部/尾部比例与小池阈值(见 evaluation/grading.py)
     evaluation_grade_top_ratio: float = 0.2
     evaluation_grade_bottom_ratio: float = 0.2

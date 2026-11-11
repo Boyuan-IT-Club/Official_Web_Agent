@@ -33,7 +33,13 @@ from official_agent.evaluation.investigate import extract_repos
 from official_agent.evaluation.llm_common import (
     TEMPERATURE_GENERATION,
     content_text,
+    gated_ainvoke,
     prompt_version,
+)
+from official_agent.evaluation.question_review import (
+    review_line,
+    review_mode,
+    targets_from_questions,
 )
 from official_agent.evaluation.schema import QuestionSet
 from official_agent.graphs.assistant import build_model
@@ -107,7 +113,7 @@ async def _b4_questions(
         + f"\n\n出 {count_min}-{count_max} 道题。"
         + "\n只输出符合 schema 的 JSON 对象,不要任何其他文字或代码围栏。"
     )
-    resp = await model.ainvoke([HumanMessage(content=prompt_text)])
+    resp = await gated_ainvoke(model, [HumanMessage(content=prompt_text)])
     qs = QuestionSet.model_validate_json(_extract_json(content_text(resp)))
     questions = [q.model_dump() for q in qs.questions]
     if not count_min <= len(questions) <= count_max:
@@ -305,19 +311,26 @@ async def _autograding_line(github_key: str, resume_id: int) -> dict[str, Any] |
             for kind, items in buckets.items()
             for task, name in items
         )
+        failure_listing = f"评测失败清单(任务/test):\n{material}"
         ag_questions = await _b4_questions(
-            f"评测失败清单(任务/test):\n{material}",
+            failure_listing,
             count_min=2,
             count_max=3,
             source="autograding-failures",
         )
-        return {
+        group: dict[str, Any] = {
             "group": "autograding",
             "mode": "error_analysis",
             "repo_summary": f"评测非满分,失败 {len(failures)} 项",
             "questions": ag_questions,
             "prompt_version": _prompt_version(),
         }
+        if review_mode() == "annotate":
+            # 审题看的是出题时的同一份材料;意见挂在组上,题目不动
+            group["review"] = await review_line(
+                targets_from_questions(ag_questions), material=failure_listing
+            )
+        return group
     except Exception as exc:  # noqa: BLE001 — 错因线失败可容忍,只记日志
         logging.getLogger(__name__).warning(
             "评测错因线跳过(resume=%s):%s: %s", resume_id, type(exc).__name__, exc
@@ -411,7 +424,10 @@ def _flatten_v2_questions(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _aggregate_usage(groups: list[dict[str, Any]]) -> dict[str, int | None]:
-    """聚合 repo 组探索/出题用量(其余线 v1 形状无用量面)。"""
+    """聚合各线的模型用量:仓线的探索、出题、审题,以及评测线的审题。
+
+    评测线、兜底线的出题调用不采用量,所以不在这里。
+    """
     usage_total: dict[str, int | None] = {
         "input_tokens": None,
         "output_tokens": None,
@@ -420,7 +436,12 @@ def _aggregate_usage(groups: list[dict[str, Any]]) -> dict[str, int | None]:
     }
     for g in groups:
         qbank_v2 = g.get("qbank_v2") or {}
-        metas = [qbank_v2.get("explore_meta") or {}, qbank_v2.get("generation_usage") or {}]
+        metas = [
+            qbank_v2.get("explore_meta") or {},
+            qbank_v2.get("generation_usage") or {},
+            (qbank_v2.get("review") or {}).get("usage") or {},
+            (g.get("review") or {}).get("usage") or {},
+        ]
         for meta in metas:
             for k in usage_total:
                 v = meta.get(k)
@@ -484,9 +505,10 @@ async def run_bundle(
     )
 
     # 用量按实际跑过的线算,所以取在裁重复组之前:被裁掉的线同样花了 token。
-    explore_usage_total = _aggregate_usage(repo_groups)
+    other_groups = [g for g in (autograding_group, awards_group) if g is not None]
+    explore_usage_total = _aggregate_usage([*repo_groups, *other_groups])
     groups = _keep_first_cv_dive(repo_groups, resume_id=resume_id)
-    groups.extend(g for g in (autograding_group, awards_group) if g is not None)
+    groups.extend(other_groups)
     if not any(_group_has_evidence(g) for g in groups):
         groups.append(await _fallback_line(fields))
 

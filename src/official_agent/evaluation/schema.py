@@ -305,12 +305,66 @@ class UsageMeta(BaseModel):
     cache_miss_tokens: int | None = None
 
 
+# ── 审题标注:挂在题组旁边,不进题目对象 ──
+
+REVIEW_VERDICT = Literal["keep", "revise", "drop"]
+
+#: 审题理由的固定集合。意见只在这里取值:审题者看到的题目与仓内容同源,
+#: 让它写自由文本等于给注入留一条落库的通道。
+REVIEW_REASON = Literal[
+    "searchable",  # 搜一下就能答,和候选人的项目无关
+    "ungrounded",  # 题目声称的事实在材料里找不到
+    "recitable",  # 背八股就能答,问不出是不是自己做的
+    "duplicate",  # 与同组里另一道题问的是同一件事
+    "generic",  # 换一份简历照样能问
+    "tone",  # 质问、设套、让人难堪的措辞
+]
+
+
+class QuestionReview(BaseModel):
+    """一道题的审题意见。keep 不带理由;revise / drop 至少带一条。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(
+        min_length=1, description="题目在题组里的编号(state/qbank.py 的 question_key)"
+    )
+    verdict: REVIEW_VERDICT
+    reasons: list[REVIEW_REASON] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _reasons_match_verdict(self) -> "QuestionReview":
+        if self.verdict == "keep" and self.reasons:
+            raise ValueError(f"keep 不该带理由:{self.key} {self.reasons}")
+        if self.verdict != "keep" and not self.reasons:
+            raise ValueError(f"{self.verdict} 必须带理由:{self.key}")
+        return self
+
+
+class LineReview(BaseModel):
+    """一条证据线的审题结果:逐题意见 + 这次审题本身的元信息。
+
+    意见放在题组**旁边**而不是题目对象里:题目对象是出题模型的输出面,在那里
+    留一个 review 字段,出题模型(或仓里的注入文本)就能替自己的题预先填上
+    「放行」。status=unavailable 表示审题模型没给出可用结果,题目原样放行,
+    此时 items 里只有确定性预检查出来的那几条。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["reviewed", "unavailable"]
+    items: list[QuestionReview] = Field(default_factory=list)
+    prompt_version: str = ""
+    usage: UsageMeta | None = None
+
+
 class QbankV2(BaseModel):
     """调查出题信封 v2(evaluation_qbank/v2,直接替换不兼容)。
 
     attribution/degraded 是信封一等概念(ADR-0008:unverified 绝不出仓题;
     预算触顶 degraded 出题)。mode/guide 沿用旧语义:guided=仓库材料
     缺失的通用引导组(此时 entry 可以是引导题,chains 空)。
+    review 为空 = 这组题没有审过(审题关闭,或该模式不审)。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -324,6 +378,7 @@ class QbankV2(BaseModel):
     degrade_reason: str = ""
     explore_meta: ExploreMeta = Field(default_factory=ExploreMeta)
     generation_usage: UsageMeta | None = None  # 出题段单次调用用量
+    review: LineReview | None = None
     prompt_version: str = ""
 
 

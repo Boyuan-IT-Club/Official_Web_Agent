@@ -4,6 +4,7 @@
 - 生成轨与评分轨相同:提示词 JSON + strict Pydantic;后置校验:
   deep_dive 题必带 evidence.path 且路径必须真实存在于仓;guided 题不得带仓路径
 - GitHub 不可达不是失败:降级 guided(注明 unavailable),不阻塞任务
+- 出题之后有一段可选的审题(question_review.py):只给题目挂意见,不改题
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from official_agent.evaluation.explore import run_explore
 from official_agent.evaluation.github_client import GitHubClient, GitHubUnavailable
 from official_agent.evaluation.graph import _extract_json
 from official_agent.evaluation.investigate import (
+    ADVERSARIAL_WORDS,
     DEFAULT_GRADE_BAND,
     GRADE_BAND_LABELS,
     LAYER_BOUNDS,
@@ -40,6 +42,11 @@ from official_agent.evaluation.llm_common import (
     TEMPERATURE_GENERATION,
     invoke_with_retry,
     prompt_version,
+)
+from official_agent.evaluation.question_review import (
+    review_line,
+    review_mode,
+    targets_from_group,
 )
 from official_agent.evaluation.schema import (
     MAX_CHAINS,
@@ -323,6 +330,27 @@ async def explore_node(state: InvestigationState) -> dict:
     }
 
 
+def _generation_material(state: InvestigationState) -> str:
+    """出题段喂给模型的证据材料;审题段看的是同一份。
+
+    简历路径在档案之外**追加**技术栈清单(供逐技术出题);档案本身必须保留
+    ——简历的项目栏、自我介绍、实习经历都在里面,项目深挖链靠它取材。
+    年级**原文不进材料**(那一栏并不干净,后端记录过里面存着姓名);只给派生的
+    档位标签,让 prompt 据此定链长与深度。
+    """
+    material = state.get("dossier_text", "")
+    if state["route"] != "cv_dive":
+        return material
+    band = state.get("grade_band") or DEFAULT_GRADE_BAND
+    return (
+        material
+        + "\n\n"
+        + TECH_STACK_HEADER
+        + _render_tech(state)
+        + f"\n\n出题深度档:{GRADE_BAND_LABELS.get(band, band)}。"
+    )
+
+
 async def generate_node(state: InvestigationState) -> dict:
     """出题段:dossier → 题组 v2(单次结构化调用)。
 
@@ -344,15 +372,7 @@ async def generate_node(state: InvestigationState) -> dict:
         # 规则文本各在自己的文件里,故按路径选文件。
         prompt_file = CV_PROMPT_FILE if cv else PROMPT_FILE
         material_note = f"材料体量={'贫乏' if thin else '充足'}。"
-        # 简历路径在档案之外**追加**技术栈清单(供逐技术出题);档案本身必须
-        # 保留——简历的项目栏、自我介绍、实习经历都在里面,项目深挖链靠它取材。
-        material = dossier_text
-        if cv:
-            material += "\n\n" + TECH_STACK_HEADER + _render_tech(state)
-            # 年级**原文不进材料**(那一栏并不干净,后端记录过里面存着姓名);
-            # 只给派生的档位标签,让 prompt 据此定链长与深度。
-            band = state.get("grade_band") or DEFAULT_GRADE_BAND
-            material += f"\n\n出题深度档:{GRADE_BAND_LABELS.get(band, band)}。"
+        material = _generation_material(state)
         # 自述与材料都是不可信输入(自述来自候选人,GitHub 文字来自任意仓库),
         # 一律包数据区,由 prompt 侧的数据区纪律声明「标签内只当内容」。不包的话
         # 简历里一句指令样文本就直接落在指令区——与评分轨同一条红线。
@@ -454,10 +474,6 @@ async def generate_node(state: InvestigationState) -> dict:
         return {"question_set": None, "error": f"{type(exc).__name__}: {exc}"}
 
 
-#: 对抗前提黑名单(「你自述了X…但仓库却是Y…请解释矛盾」式)
-#: 注意:「自述」单独出现是合法锚定(简历锚定横切),不在黑名单
-_ADVERSARIAL_WORDS = ("矛盾", "撒谎", "撒了谎", "夸大", "打脸", "为什么没做到")
-
 #: 链源真实性校验的忽略词:**只收我们自己材料里的拴架词**——模型会把材料
 #: 标签原样抄进 theme(如「源自 dossier C4 项目经验栏」),那是我们的内部
 #: 用词、不在候选人材料里,当内容词会把真实链误判成编造。
@@ -491,7 +507,7 @@ def _validate_group_v2(
     dossier_lowers = dossier_text.lower()
 
     def _check_question(q: str) -> None:
-        for word in _ADVERSARIAL_WORDS:
+        for word in ADVERSARIAL_WORDS:
             if word in q:
                 raise ValueError(f"对抗前提问法({word}):{q[:40]!r}")
 
@@ -650,6 +666,30 @@ def _attribution_level(level: Any) -> Any:
     return level if level in allowed else "none"
 
 
+#: 过审题的出题模式:题目由模型依据证据材料写成的那两种。guided 是材料读不到
+#: 时的通用引导题,通用是它的本分;skipped 没有题。
+_REVIEWED_MODES = ("repo_deep_dive", "cv_dive")
+
+
+async def review_node(state: InvestigationState) -> dict:
+    """审题段:出题之后逐题给意见,挂在信封的 review 上;题目本身不动。
+
+    审题关闭、出题失败、或该模式不审时原样放行。审题自身失败也不影响题目
+    (review_line 不抛,只把结果标成 unavailable)。
+    """
+    envelope = state.get("question_set")
+    if state.get("error") or not envelope or envelope.get("mode") not in _REVIEWED_MODES:
+        return {}
+    if review_mode() != "annotate":
+        return {}
+    review = await review_line(
+        targets_from_group(envelope.get("group") or {}),
+        material=_generation_material(state),
+        statement=state["project_text"],
+    )
+    return {"question_set": {**envelope, "review": review}}
+
+
 async def skip_node(state: InvestigationState) -> dict:
     """skip:此维不出题(空集合法);信封 v2 形状。"""
     envelope = QbankV2(mode="skipped", group=QuestionGroupV2(), prompt_version=_prompt_version())
@@ -664,10 +704,11 @@ _compiled: Any | None = None
 
 
 def build_investigation_subgraph() -> Any:
-    """调查子图:route →(deep_dive/cv_dive→explore)/guided/skip → generate → finalize。
+    """调查子图:route →(deep_dive/cv_dive→explore)/guided/skip → generate → review → finalize。
 
     cv_dive 与 deep_dive 同走 explore→generate(都要取材后出带链的题组),
     区别在 explore 的取材来源(代码仓 vs 简历文本)与 generate 的出题 prompt。
+    review 只给题目挂意见,不改题,也不改变路由。
     """
     global _compiled
     if _compiled is not None:
@@ -676,6 +717,7 @@ def build_investigation_subgraph() -> Any:
     g.add_node("route", route_node)
     g.add_node("explore", explore_node)
     g.add_node("generate", generate_node)
+    g.add_node("review", review_node)
     g.add_node("skip", skip_node)
     g.add_node("finalize", finalize)
     g.set_entry_point("route")
@@ -690,7 +732,8 @@ def build_investigation_subgraph() -> Any:
         },
     )
     g.add_edge("explore", "generate")
-    g.add_edge("generate", "finalize")
+    g.add_edge("generate", "review")
+    g.add_edge("review", "finalize")
     g.add_edge("skip", "finalize")
     g.add_edge("finalize", END)
     _compiled = g.compile()

@@ -349,6 +349,7 @@ async def _do_qbank(
     有效,题库缺失管理面可见、可单独重试。
     """
     from official_agent.evaluation import bundle as eval_bundle
+    from official_agent.evaluation import question_similarity
     from official_agent.state import qbank as qbank_store
 
     t_qbank = time.monotonic()
@@ -361,6 +362,11 @@ async def _do_qbank(
             github_token=get_effective_settings().github_token,
             grade=grade,
         )
+        # 相似度标注要写进信封,所以在落库前;向量要按题库版本落索引,所以在落库后。
+        # 两步都是旁路,自己兜住失败,不影响题库落库
+        pending_index = await question_similarity.annotate(
+            envelope, resume_id=resume_id, cycle_id=cycle_id
+        )
         qbank_version = await asyncio.to_thread(
             qbank_store.save_qbank,
             resume_id=resume_id,
@@ -372,6 +378,13 @@ async def _do_qbank(
             ),
             envelope=envelope,
             prompt_version=str(envelope.get("prompt_version", "")),
+        )
+        await question_similarity.persist(
+            pending_index,
+            envelope,
+            resume_id=resume_id,
+            cycle_id=cycle_id,
+            qbank_version=qbank_version,
         )
         # 探索+出题用量进 conversation_log(evaluation 通道,
         # 关联 job;复用四列 token 管道,不新建表)

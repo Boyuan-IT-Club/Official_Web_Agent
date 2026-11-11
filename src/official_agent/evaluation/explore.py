@@ -4,7 +4,8 @@ LLM(model_strong)决定调八工具之一 → 观察 → 观察**确定性映射
 dossier 槽位(agent 决定填多满,槽位归属不必 LLM 再判一次)。
 预算四闸:①每仓 80 轮(LLM+工具累计)②墙钟 300s ③单工具结果截断
 (client 层已做)④dossier ≤40K(dossier.add 把关)。任一触顶即停,
-用已有材料出题并标 degraded(不判失败)。
+用已有材料出题并标 degraded(不判失败)。墙钟只算探索自己花的时间:
+排队等评估域模型并发闸的那一段不计入,否则别的 job 一忙,这条线的档案就变薄。
 
 prompt cache 纪律:system(技能文本)跨候选字节稳定——不嵌时间戳/
 仓主名/随机数;候选人材料只进 user 消息且追加不改写;步数计数放 user
@@ -21,7 +22,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from official_agent.evaluation.dossier import SLOT_NAMES, Dossier
 from official_agent.evaluation.github_client import GitHubClient, GitHubUnavailable
-from official_agent.evaluation.llm_common import TEMPERATURE_GENERATION
+from official_agent.evaluation.llm_common import TEMPERATURE_GENERATION, model_gate
 from official_agent.security.injection_guard import guard_tool_result, wrap_data_zone
 from official_agent.state.conversation import usage_from_response
 
@@ -262,8 +263,13 @@ async def explore_repo(
                     f"dossier {dossier.total_chars} 字符]"
                 )
             )
-            remaining = MAX_WALL_SECONDS - (time.monotonic() - start)
-            response = await asyncio.wait_for(model.ainvoke(messages), timeout=max(remaining, 1.0))
+            queued_at = time.monotonic()
+            async with model_gate():
+                start += time.monotonic() - queued_at  # 排队不占探索的墙钟预算
+                remaining = MAX_WALL_SECONDS - (time.monotonic() - start)
+                response = await asyncio.wait_for(
+                    model.ainvoke(messages), timeout=max(remaining, 1.0)
+                )
             messages.append(response)
             usage = usage_from_response(response) or {}
             input_tokens += usage.get("input_tokens") or 0

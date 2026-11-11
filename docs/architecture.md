@@ -89,12 +89,14 @@ src/official_agent/
 │   ├── investigate_graph.py#   调查出题子图:route→explore→generate(含 skip/guided 分支)
 │   ├── bundle.py           #   出题证据线:仓线/评测错因线/奖项线并发跑,汇合后按需兜底 → qbank 信封
 │   ├── explore.py          #   受限 ReAct 仓探索(轮数/墙钟双闸 + dossier 槽位)
+│   ├── question_review.py  #   审题:出题之后逐题给意见,只标注不改题(默认关闭)
+│   ├── question_similarity.py # 题目相似度标注:本包跨线查重 + 跨简历通用题(默认关闭)
 │   ├── judge.py / tech_stack.py / awards.py   # 专项出题
 │   ├── scoring.py          #   绝对卡短路 + 清单派生 0-10 分
 │   ├── grading.py          #   同部门候选池内相对分级(优秀/良好/一般)+ 调剂建议/面试提示
 │   ├── applicant.py        #   报名信息解析(志愿部门/专业/年级)
 │   ├── schema.py           #   数据契约(ScorecardOutput/QbankV2/QuestionGroupV2...)
-│   ├── llm_common.py       #   共享小件:content_text/prompt_version/温度定档/invoke_with_retry
+│   ├── llm_common.py       #   共享小件:content_text/prompt_version/温度定档/invoke_with_retry/模型并发闸
 │   ├── runner 依赖的 github_client / autograding / attribution / dossier
 │   └── state/evaluation/(见 state/)
 ├── state/                  # 基础设施:Postgres 状态面(Repository 语义)
@@ -103,6 +105,7 @@ src/official_agent/
 │   ├── conversation.py     #   agent_conversation_log:对话日志 + usage 解包
 │   ├── evaluation/         #   包:scorecard_store / job_store / review_queue / bootstrap / _connection(池)
 │   ├── qbank.py            #   interview_qbank:题库 + pick_log
+│   ├── qbank_index.py      #   qbank_question_index:题目向量索引(pgvector,惰性自举)
 │   ├── audit.py            #   agent_audit_log:审计(五字段,ADR-0006)
 │   └── config_store.py     #   agent_config:热配置(DB 覆盖 env)
 ├── tools/                  # 基础设施:后端 REST 的语义化封装
@@ -245,7 +248,7 @@ flowchart LR
 分池相对划分(头尾各约两成;池子不足 15 人改用绝对锚点;媒体部与综合部各自成池)。
 数值分仅 `evaluation:score:view` 可见。
 
-### 6.3 调查出题子图(route → explore → generate)
+### 6.3 调查出题子图(route → explore → generate → review)
 
 ```mermaid
 flowchart TD
@@ -253,7 +256,8 @@ flowchart TD
     RT -->|guided| GEN["generate_node<br/>出题+校验回灌 ×2<br/>(只捕 ValueError)"]
     RT -->|skip| SKIP["skip_node<br/>空组+mode=skipped"]
     EX --> GEN
-    GEN --> FIN["finalize"]
+    GEN --> REV["review_node<br/>审题:逐题意见挂在信封上,题目不动<br/>默认关闭;失败只标 unavailable"]
+    REV --> FIN["finalize"]
     SKIP --> FIN
     FIN --> E(["END"])
 
@@ -297,8 +301,14 @@ flowchart LR
 并发有两处封顶,数值都在代码里:一个 bundle 里同时在跑的仓线至多 3 条
 (`bundle.MAX_PARALLEL_REPO_LINES`);进程内同时在途的 GitHub 请求至多 4 个
 (`github_client.MAX_CONCURRENT_REQUESTS`,所有 client 共用——各线各建各的 client,却共用同一个
-令牌的速率配额)。评估域目前没有统一的模型并发闸:4 个 job 同时在题库段时,模型调用峰值是
-4 ×(3 条仓线 + 评测线)= 16。
+令牌的速率配额)。模型调用另有一把评估域共用的进程级闸(`llm_common.model_gate`,上限
+`EVALUATION_MODEL_CONCURRENCY`,默认 8):评分、探索、出题、审题都先过它,所以 4 个 job 同时在
+题库段时峰值是 8 而不是 4 ×(3 条仓线 + 评测线)= 16。排队等闸的时间不计入探索的墙钟预算。
+
+题库落库前后各有一步可选的相似度标注(`question_similarity`,默认关闭):落库前给题目算向量,
+把本包里跨线重复的题、本周期多份简历都出过的题标在信封顶层;落库后把向量写进
+`qbank_question_index`。审题意见与相似度标注都挂在题组旁边而不是题目对象里,
+`flatten_v2_pickable` 读出可挑题视图时再并到题上。两步都是旁路:失败只是没有标注。
 
 ## 7. 会话生命周期(web)
 
@@ -333,6 +343,7 @@ flowchart TD
 | `evaluation_job` | 执行 job(状态机/attempts/qbank_status) | 部分唯一索引:活跃 job 每 (resume,cycle) 一条 |
 | `interview_qbank` | 题库信封(v2 JSONB) | 版本递增 |
 | `qbank_pick_log` | 面试官选题记录 | 服务端权威引用(防伪造证据路径) |
+| `qbank_question_index` | 题目向量索引(每道可挑的题一行) | 每行记 embed_model,不跨模型比较;一份简历只留最新一版 |
 | `agent_audit_log` | 审计(ADR-0006 五字段) | 代理身份+trace_id |
 | `agent_config` | 热配置低敏键 | 白名单 HOT_KEYS |
 | `kb_source` / `kb_faq` / `kb_doc` / `kb_chunks` | 知识库来源/内容/向量 | 禁跨 embedding 模型混排;`kb_source.cycle_id` 非空的条目只在该招新周期开放时进检索 |

@@ -1,4 +1,4 @@
-"""评估线共享的 LLM 调用小件:回复解包 / prompt 版本 / 温度定档 / 校验回灌。
+"""评估线共享的 LLM 调用小件:回复解包 / prompt 版本 / 温度定档 / 校验回灌 / 并发闸。
 
 四个评估模块(graph/investigate/bundle/judge/tech_stack)曾各自内联这四样,
 同一知识多个出处;本模块是唯一权威出处。
@@ -6,17 +6,50 @@
 
 from __future__ import annotations
 
+import asyncio
+import weakref
 from collections.abc import Callable
 from typing import Any
 
 from langchain_core.messages import HumanMessage
 
+from official_agent.config import get_settings
 from official_agent.state.conversation import usage_from_response
 
 # 温度按用途定档:评分要稳定可复现(0.1);出题允许一点发散换覆盖面(0.2)。
 # 同值同义,改这里一处生效;调用点不要再写字面量。
 TEMPERATURE_SCORING = 0.1
 TEMPERATURE_GENERATION = 0.2
+
+
+#: 每个事件循环一把闸:信号量绑定在首次等待它的循环上,而测试里每个用例一个
+#: 新循环。生产只有一个循环,所以这就是进程级的闸。
+_model_gates: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def model_gate() -> asyncio.Semaphore:
+    """评估域的模型并发闸:评分、探索、出题、审题的模型调用都要先过它。
+
+    各图各自限并发挡不住叠乘——一个 job 里几条证据线同时在跑,几个 job 又同时
+    在跑——所以闸是进程级的一把,上限取 Settings.evaluation_model_concurrency
+    (首次使用时读一次)。持闸期间只做模型调用本身,不要在里面等别的东西。
+    """
+    loop = asyncio.get_running_loop()
+    gate = _model_gates.get(loop)
+    if gate is None:
+        gate = asyncio.Semaphore(max(int(get_settings().evaluation_model_concurrency), 1))
+        _model_gates[loop] = gate
+    return gate
+
+
+async def gated_ainvoke(model: Any, messages: list, *, config: dict | None = None) -> Any:
+    """过闸后调一次模型(评估域里 `model.ainvoke` 的唯一写法)。"""
+    async with model_gate():
+        if config is None:
+            return await model.ainvoke(messages)
+        return await model.ainvoke(messages, config=config)
 
 
 def content_text(response: Any) -> str:
@@ -63,12 +96,9 @@ async def invoke_with_retry[T](
     usage: dict[str, int | None] | None = None
     last_err: ValueError | None = None
     for _attempt in range(attempts):
-        if config is None:
-            resp = await model.ainvoke([HumanMessage(content=prompt_text + corrective)])
-        else:
-            resp = await model.ainvoke(
-                [HumanMessage(content=prompt_text + corrective)], config=config
-            )
+        resp = await gated_ainvoke(
+            model, [HumanMessage(content=prompt_text + corrective)], config=config
+        )
         got = usage_from_response(resp)
         if got is not None:
             usage = got

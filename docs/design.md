@@ -108,7 +108,7 @@ POST /chat(web/routes.chat,ChatBody 校验 + JWT 鉴权)
 POST /admin/evaluation/run(evaluation_admin,权限 evaluation:run)
   → runner.submit:后端权威归属核对 → create_jobs(幂等,活跃去重)
   → _execute_job:评分段(_do_scoring:取数→归属硬断言→脱敏→评分子图→落卡)
-  → 题库段(_do_qbank:出题 bundle(各证据线并发)→qbank 落库→用量日志)
+  → 题库段(_do_qbank:出题 bundle(各证据线并发)→[相似度标注]→qbank 落库→[题目索引]→用量日志)
   → mark succeeded(带 qbank_status)→ 完成审计 → 评审队列(list_review_queue)
 ```
 

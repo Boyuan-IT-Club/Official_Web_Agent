@@ -1479,3 +1479,123 @@ def test_non_thin_still_requires_two_chains() -> None:
         ig.validate_qbank_v2_group(
             payload, "README.md src/app.py tests/test_app.py", paths=["src/app.py", "README.md"]
         )
+
+
+# ── 审题段:出题之后给题目挂意见,题目本身不动 ─────────────
+
+
+def _install_reviewer(monkeypatch, *, mode: str = "annotate") -> list[dict]:
+    """打开审题并换上假审题者:记下每次收到的入参,逐题给 keep。"""
+    from official_agent.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "qbank_review_mode", mode)
+    calls: list[dict] = []
+
+    async def _review(targets, *, material, statement=""):
+        calls.append({"targets": targets, "material": material, "statement": statement})
+        return {
+            "status": "reviewed",
+            "items": [{"key": t.key, "verdict": "keep", "reasons": []} for t in targets],
+            "prompt_version": "evaluation_question_review/v1",
+            "usage": {"input_tokens": 700, "output_tokens": 30},
+        }
+
+    monkeypatch.setattr(ig, "review_line", _review)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_review_is_skipped_unless_switched_on(monkeypatch) -> None:
+    """审题默认关闭:不调审题者,信封的 review 为空。"""
+    _install_fake_gh_and_model(monkeypatch, _v2_payload())
+    calls = _install_reviewer(monkeypatch, mode="off")
+
+    qs = await ig.run_investigation("我做了 https://github.com/me/demo 报名页重构")
+
+    assert calls == []
+    assert qs["review"] is None
+
+
+@pytest.mark.asyncio
+async def test_deep_dive_review_sees_generation_material_and_leaves_questions_alone(
+    monkeypatch,
+) -> None:
+    """审题者看到的是出题用的同一份材料;意见挂在信封上,题组与不审时一模一样。"""
+    statement = "我做了 https://github.com/me/demo 报名页重构"
+    _install_fake_gh_and_model(monkeypatch, _v2_payload())
+    _install_reviewer(monkeypatch, mode="off")
+    unreviewed = await ig.run_investigation(statement)
+
+    calls = _install_reviewer(monkeypatch)
+    qs = await ig.run_investigation(statement)
+
+    assert qs["group"] == unreviewed["group"]
+    assert qs["review"]["status"] == "reviewed"
+    assert [item["key"] for item in qs["review"]["items"]] == [
+        "entry",
+        "chain:0:0",
+        "chain:0:1",
+        "chain:0:2",
+        "chain:1:0",
+        "chain:1:1",
+        "chain:1:2",
+        "reserve:0",
+        "reserve:1",
+    ]
+    (call,) = calls
+    assert call["statement"] == statement
+    assert "README.md src/app.py tests/test_app.py" in call["material"]  # 探索段的档案
+
+
+@pytest.mark.asyncio
+async def test_generator_cannot_pre_approve_its_own_questions(monkeypatch) -> None:
+    """出题模型在题目对象里塞 review 不起作用:意见只认审题段写在信封上的那份。"""
+    smuggled = json.loads(_v2_payload())
+    smuggled["entry"]["review"] = {"verdict": "keep", "reasons": []}
+    smuggled["review"] = {"status": "reviewed", "items": []}
+    _install_fake_gh_and_model(monkeypatch, json.dumps(smuggled, ensure_ascii=False))
+    _install_reviewer(monkeypatch, mode="off")
+
+    qs = await ig.run_investigation("我做了 https://github.com/me/demo 报名页重构")
+
+    assert "review" not in qs["group"]["entry"]
+    assert qs["review"] is None
+
+
+@pytest.mark.asyncio
+async def test_resume_dive_is_reviewed_with_tech_stack_material(monkeypatch) -> None:
+    """简历深挖也过审题;材料里带着出题时追加的技术栈清单。"""
+    _install_fake_cv_model(monkeypatch, _repo_fallback_payload())
+
+    class _UnreadableGH(_FakeGH):
+        async def repo(self, owner, repo):
+            raise GitHubUnavailable("GitHub 404")
+
+    monkeypatch.setattr(ig, "GitHubClient", _UnreadableGH)
+    calls = _install_reviewer(monkeypatch)
+
+    qs = await ig.run_investigation(_REPO_RESUME)
+
+    assert qs["mode"] == "cv_dive"
+    assert qs["review"]["status"] == "reviewed"
+    assert ig.TECH_STACK_HEADER in calls[0]["material"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "produced",
+    [
+        {"question_set": {"mode": "guided", "group": {"entry": {"question": "讲讲项目?"}}}},
+        {"question_set": {"mode": "skipped", "group": {}}},
+        {"question_set": None, "error": "ValueError: 出题两次仍不合规"},
+    ],
+    ids=["guided", "skipped", "generation-failed"],
+)
+async def test_review_node_passes_through_what_it_does_not_review(monkeypatch, produced) -> None:
+    """通用引导题、空组、出题失败都不审:通用是引导题的本分,后两者没有题可审。"""
+    calls = _install_reviewer(monkeypatch)
+
+    update = await ig.review_node({"project_text": "x", "route": "guided", **produced})
+
+    assert update == {}
+    assert calls == []
