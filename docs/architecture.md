@@ -77,6 +77,7 @@ src/official_agent/
 │   ├── telemetry.py        #   conversation_log 落账、KB 引用锚收集、usage/前缀指纹
 │   ├── config_admin.py     #   /admin/config:低敏热改 + 高敏掩码 + base_url 白名单
 │   ├── kb_admin.py         #   /admin/kb*:知识条目 CRUD/入库重嵌
+│   ├── kb_ops_admin.py     #   /admin/kb/ops*:触发离线分析、运行列表、主题清单(挂在 kb_admin 的 router 下)
 │   └── evaluation_admin.py #   /admin/evaluation*:触发/队列/维卡/采纳/驳回/题库
 ├── graphs/                 # 编排层:LangGraph 图
 │   ├── assistant/          #   A:build_assistant_agent(create_agent ReAct)+ 会话压缩
@@ -104,6 +105,7 @@ src/official_agent/
 │   ├── evaluation/         #   包:scorecard_store / job_store / review_queue / bootstrap / _connection(池)
 │   ├── qbank.py            #   interview_qbank:题库 + pick_log
 │   ├── audit.py            #   agent_audit_log:审计(五字段,ADR-0006)
+│   ├── kb_ops.py           #   kb_ops_run / kb_ops_topic:离线分析的运行记录与主题清单 + 运行锁
 │   └── config_store.py     #   agent_config:热配置(DB 覆盖 env)
 ├── tools/                  # 基础设施:后端 REST 的语义化封装
 │   ├── client.py           #   BackendClient + 异常层级(AuthError/UnavailableError/BackendError)
@@ -114,6 +116,8 @@ src/official_agent/
 │   └── knowledge.py        #   search_knowledge(知识库检索,降级契约;解析开放周期、落检索日志)
 ├── kb/                     # 知识库:chunking / embedding / keywords(分词) / schema / store(混合检索+周期过滤)
 │                           #   / query_log(kb_query_log:每次检索的结局与门槛前最高分)
+├── kb_ops/                 # 知识库运营(离线):cluster(没命中的检索聚成主题,纯函数) / triage(缺口甄别)
+│                           #   / graph(聚类→并行甄别,只计算) / runner(抢锁、取数、落库);不向知识库写内容
 ├── memory/                 # 长期记忆:store(agent_memory 表) / extract(后台提取+闸门) / recall(注入 system 末尾)
 ├── security/               # 横切:pii(脱敏)/ injection_guard(数据区+扫描)/ fabrication_guard
 ├── prompts/                # prompt 唯一权威(一图一节点一文件 + frontmatter,ADR-0004)
@@ -311,6 +315,7 @@ flowchart TD
 | `agent_config` | 热配置低敏键 | 白名单 HOT_KEYS |
 | `kb_source` / `kb_faq` / `kb_doc` / `kb_chunks` | 知识库来源/内容/向量 | 禁跨 embedding 模型混排;`kb_source.cycle_id` 非空的条目只在该招新周期开放时进检索 |
 | `kb_query_log` | 对话里每次知识库检索一行(脱敏后的问题/结局/门槛前最高分/命中条目/生效周期) | fail-open 写入;按 `thread_id` 随会话删除;`trace_id` 关联对话日志 |
+| `kb_ops_run` / `kb_ops_topic` | 知识库运营的离线分析:一次运行一行,产出的主题清单(热度/近失数/归类/样本引用)随运行级联 | 同一时刻只跑一次(advisory lock);主题不存提问原文,只存 `kb_query_log` 行 id,样本随会话删除消失;只留最近若干次运行 |
 
 ## 9. 横切机制
 
@@ -331,7 +336,7 @@ flowchart TD
 | 层 | 位置/命令 | 把关内容 |
 |---|---|---|
 | 单测 | `uv run pytest`(709+) | 确定性逻辑:工具/图结构/权限/脱敏/状态面(mock 连接) |
-| 集成 | pgvector 容器 + `POSTGRES_URL=... pytest tests/*_pg.py tests/test_kb_integration.py` | DDL 幂等/唯一索引/事务边界/锁纪律(自 SKIP 不算通过) |
+| 集成 | pgvector 容器 + `POSTGRES_URL=... pytest tests/*_pg.py tests/test_kb_integration.py`(知识库两档 `test_kb_integration.py` / `test_kb_ops_integration.py` 另需 `KB_TEST_DATABASE_URL` 指向一次性库) | DDL 幂等/唯一索引/事务边界/锁纪律(自 SKIP 不算通过) |
 | eval | `python evals/run_evals.py` | 工具选择/参数红线(forbidden_tools)、阈值门禁、LLM-as-judge |
 | 机械 | `uv run ruff check .` | lint(line-length 100) |
 

@@ -14,7 +14,10 @@
 import asyncio
 import logging
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
 
 from official_agent.config import get_settings
 from official_agent.security.pii import mask_pii
@@ -148,6 +151,73 @@ def record_query(entry: QueryLogEntry) -> None:
     task = asyncio.create_task(_write())
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
+
+
+def list_unanswered(*, since: datetime, until: datetime, limit: int) -> list[dict[str, Any]]:
+    """时间窗 [since, until) 内没命中(status=not_found)的检索,按 (created_at, id) 升序。
+
+    每行含 id / thread_id / query / best_vec_score / created_at。超过 limit 时只留
+    最新的 limit 行——离线聚类要给嵌入与计算量封顶,而新近的问题更值得先处理。
+    """
+    ensure_query_log_table()
+    with pooled_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, thread_id, query, best_vec_score, created_at
+            FROM (
+                SELECT id, thread_id, query, best_vec_score, created_at
+                FROM kb_query_log
+                WHERE status = 'not_found' AND created_at >= %s AND created_at < %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+            ) newest
+            ORDER BY created_at, id
+            """,
+            (since, until, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def summarize_window(*, since: datetime, until: datetime, near_miss_floor: float) -> dict[str, int]:
+    """时间窗 [since, until) 内各结局的检索次数:total / ok / not_found / unavailable / near_miss。
+
+    near_miss 是 not_found 里最高向量分不低于 near_miss_floor 的次数(差一点命中)。
+    """
+    ensure_query_log_table()
+    with pooled_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT count(*) AS total,
+                   count(*) FILTER (WHERE status = 'ok') AS ok,
+                   count(*) FILTER (WHERE status = 'not_found') AS not_found,
+                   count(*) FILTER (WHERE status = 'unavailable') AS unavailable,
+                   count(*) FILTER (
+                       WHERE status = 'not_found' AND best_vec_score >= %s
+                   ) AS near_miss
+            FROM kb_query_log
+            WHERE created_at >= %s AND created_at < %s
+            """,
+            (near_miss_floor, since, until),
+        ).fetchone()
+    keys = ("total", "ok", "not_found", "unavailable", "near_miss")
+    return {key: int(row[key]) if row else 0 for key in keys}
+
+
+def get_queries(query_ids: Sequence[int]) -> dict[int, dict[str, Any]]:
+    """按日志行 id 取问题文本与时间,返回 {id: {query, created_at}}。
+
+    所在会话已被删除的行查不到,结果里就没有那个 id——引用这些行的一方(主题清单的
+    样本)据此自然随会话删除而消失。
+    """
+    if not query_ids:
+        return {}
+    ensure_query_log_table()
+    with pooled_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, query, created_at FROM kb_query_log WHERE id = ANY(%s::bigint[])",
+            (list(query_ids),),
+        ).fetchall()
+    return {int(r["id"]): {"query": r["query"], "created_at": r["created_at"]} for r in rows}
 
 
 def delete_thread_queries(thread_id: str) -> int:

@@ -38,6 +38,8 @@ uv run python evals/run_evals.py --write-baseline evals/baselines.json # 落新�
 | `datasets/cv_dive_report.yaml` | datasets | `cv_dive_report` | LLM_* 配置 + `real_resumes/` 有样本 |
 | `datasets/scoring_probes.yaml` | datasets | `scoring_probes` | LLM_* 配置;CD 部署后在生产容器里自动跑(只报告) |
 | `datasets/memory_probes.yaml` | datasets | `memory_probes` | LLM_* 配置(提取闸门 + 模型,不落库) |
+| `datasets/kb_ops_probes.yaml` | datasets | `kb_ops_probes` | 无(确定性:聚类/近失判定/样本过滤,向量写死在数据集里) |
+| `datasets/kb_ops_triage.yaml` | datasets | `kb_ops_triage` | LLM_* 配置(缺口甄别:样本过滤 + 模型 + 输出闸门,不读库不落库);尚无基线 |
 
 ## 专项数据集与纪律
 

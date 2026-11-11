@@ -109,6 +109,8 @@ def default_registry() -> dict[str, SuiteSpec]:
     from official_agent.evals import (
         cv_dive_report,
         injection_probes,
+        kb_ops_probes,
+        kb_ops_triage,
         kb_probes,
         memory_probes,
         qbank_judge,
@@ -135,6 +137,12 @@ def default_registry() -> dict[str, SuiteSpec]:
         ),
         "memory_probes": SuiteSpec(
             run=memory_probes.run_suite, env_blocker=memory_probes.env_blocker
+        ),
+        "kb_ops_probes": SuiteSpec(
+            run=kb_ops_probes.run_suite, env_blocker=kb_ops_probes.env_blocker
+        ),
+        "kb_ops_triage": SuiteSpec(
+            run=kb_ops_triage.run_suite, env_blocker=kb_ops_triage.env_blocker
         ),
     }
 

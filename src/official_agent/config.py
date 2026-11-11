@@ -45,6 +45,19 @@ class Settings(BaseSettings):
     kb_min_score: float = 0.45
     kb_keyword_min_ratio: float = 0.5
 
+    # 知识库运营(kb_ops/):把没答上的检索聚成主题。下面四个数都是起点,没有用真实
+    # 日志校准过;换 embedding 模型后相似度分布会变,聚类阈值要重校。
+    # 两个问题算同一个主题的最低余弦相似度
+    kb_ops_cluster_threshold: float = 0.75
+    # 主题的最小支持度:至少这么多次检索、来自至少这么多个会话。会话数同时是隐私
+    # 下限(只有多人问过的问题才摘给管理员看),代码里不接受小于 2 的值
+    kb_ops_min_queries: int = 3
+    kb_ops_min_threads: int = 2
+    # 没命中、但最高向量分落在 [kb_min_score - 本值, kb_min_score) 的检索算「差一点命中」
+    kb_ops_near_miss_margin: float = 0.08
+    # 主题清单只保留最近这么多次运行,更早的随下一次运行清掉
+    kb_ops_run_retention: int = 8
+
     # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)
     postgres_url: str = "postgresql://localhost:5432/official_agent"
 

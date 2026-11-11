@@ -5,6 +5,7 @@
 - 创建/更新即入库重嵌(分块+embedding 单事务);「重嵌」端点按已存内容
   重建向量——换 embedding 模型后逐条补齐用
 - store 层同步 psycopg,路由内一律 asyncio.to_thread,不阻塞事件循环
+- 运营分析与主题清单的路由(/admin/kb/ops*,web/kb_ops_admin.py)挂在本 router 下
 """
 
 import asyncio
@@ -21,6 +22,7 @@ from official_agent.kb.embedding import EmbeddingError, EmbeddingNotConfiguredEr
 from official_agent.kb.schema import KbSchemaError
 from official_agent.kb.store import KbValidationError
 from official_agent.web.auth import require_any as _require_any
+from official_agent.web.kb_ops_admin import router as kb_ops_router
 
 router = APIRouter()
 
@@ -208,3 +210,7 @@ async def reembed_kb_source(
     except Exception as exc:  # noqa: BLE001
         raise _map_store_error(exc) from exc
     return {"source_id": source_id, "reembedded": True}
+
+
+# 运营分析与主题清单(/admin/kb/ops*)是知识库管理面的一部分,随本 router 一起注册
+router.include_router(kb_ops_router)
