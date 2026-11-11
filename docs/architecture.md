@@ -332,7 +332,7 @@ flowchart TD
 |---|---|---|
 | 单测 | `uv run pytest`(709+) | 确定性逻辑:工具/图结构/权限/脱敏/状态面(mock 连接) |
 | 集成 | pgvector 容器 + `POSTGRES_URL=... pytest tests/*_pg.py tests/test_kb_integration.py` | DDL 幂等/唯一索引/事务边界/锁纪律(自 SKIP 不算通过) |
-| eval | `python evals/run_evals.py` | 工具选择/参数红线(forbidden_tools)、阈值门禁、LLM-as-judge |
+| eval | `python evals/run_evals.py` | 工具选择/参数红线(forbidden_tools)、阈值门禁、LLM-as-judge、初筛评分基线(区间一致率/条目翻转率/注入拦截率) |
 | 机械 | `uv run ruff check .` | lint(line-length 100) |
 
 评分分级可见与客服面红线有专门保证测试:`test_no_role_assembles_score_tools`
