@@ -15,6 +15,7 @@ flowchart TD
         CA["config_admin<br/>配置管理面"]
         KA["kb_admin<br/>知识库管理面"]
         EA["evaluation_admin<br/>初筛管理面"]
+        RA["retrospective_admin<br/>周期复盘管理面"]
         SS["session_store<br/>会话注册表(纯状态)"]
         AF["agent_factory<br/>配置热生效"]
         TEL["telemetry<br/>对话观测落账"]
@@ -34,6 +35,9 @@ flowchart TD
         LLMC["llm_common<br/>共享 LLM 小件"]
         MORE["judge / tech_stack / awards / scoring / schema ..."]
     end
+    subgraph 复盘["周期复盘 retrospective/"]
+        RM["catalog / metrics / guard / compare<br/>指标目录·采集·小格子抑制·跨周期差值"]
+    end
     subgraph 基础设施层["基础设施层"]
         TLS["tools/<br/>后端 REST 客户端 + 语义化工具"]
         ST["state/<br/>Postgres 状态面"]
@@ -45,6 +49,9 @@ flowchart TD
     R --> TEL
     R --> AF
     EA --> RUN
+    RA --> RM
+    RM --> TLS
+    RM --> ST
     AG --> IDT
     AG --> TLS
     BDL --> EXP
@@ -64,6 +71,9 @@ flowchart TD
 | B 评估流水线 | 管理面 / 启动自动恢复 | `evaluation/runner` + LangGraph 子图 |
 | C 面试官 Copilot | 官网管理端(规划) | `graphs/copilot`(预留) |
 
+三个模块之外还有一条管理面触发的离线批处理:**周期指标快照**(`retrospective/`,纯代码聚合,
+不含模型),见 §11。
+
 ## 2. 包结构
 
 ```
@@ -77,7 +87,8 @@ src/official_agent/
 │   ├── telemetry.py        #   conversation_log 落账、KB 引用锚收集、usage/前缀指纹
 │   ├── config_admin.py     #   /admin/config:低敏热改 + 高敏掩码 + base_url 白名单
 │   ├── kb_admin.py         #   /admin/kb*:知识条目 CRUD/入库重嵌
-│   └── evaluation_admin.py #   /admin/evaluation*:触发/队列/维卡/采纳/驳回/题库
+│   ├── evaluation_admin.py #   /admin/evaluation*:触发/队列/维卡/采纳/驳回/题库
+│   └── retrospective_admin.py # /admin/retrospective/snapshot*:触发指标快照采集/读取/对比基线
 ├── graphs/                 # 编排层:LangGraph 图
 │   ├── assistant/          #   A:build_assistant_agent(create_agent ReAct)+ 会话压缩
 │   ├── identity.py         #   JWT → ResolvedIdentity(权限码/角色/属主)
@@ -104,7 +115,8 @@ src/official_agent/
 │   ├── evaluation/         #   包:scorecard_store / job_store / review_queue / bootstrap / _connection(池)
 │   ├── qbank.py            #   interview_qbank:题库 + pick_log
 │   ├── audit.py            #   agent_audit_log:审计(五字段,ADR-0006)
-│   └── config_store.py     #   agent_config:热配置(DB 覆盖 env)
+│   ├── config_store.py     #   agent_config:热配置(DB 覆盖 env)
+│   └── retrospective/      #   包:snapshot_store(cycle_metrics_snapshot,只追加)/ aggregates(各域只读聚合)
 ├── tools/                  # 基础设施:后端 REST 的语义化封装
 │   ├── client.py           #   BackendClient + 异常层级(AuthError/UnavailableError/BackendError)
 │   ├── readonly.py         #   只读工具(按意图命名,60 秒按来问者缓存)
@@ -115,6 +127,8 @@ src/official_agent/
 ├── kb/                     # 知识库:chunking / embedding / keywords(分词) / schema / store(混合检索+周期过滤)
 │                           #   / query_log(kb_query_log:每次检索的结局与门槛前最高分)
 ├── memory/                 # 长期记忆:store(agent_memory 表) / extract(后台提取+闸门) / recall(注入 system 末尾)
+├── retrospective/          # 周期复盘:catalog(指标目录:id/名字/口径) / metrics(各域口径函数+collect_metrics)
+│                           #   / guard(小格子抑制) / compare(跨周期差值,跨指标定义版本拒绝)
 ├── security/               # 横切:pii(脱敏)/ injection_guard(数据区+扫描)/ fabrication_guard
 ├── prompts/                # prompt 唯一权威(一图一节点一文件 + frontmatter,ADR-0004)
 ├── evals/                  # eval 集 + 统一 runner(python -m evals / evals/run_evals.py)
@@ -141,6 +155,8 @@ flowchart LR
 - **基础设施不感知上层**:tools 不知道 graphs,state 不知道 web
 - 例外与边界:web/telemetry 可以 lazy import `state.conversation`(观测面,函数内导入保持
   "web 入口无 PG 可跑"纪律)
+- `retrospective/` 与 `evaluation/` 同级:由 web 调用,向下只依赖 tools/state/security,
+  以及 `evaluation.schema` 里的部门清单常量;不 import 任何图或 runner
 
 ## 4. 设计模式与惯用法(模式 → 落点)
 
@@ -311,6 +327,7 @@ flowchart TD
 | `agent_config` | 热配置低敏键 | 白名单 HOT_KEYS |
 | `kb_source` / `kb_faq` / `kb_doc` / `kb_chunks` | 知识库来源/内容/向量 | 禁跨 embedding 模型混排;`kb_source.cycle_id` 非空的条目只在该招新周期开放时进检索 |
 | `kb_query_log` | 对话里每次知识库检索一行(脱敏后的问题/结局/门槛前最高分/命中条目/生效周期) | fail-open 写入;按 `thread_id` 随会话删除;`trace_id` 关联对话日志 |
+| `cycle_metrics_snapshot` | 每个招新周期的指标快照(过了小格子抑制的聚合数 + 当时的指标目录) | UNIQUE(cycle,version),只追加;没有 `thread_id`,不随会话删除或保留期清理 |
 
 ## 9. 横切机制
 
@@ -338,6 +355,38 @@ flowchart TD
 评分分级可见与客服面红线有专门保证测试:`test_no_role_assembles_score_tools`
 (装配层)、`test_assistant_surface_never_imports_evaluation_store`(tripwire)、
 `ts-score-not-exposed-*`(eval 行为红线)。
+
+## 11. 周期指标快照(管理面触发的离线批处理)
+
+```mermaid
+flowchart TD
+    T["POST /admin/retrospective/snapshot<br/>(evaluation:run)"] --> W["取周期起止日期<br/>GET /api/cycles/{id} → 北京时间时间窗"]
+    W -->|后端查不到周期| NF["404,不落快照"]
+    W --> C["collect_metrics:逐域取数"]
+    C --> F["漏斗:后端统计(服务账号)"]
+    C --> A["对话 / 知识库:按时间窗聚合"]
+    C --> E["初筛 / 出题 / 成本:按 cycle_id 聚合"]
+    F --> R["各域口径函数(纯函数)→ Raw*"]
+    A --> R
+    E --> R
+    C -.某个源不可用.-> D["该域标 unavailable + 原因<br/>其余域照常"]
+    R --> G["guard.suppress:小格子抑制<br/>(原始聚合进快照的唯一出口)"]
+    G --> S["save_snapshot<br/>内容与最新一版相同 → 不落新版本"]
+    S --> SNAP[("cycle_metrics_snapshot<br/>只追加,长期保留")]
+    SNAP --> RD["GET …/snapshot?baseline_cycle_id=<br/>compare.with_baseline 现算差值"]
+```
+
+- **数字全部由代码算**:这条链路没有模型调用。指标目录(`retrospective/catalog.CATALOG`)给每个
+  指标稳定 id、名字与口径;口径一改就升 `METRICS_SCHEMA`,不同版本的快照拒绝对比(409)。
+- **只进聚合数**:原始聚合只能经 `guard.suppress` 变成快照里的值——计数小于 5(含 0)、
+  能从比率或合计反推出小计数的格子都被抑制;对人的判定结果与各部门的格子固定出(缺席不等于 0),
+  流程状态桶为 0 时不出格子;分布的键只放行标识符与部门白名单。
+- **为什么是快照而不是现查**:对话日志与检索日志随会话删除而消失,周期结束时不留一份,
+  这一届就没有基线。快照表不挂在任何清理路径上,存储模块也不提供删除或改写。
+- **失败语义**:单个数据源不可用只让用到它的域缺席并在快照里标注(只给类别与异常类名);
+  口径函数里的程序错误不算「数据源不可用」,照常抛出。
+- 设计与取舍见 `docs/proposals/cycle-retrospective.md`;其后的分析员、撰稿人、报告与组织记忆
+  还是设计稿,没有实现。
 
 ## 文档地图
 
