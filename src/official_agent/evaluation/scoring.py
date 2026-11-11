@@ -127,6 +127,26 @@ def checklist_score(met: dict[str, bool], items: tuple[tuple[str, int], ...]) ->
     return round(10 * got / total_weight, 1)
 
 
+#: 整体敷衍(perfunctory)时,认真程度清单至多能达成的项数
+PERFUNCTORY_MAX_EFFORT_MET = 2
+
+
+def attitude_contract_violation(verdict: str, *, any_met: bool, effort_met: int) -> str:
+    """态度结论与逐项判定是否自相矛盾;返回违例说明,空串 = 对得上。
+
+    态度不端(bad_faith)的简历两张清单不该有任何一项达成;整体敷衍(perfunctory)
+    的简历认真程度清单至多达成 PERFUNCTORY_MAX_EFFORT_MET 项。
+    """
+    if verdict == "bad_faith" and any_met:
+        return "bad_faith 必须两张清单无一项达成(模型判了达成)"
+    if verdict == "perfunctory" and effort_met > PERFUNCTORY_MAX_EFFORT_MET:
+        return (
+            f"perfunctory 时认真程度至多达成 {PERFUNCTORY_MAX_EFFORT_MET} 项"
+            f"(模型判了 {effort_met} 项)"
+        )
+    return ""
+
+
 #: 简历实质篇幅 → 认真程度上限(0-10)。认真程度的判定项是模型判的:一句话的
 #: 简历也可能被判出「表达成文」「具体不套话」而拿到中等分。篇幅是确定性的,
 #: 用它封顶,保证材料不到两三行的简历够不上「认真」的档位。

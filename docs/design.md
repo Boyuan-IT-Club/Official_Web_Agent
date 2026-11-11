@@ -39,7 +39,7 @@ agent 工程实践:ReAct 工具调用、状态机编排、human-in-the-loop、�
 | 模块 | 入口(ADR-0003:各入口直连,无统一意图路由) | 形态 |
 |---|---|---|
 | **A · 招新对话助理** | 官网 SSE(`/api/agent/chat`,已上线);CLI(`official-agent` 命令,开发调试);飞书(规划,未接入) | 身份解析 → 按角色装配工具集 → ReAct 单循环;写操作经 interrupt 指纹令牌 |
-| **B · 简历评估流水线** | 管理面 `/admin/evaluation`(触发/重试/评审);启动自动恢复 | job 状态机 → 评分子图(评分+批判回炉)→ 出题 bundle → 落库/评审队列 |
+| **B · 简历评估流水线** | 管理面 `/admin/evaluation`(触发/重试/评审);启动自动恢复 | job 状态机 → 评分子图(评委判定 → 批判者复核 → 评委答辩 → 代码汇总出置信度)→ 出题 bundle → 落库/评审队列(低置信在前) |
 | **C · 面试官 Copilot** | 官网管理端面试页(规划中) | 卡片 / 速记追问建议 / 评价草稿三态 |
 
 ## 3. 总体架构
@@ -77,7 +77,7 @@ C:管理端面试页(规划)      ─┘        │
 |---|---|---|
 | `web/` | 接口层 | FastAPI 路由与入口横切:`routes`(chat SSE + 会话路由)、`config_admin`(配置管理面)、`kb_admin`(知识库管理面)、`evaluation_admin`(初筛管理面)、`auth`(鉴权依赖)、`session_store`(会话注册表,纯状态)、`agent_factory`(配置热生效)、`telemetry`(对话观测落账)、`app`(装配 + 生命周期 + trace 中间件) |
 | `graphs/` | 编排层 | `assistant/`(A:ReAct 单循环 + 会话压缩)、`evaluation/`+`investigate_graph`(B 的编排面)、`copilot/`(C,规划)、`identity`(JWT→身份)、`router`(统一路由图,未接入) |
-| `evaluation/` | 评估域 | 流水线领域逻辑:`runner`(job 执行)、`bundle`(出题证据线)、`explore`+`investigate_graph`(仓探索/出题)、`graph`(评分子图)、`judge`/`tech_stack`/`awards`(专项出题)、`scoring`(量规)、`schema`(数据契约)、`llm_common`(共享 LLM 小件)、`github_client`/`autograding`/`attribution`/`dossier` |
+| `evaluation/` | 评估域 | 流水线领域逻辑:`runner`(job 执行)、`bundle`(出题证据线)、`explore`+`investigate_graph`(仓探索/出题)、`graph`(评分子图)、`panel`(初筛合议:批判者/答辩/汇总)、`grounding`(落地校验)、`material`(简历材料排布)、`judge`/`tech_stack`/`awards`(专项出题)、`scoring`(量规)、`schema`(数据契约)、`llm_common`(共享 LLM 小件)、`github_client`/`autograding`/`attribution`/`dossier` |
 | `tools/` | 基础设施 | `client`(后端 REST 客户端,异常层级在此)、`readonly`/`knowledge`(语义化只读工具)、`write`(interrupt 写工具)、`credentials`(服务账号)、`interrupt_guard` |
 | `state/` | 基础设施 | Postgres 状态面:`pg`(checkpointer 连接)、`threads`(会话档案)、`conversation`(对话日志)、`evaluation/`(分卡/job/评审队列,包)、`qbank`(题库)、`audit`(审计)、`config_store`(热配置) |
 | `kb/` | 基础设施 | 知识库:入库分块/混合检索(按招新周期过滤)/表自举/检索日志(`query_log`) |

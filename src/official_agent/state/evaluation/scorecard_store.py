@@ -116,6 +116,24 @@ def save_scorecard(
     raise RuntimeError("unreachable")
 
 
+def cycle_scoring_mode(cycle_id: int) -> str | None:
+    """本周期第一张评分卡所用的评分模式;周期里还没有卡 → None。
+
+    一个周期只用一种评分模式,以最早落库的那张卡为准。没有 panel 块的卡出自
+    单评委图,记为 single。
+    """
+    _ensure_bootstrapped()
+    with _connection._conn() as conn:
+        row = conn.execute(
+            "SELECT card->'panel'->>'mode' AS mode FROM evaluation_scorecard "
+            "WHERE cycle_id = %s ORDER BY id LIMIT 1",
+            (cycle_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return row["mode"] or "single"
+
+
 def latest_scorecard(resume_id: int, cycle_id: int) -> dict[str, Any] | None:
     """最新一版的完整卡;无则 None。"""
     _ensure_bootstrapped()

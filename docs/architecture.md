@@ -85,7 +85,12 @@ src/official_agent/
 │   └── copilot/            #   C:面试官 Copilot(预留)
 ├── evaluation/             # 评估域:流水线领域逻辑
 │   ├── runner.py           #   EvaluationRunner:submit/派发/_execute_job(评分段+题库段)
-│   ├── graph.py            #   评分子图:precheck→(hard_zero? finalize_hard : llm_score)→finalize
+│   ├── graph.py            #   评分子图,按评分模式装配:single = precheck→llm_score→finalize;
+│   │                       #   critic = precheck→judge→critic→(rebuttal)→aggregate→finalize
+│   ├── panel/              #   初筛合议:critic(批判者,只举手不改判)/ judges(评委答辩)/
+│   │                       #   aggregate(纯函数汇总:分歧、作废项、置信度)/ shapes
+│   ├── grounding.py        #   落地校验:引文是否在原文里、两段文本是否重叠
+│   ├── material.py         #   简历材料进 prompt 的统一排布(报名信息 + 简历全文,包数据区)
 │   ├── investigate_graph.py#   调查出题子图:route→explore→generate(含 skip/guided 分支)
 │   ├── bundle.py           #   出题证据线:仓线/评测错因线/奖项线/兜底线 → qbank 信封
 │   ├── explore.py          #   受限 ReAct 仓探索(轮数/墙钟双闸 + dossier 槽位)
@@ -94,7 +99,8 @@ src/official_agent/
 │   ├── grading.py          #   同部门候选池内相对分级(优秀/良好/一般)+ 调剂建议/面试提示
 │   ├── applicant.py        #   报名信息解析(志愿部门/专业/年级)
 │   ├── schema.py           #   数据契约(ScorecardOutput/QbankV2/QuestionGroupV2...)
-│   ├── llm_common.py       #   共享小件:content_text/prompt_version/温度定档/invoke_with_retry
+│   ├── llm_common.py       #   共享小件:content_text/extract_json/prompt_version/温度定档/
+│   │                       #   invoke_with_retry/add_usage
 │   ├── runner 依赖的 github_client / autograding / attribution / dossier
 │   └── state/evaluation/(见 state/)
 ├── state/                  # 基础设施:Postgres 状态面(Repository 语义)
@@ -227,16 +233,30 @@ stateDiagram-v2
     succeeded --> [*]
 ```
 
-### 6.2 评分子图(hard_zero 短路)
+### 6.2 评分子图(hard_zero 短路,按评分模式装配)
 
 ```mermaid
 flowchart LR
     PRE["precheck<br/>(确定性绝对卡规则)"] -->|"hard_zero"| FH["finalize_hard<br/>零卡不调模型<br/>(两张清单全未达成+命中原因)"]
-    PRE -->|"正常"| LS["llm_score<br/>(校验回灌重试 ×2)"]
-    LS --> FIN["finalize<br/>统一卡形状"]
+    PRE -->|"single"| LS["llm_score<br/>评委判定后直接组卡<br/>(校验回灌重试 ×2)"]
+    PRE -->|"critic"| J["judge<br/>评委判定<br/>(校验回灌重试 ×2)"]
+    J -->|"评委失败 = 整份失败"| FIN
+    J --> CR["critic<br/>批判者:注入片段 + 质疑清单<br/>(失败 → 卡照出,置信度 low)"]
+    CR -->|"有质疑"| RB["rebuttal<br/>评委重判被质疑的条目<br/>(失败 → 记为分歧)"]
+    CR -->|"无质疑"| AG["aggregate<br/>纯代码汇总:分歧/作废项/置信度"]
+    RB --> AG
+    AG --> FIN["finalize<br/>统一卡形状"]
+    LS --> FIN
     FH --> FIN
     FIN --> E(["END"])
 ```
+
+评分模式(`evaluation_scoring_mode`:`single` / `critic`)**按周期固定**:一个周期最早落库
+的那张卡用了哪种模式,之后的 job(含重评)都沿用,不再读配置——等级是池内相对排名,同一个
+池里的卡必须出自同一种模式。`critic` 模式下批判者没有改判权:被质疑的条目交回评委重判,
+评委维持原判就只记为分歧。唯一由代码直接改判的情形是达成项的引文落在批判者指出的注入
+片段里。分歧只产出**置信度**(`low / medium / high`,落在卡的 `panel` 块里),不进分数与
+等级;评审队列按低置信在前排序,并有 `low_confidence` 子队列。
 
 初筛看两个维度,互不折算:**部门匹配度**(四个部门的录入标准清单都判,志愿部门那张
 决定匹配度,其余用于调剂建议)与**认真程度**(内容充实/了解社团部门/意愿真挚/成文/
@@ -303,7 +323,7 @@ flowchart TD
 |---|---|---|
 | `agent_threads` | 会话档案(thread_id/属主/状态) | thread_id 全局唯一;软删+保留期清理 |
 | `agent_conversation_log` | 对话日志(问题摘要/工具/耗时/usage/轮级 trace_id/守卫判定) | fail-open 写入 |
-| `evaluation_scorecard` | AI 参考分卡(card JSONB/total/hard_zero) | UNIQUE(resume,cycle,card_version);状态机 CHECK |
+| `evaluation_scorecard` | AI 参考分卡(card JSONB/total/hard_zero;critic 模式的卡带 `panel` 块:模式/置信度/注入片段/分歧) | UNIQUE(resume,cycle,card_version);状态机 CHECK |
 | `evaluation_job` | 执行 job(状态机/attempts/qbank_status) | 部分唯一索引:活跃 job 每 (resume,cycle) 一条 |
 | `interview_qbank` | 题库信封(v2 JSONB) | 版本递增 |
 | `qbank_pick_log` | 面试官选题记录 | 服务端权威引用(防伪造证据路径) |

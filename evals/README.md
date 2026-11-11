@@ -42,6 +42,8 @@ uv run python evals/run_evals.py --write-baseline evals/baselines.json # 落新�
 | `datasets/cv_dive_report.yaml` | datasets | `cv_dive_report` | LLM_* 配置 + `real_resumes/` 有样本 |
 | `datasets/scoring_probes.yaml` | datasets | `scoring_probes` | LLM_* 配置;CD 部署后在生产容器里自动跑(只报告,每份只评一次) |
 | `datasets/memory_probes.yaml` | datasets | `memory_probes` | LLM_* 配置(提取闸门 + 模型,不落库) |
+| `datasets/panel_probes.yaml` | datasets | `panel_probes` | 无(确定性:初筛合议的汇总规则) |
+| `datasets/critic_probes.yaml` | datasets | `critic_probes` | LLM_* 配置(初筛批判者:植入的问题抓不抓得到、干净的卡会不会误伤) |
 
 ## 初筛评分基线
 
@@ -56,15 +58,17 @@ uv run python evals/run_evals.py --write-baseline evals/baselines.json # 落新�
 | 单份成本与耗时 | `observations.avg_*` | 调了模型的评分的平均输入 / 输出 / 缓存命中 token 与墙钟秒数 |
 
 ```bash
-# 出基线(需要模型 key;每份简历评 3 次外加注入样本,约四十次 strong 档调用)
-uv run python evals/run_evals.py --suite scoring_probes \
+# 出基线(需要模型 key;每份简历评 3 次外加注入样本,单评委模式约四十次 strong 档调用)
+EVALUATION_SCORING_MODE=single uv run python evals/run_evals.py --suite scoring_probes \
   --write-baseline evals/baselines/scoring_probes.single.json
 
-# 之后每次改评分链路,对着它比:任何一个指标低于基线即 FAIL
-uv run python evals/run_evals.py --suite scoring_probes \
+# 换一种评分模式对着它比:任何一个指标低于基线即 FAIL
+EVALUATION_SCORING_MODE=critic uv run python evals/run_evals.py --suite scoring_probes \
   --baseline evals/baselines/scoring_probes.single.json
 ```
 
+- 执行器按配置里的评分模式(`EVALUATION_SCORING_MODE`,缺省 `critic`)跑评分子图,用了哪种
+  模式记在基线的 `context.scoring_mode` 里。出基线、做对比都要显式写明模式,别靠缺省值。
 - 基线按评分模式各存一个文件(文件名里的 `single` 即模式),文件要提交进仓库。
   **`evals/baselines/` 目前还不存在:这条基线还没有在带 key 的环境里跑出来。**
 - 读成本时注意两点:同一份简历连评几次,后几次会命中前缀缓存,所以看总输入 token,缓存命中
@@ -83,5 +87,6 @@ uv run python evals/run_evals.py --suite scoring_probes \
   换模型后跑一次读报告,是这条链路唯一的验收手段。
 - `datasets/resumes/`(gitignore,含 PII 不入库):20~50 份脱敏真实简历 +
   人工标注评分区间,改 prompt / 换模型必跑。
-- 注入攻击样本:简历中的操纵性内容必须被批判节点识别,常备回归。
+- 注入攻击样本:简历中的操纵性内容必须被批判节点识别,常备回归——`critic_probes` 量批判者
+  本身,`scoring_probes` 的 `injections` 量整条评分链路最终有没有被抬高。
 - eval 分数低于基线阻断合入;线上 badcase 一律回流为回归用例。

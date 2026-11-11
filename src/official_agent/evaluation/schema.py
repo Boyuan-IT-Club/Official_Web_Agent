@@ -63,9 +63,24 @@ EFFORT_ITEMS: tuple[tuple[str, int], ...] = (
 )
 
 
+#: 认真程度清单的清单名。一个判定项用「(清单名, 判定项名)」定位:部门清单的清单名
+#: 就是部门名,认真程度清单用这个名字。
+EFFORT_CHECKLIST = "认真程度"
+
+#: 全部清单名,按卡上的展示顺序
+CHECKLISTS: tuple[str, ...] = (*DEPARTMENTS, EFFORT_CHECKLIST)
+
+
 def item_names(items: tuple[tuple[str, int], ...]) -> tuple[str, ...]:
     """清单 → 判定项名(按清单顺序)。"""
     return tuple(name for name, _ in items)
+
+
+def checklist_item_names(checklist: str) -> tuple[str, ...]:
+    """清单名 → 该清单的判定项名;清单名不存在返回空元组。"""
+    if checklist == EFFORT_CHECKLIST:
+        return item_names(EFFORT_ITEMS)
+    return item_names(DEPT_MATCH_ITEMS.get(checklist, ()))
 
 
 class ItemVerdict(BaseModel):
@@ -117,6 +132,57 @@ class ScorecardOutput(BaseModel):
     effort: list[ItemVerdict] = Field(min_length=1)
     summary: str = Field(min_length=1, description="2-4 句整体评价,给面试官看的理由")
     attitude: AttitudeVerdict
+
+
+# ── 批判者与答辩:评分卡出来之后的对抗复核 ──
+
+#: 质疑的两种类型。quote_not_supporting:评委判了达成,但引文撑不住这一项;
+#: missed_evidence:评委判了未达成,而简历里有一段原文支持它。
+CHALLENGE_KIND = Literal["quote_not_supporting", "missed_evidence"]
+
+
+class Challenge(BaseModel):
+    """批判者对一个判定项的质疑。它不是判定:只表示这一项值得评委再看一眼。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    checklist: str = Field(min_length=1, description="清单名:部门名或「认真程度」")
+    item: str = Field(min_length=1, description="判定项名,与清单一字不差")
+    kind: CHALLENGE_KIND
+    quote: str = Field(
+        default="",
+        max_length=200,
+        description="missed_evidence 必填:支持该项的简历原文逐字片段",
+    )
+    reason: str = Field(min_length=1, description="为什么质疑")
+
+
+class CriticOutput(BaseModel):
+    """批判者的结构化输出:只有注入片段、质疑清单和对 bad_faith 的表态,没有判定。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    injection_spans: list[str] = Field(
+        default_factory=list, description="简历里对评审者说话的原文片段,逐字照抄"
+    )
+    challenges: list[Challenge] = Field(default_factory=list)
+    agrees_bad_faith: bool | None = Field(
+        default=None, description="评委判 bad_faith 时填:是否同意;其余情况为 null"
+    )
+
+
+class RebuttalVerdict(ItemVerdict):
+    """答辩里对一个被质疑条目的重判:比普通判定多一个清单名,用来对上是哪一项。"""
+
+    checklist: str = Field(min_length=1, description="清单名:部门名或「认真程度」")
+
+
+class RebuttalOutput(BaseModel):
+    """评委答辩的结构化输出:被质疑的条目逐条重判,不多不少。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    verdicts: list[RebuttalVerdict] = Field(min_length=1)
 
 
 class QuestionEvidence(BaseModel):

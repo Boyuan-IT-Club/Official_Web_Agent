@@ -24,13 +24,13 @@ from statistics import mean
 from typing import Any
 
 from official_agent.evals.engine import CaseResult, SuiteResult
+from official_agent.evaluation.schema import EFFORT_CHECKLIST
 
 #: 评分入口的形状(测试注入假实现):fields + profile → 卡 dict
 ScoreFn = Callable[..., Awaitable[dict[str, Any]]]
 
-#: 一个判定项的定位:(清单名, 判定项名)。部门清单用部门名,认真程度清单用下面这个名字。
+#: 一个判定项的定位:(清单名, 判定项名)。部门清单用部门名,认真程度清单用 EFFORT_CHECKLIST。
 ItemKey = tuple[str, str]
-EFFORT_CHECKLIST = "认真程度"
 
 
 def _read_text(path: Path) -> str:
@@ -292,6 +292,8 @@ def _run_context(cards: list[dict[str, Any]], *, times: int, dataset: Any) -> di
     数据集指纹按解析后的内容算:只改注释或排版不算换了数据集。
     """
     versions = next((card["versions"] for card in cards if card.get("versions")), {})
+    # 没有 panel 块的卡出自单评委图
+    modes = {(card.get("panel") or {}).get("mode", "single") for card in cards}
     # default=str:yaml 会把没加引号的日期解析成 date 对象,json 不认
     canonical = json.dumps(dataset, ensure_ascii=False, sort_keys=True, default=str)
     context = {
@@ -299,8 +301,23 @@ def _run_context(cards: list[dict[str, Any]], *, times: int, dataset: Any) -> di
         "dataset_sha": hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12],
         "model": versions.get("model"),
         "prompt": versions.get("prompt"),
+        "scoring_mode": "/".join(sorted(modes)) or None,
     }
     return {key: value for key, value in context.items() if value is not None}
+
+
+def _configured_scorer() -> ScoreFn:
+    """缺省的评分入口:评分子图,按配置里的评分模式跑。
+
+    线上的评分模式按周期固定;这里没有周期,量的是「一个新周期会用的那种模式」。
+    要给另一种模式出数,用环境变量 EVALUATION_SCORING_MODE 指定。
+    """
+    from functools import partial
+
+    from official_agent.config import get_settings
+    from official_agent.evaluation.graph import run_evaluation
+
+    return partial(run_evaluation, mode=get_settings().evaluation_scoring_mode)
 
 
 @dataclass(slots=True)
@@ -396,9 +413,7 @@ async def run_suite(
     import yaml
 
     if score is None:
-        from official_agent.evaluation.graph import run_evaluation
-
-        score = run_evaluation
+        score = _configured_scorer()
 
     data = yaml.safe_load(_read_text(path)) or {}
     defaults = data.get("defaults") or {}

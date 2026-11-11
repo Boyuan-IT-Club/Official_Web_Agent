@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from official_agent.config import get_settings
 from official_agent.evaluation import runner as eval_runner
 from official_agent.evaluation.grading import CardGrades, GradingPolicy, PoolEntry, grade_pool
-from official_agent.evaluation.graph import CARD_SCHEMA_VERSION
+from official_agent.evaluation.graph import GRADED_CARD_SCHEMAS
 from official_agent.graphs.identity import ResolvedIdentity
 from official_agent.state import audit, evaluation
 from official_agent.state import qbank as qbank_store
@@ -80,7 +80,7 @@ def _attach_grades_and_mask(
     """
     card = row.get("card") if isinstance(row.get("card"), dict) else None
     schema = row.get("card_schema") or (card or {}).get("schema")
-    is_current = schema == CARD_SCHEMA_VERSION
+    is_current = schema in GRADED_CARD_SCHEMAS
     row["needs_rerun"] = not is_current
     shown = grades if is_current else None
     row["match_level"] = shown.match.level if shown else None
@@ -317,6 +317,10 @@ class RejectBody(BaseModel):
     version: int | None = None
 
 
+#: 评审队列的取值:全部 / 需重点复核(hard_zero)/ 低置信
+_REVIEW_QUEUES = ("all", "zero", "low_confidence")
+
+
 @router.get("/admin/evaluation/queue")
 async def evaluation_queue(
     identity: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
@@ -325,17 +329,22 @@ async def evaluation_queue(
     limit: int = 200,
     offset: int = 0,
 ) -> dict[str, Any]:
-    """评审队列:queue=zero → 需重点复核(hard_zero)子队列;all → 全部评分卡。
+    """评审队列:queue=zero → 需重点复核(hard_zero)子队列;low_confidence → AI 自己
+    拿不准的卡(检出提示注入、判定有分歧、批判者不可用);all → 全部评分卡。
+    三种队列都是低置信的卡排在前面:人的时间先花在最需要人的卡上。
 
     每项带 match_level/effort_level(同部门候选池内的相对等级)与 needs_rerun
     (旧版卡,需重新初筛才有两维等级)。
+
+    每项带 scoring_mode/confidence/dispute_count/injection_detected:取自带批判者的
+    评分模式产出的合议记录;单评委模式的卡前两项为 null。
 
     每项带 decided_status/decided_version:复评会写一张新 draft 卡把
     `status` 顶回 draft,这对字段保留了该简历历史上的人工决策,前端据此
     区分"没看过"与"看过已采纳/已驳回"。
     """
-    if queue not in ("zero", "all"):
-        raise HTTPException(status_code=400, detail="queue 只支持 zero/all")
+    if queue not in _REVIEW_QUEUES:
+        raise HTTPException(status_code=400, detail=f"queue 只支持 {'/'.join(_REVIEW_QUEUES)}")
 
     try:
         items = await asyncio.to_thread(

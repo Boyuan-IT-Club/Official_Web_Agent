@@ -532,6 +532,93 @@ def test_pool_entries_take_latest_current_cards_only(cycle_id: int) -> None:
         _cleanup(cycle_id)
 
 
+# ── 合议:周期的评分模式与低置信队列 ───────────────────────
+
+
+def _panel_card(confidence: str | None, *, disputes: int = 0, injection: bool = False) -> dict:
+    """带 panel 块的卡;confidence=None 生成单评委模式的卡(没有 panel 块)。"""
+    card: dict = {"schema": "evaluation_scorecard/v2", "total": None, "hard_zero": False}
+    if confidence is not None:
+        card["schema"] = "evaluation_scorecard/v3"
+        card["panel"] = {
+            "mode": "critic",
+            "confidence": confidence,
+            "disputes": [{"checklist": "技术部", "item": f"项{i}"} for i in range(disputes)],
+            "injection": {"detected": injection, "spans": []},
+        }
+    return card
+
+
+def _save(card: dict, resume_id: int, cycle_id: int) -> int:
+    return ev_store.save_scorecard(
+        card, resume_id=resume_id, cycle_id=cycle_id, prompt_version="evaluation_scoring/v7"
+    )
+
+
+def test_cycle_scoring_mode_is_taken_from_the_first_card(cycle_id: int) -> None:
+    """一个周期只用一种评分模式,以最早落库的那张卡为准;之后落的卡不改变它。"""
+    _cleanup(cycle_id)
+    try:
+        assert ev_store.cycle_scoring_mode(cycle_id) is None  # 周期里还没有卡
+        _save(_panel_card("high"), 9130, cycle_id)
+        assert ev_store.cycle_scoring_mode(cycle_id) == "critic"
+        _save(_panel_card(None), 9129, cycle_id)  # 简历号更小,但落库更晚
+        assert ev_store.cycle_scoring_mode(cycle_id) == "critic"
+    finally:
+        _cleanup(cycle_id)
+
+
+def test_cycle_with_cards_lacking_panel_block_counts_as_single(cycle_id: int) -> None:
+    _cleanup(cycle_id)
+    try:
+        _save_card(9131, cycle_id, total=70.0)  # 没有 panel 块的卡
+        _save(_panel_card("low"), 9132, cycle_id)
+        assert ev_store.cycle_scoring_mode(cycle_id) == "single"
+    finally:
+        _cleanup(cycle_id)
+
+
+def test_review_queue_puts_low_confidence_first_and_projects_panel_facts(cycle_id: int) -> None:
+    _cleanup(cycle_id)
+    try:
+        _save(_panel_card("high"), 9140, cycle_id)
+        _save(_panel_card("low", disputes=2, injection=True), 9141, cycle_id)
+        _save(_panel_card(None), 9142, cycle_id)
+        _save(_panel_card("medium", disputes=1), 9143, cycle_id)
+        _save(_panel_card("low"), 9144, cycle_id)
+
+        queue = ev_store.list_review_queue(cycle_id)
+        assert [i["resume_id"] for i in queue] == [9141, 9144, 9140, 9142, 9143]
+        by_id = {i["resume_id"]: i for i in queue}
+        assert by_id[9141]["confidence"] == "low"
+        assert by_id[9141]["dispute_count"] == 2
+        assert by_id[9141]["injection_detected"] is True
+        assert by_id[9141]["scoring_mode"] == "critic"
+        # 单评委模式的卡没有合议记录
+        assert by_id[9142]["confidence"] is None and by_id[9142]["scoring_mode"] is None
+        assert by_id[9142]["dispute_count"] == 0
+        assert by_id[9142]["injection_detected"] is False
+
+        low = ev_store.list_review_queue(cycle_id, "low_confidence")
+        assert [i["resume_id"] for i in low] == [9141, 9144]
+        # 分页沿用同一个排序
+        paged = ev_store.list_review_queue(cycle_id, limit=2, offset=1)
+        assert [i["resume_id"] for i in paged] == [9144, 9140]
+    finally:
+        _cleanup(cycle_id)
+
+
+def test_low_confidence_queue_follows_the_latest_card_only(cycle_id: int) -> None:
+    """重评之后以最新一版为准:旧版低置信、新版高置信的简历不再留在低置信队列里。"""
+    _cleanup(cycle_id)
+    try:
+        _save(_panel_card("low"), 9150, cycle_id)
+        _save(_panel_card("high"), 9150, cycle_id)
+        assert ev_store.list_review_queue(cycle_id, "low_confidence") == []
+    finally:
+        _cleanup(cycle_id)
+
+
 # ── 原子领取(多副本不双跑)──────────────────────────────
 
 

@@ -1,4 +1,4 @@
-"""评估线共享的 LLM 调用小件:回复解包 / prompt 版本 / 温度定档 / 校验回灌。
+"""评估线共享的 LLM 调用小件:回复解包 / JSON 截取 / prompt 版本 / 温度定档 / 校验回灌 / 用量累加。
 
 四个评估模块(graph/investigate/bundle/judge/tech_stack)曾各自内联这四样,
 同一知识多个出处;本模块是唯一权威出处。
@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -25,6 +27,41 @@ def content_text(response: Any) -> str:
     if isinstance(raw, list):
         raw = "".join(block.get("text", "") for block in raw if isinstance(block, dict))
     return raw if isinstance(raw, str) else str(raw)
+
+
+def extract_json(text: str) -> str:
+    """从模型回复中截取首个完整 JSON 对象(容忍代码围栏/前后杂文)。
+
+    raw_decode 而非 rfind:尾随杂文含 `}` 时 rfind 会切进噪声产出非法
+    JSON;raw_decode 取首个完整对象,天然正确。
+    """
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-zA-Z]*\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    start = cleaned.find("{")
+    if start == -1:
+        raise ValueError(f"模型回复不含 JSON:{cleaned[:120]}")
+    try:
+        _, end = json.JSONDecoder().raw_decode(cleaned, start)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"JSON 解析失败:{cleaned[:120]}") from exc
+    return cleaned[start:end]
+
+
+def add_usage(
+    total: dict[str, int | None] | None, more: dict[str, int | None] | None
+) -> dict[str, int | None]:
+    """把一次调用的 token 用量累加进合计(一张卡由多次调用产出时用)。
+
+    逐键相加;某个键两边都没采到就保持 None,不拿 0 冒充「采到了零」。
+    """
+    total, more = total or {}, more or {}
+    summed: dict[str, int | None] = {}
+    for key in {*total, *more}:
+        values = [v for v in (total.get(key), more.get(key)) if v is not None]
+        summed[key] = sum(values) if values else None
+    return summed
 
 
 def prompt_version(prompt_file: str) -> str:
