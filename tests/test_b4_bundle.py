@@ -1,5 +1,6 @@
 """错因归类/最近最好/奖项降级/兜底题组/bundle 组装测试(fakes)。"""
 
+import asyncio
 import logging
 
 import pytest
@@ -562,3 +563,266 @@ async def test_bundle_repo_line_failure_degrades_and_logs(
         g.get("mode") == "error" for g in envelope["groups"]
     ), "失败线降级为 error 组,bundle 不炸"
     assert any("仓线探测失败" in r.message for r in caplog.records), "仓线失败必须留痕"
+
+
+# ── 证据线并发:同时在跑 / 上限 / 失败隔离 / 汇合处去重 ─────────────
+
+
+class _Rendezvous:
+    """N 方到齐才放行:各方若不是同时在跑,先到的一方会一直等下去。"""
+
+    def __init__(self, parties: int) -> None:
+        self._parties = parties
+        self._all_here = asyncio.Event()
+        self.arrived: list[str] = []
+
+    async def meet(self, who: str) -> None:
+        self.arrived.append(who)
+        if len(self.arrived) >= self._parties:
+            self._all_here.set()
+        await self._all_here.wait()
+
+
+#: 顺序执行时会合永远等不齐;给一个远大于正常耗时的上限,把「卡死」变成「失败」
+_DEADLOCK_TIMEOUT = 5
+
+
+def _repo_fields(*names: str) -> list[FieldText]:
+    value = " ".join(f"https://github.com/me/{name}" for name in names)
+    return [FieldText(field_key="project", title="项目经历", value=value)]
+
+
+def _line_envelope(question: str = "为什么做这个系统?", **overrides) -> dict:
+    """带一道入口题的调查子图信封(生产形状的最小子集);默认是仓深挖。"""
+    return {
+        "schema_name": "evaluation_qbank/v2",
+        "repo_summary": "s",
+        "group": {
+            "entry": {
+                "category": "C1_背景与动机",
+                "question": question,
+                "answer_reference": {"strong": "s", "acceptable": "a", "weak": "w"},
+                "evidence": {"path": "", "note": "n"},
+                "time_minutes": 3,
+            },
+            "chains": [],
+            "reserves": [],
+        },
+        "mode": "repo_deep_dive",
+        **overrides,
+    }
+
+
+async def test_bundle_lines_run_concurrently(monkeypatch) -> None:
+    """仓线、评测线、奖项线同时在跑,不是一条跑完再跑下一条。
+
+    五方(三条仓线 + 评测线 + 奖项线)互等对方到场才继续:顺序执行时第一条线
+    等不到别人,用例超时失败。信封里组的顺序由分线顺序定,与谁先跑完无关。
+    """
+    fields = [
+        *_repo_fields("a", "b", "c"),
+        FieldText(field_key="award_history", title="获奖经历", value="- 蓝桥杯省一"),
+    ]
+    meeting = _Rendezvous(parties=5)
+    finished: list[str] = []
+
+    async def _investigate(text, **kw):
+        name = kw["repo"][1]
+        await meeting.meet(f"repo:{name}")
+        if name == "a":
+            for _ in range(5):  # 排在最前的线最后才跑完
+                await asyncio.sleep(0)
+        finished.append(name)
+        return _line_envelope()
+
+    async def _submission(github_key):
+        await meeting.meet("autograding")
+        return None
+
+    class _Search:
+        async def search(self, query):
+            await meeting.meet("awards")
+            return [{"snippet": "省级赛事"}]
+
+    monkeypatch.setattr(bd, "GitHubClient", _ReadableGH)
+    monkeypatch.setattr(bd.ig, "run_investigation", _investigate)
+    monkeypatch.setattr(
+        "official_agent.evaluation.autograding.fetch_latest_submission", _submission
+    )
+
+    envelope = await asyncio.wait_for(
+        bd.run_bundle(
+            fields,
+            resume_id=21,
+            cycle_id=2026,
+            github_key="usergithub",
+            search_provider=_Search(),
+        ),
+        timeout=_DEADLOCK_TIMEOUT,
+    )
+
+    assert sorted(meeting.arrived) == ["autograding", "awards", "repo:a", "repo:b", "repo:c"]
+    assert finished[-1] == "a"
+    assert [(g["group"], g.get("repo", "")) for g in envelope["groups"]] == [
+        ("repo", "me/a"),
+        ("repo", "me/b"),
+        ("repo", "me/c"),
+        ("awards", ""),
+    ]
+
+
+async def test_bundle_repo_lines_respect_parallel_cap(monkeypatch) -> None:
+    """同时在跑的仓线不超过 MAX_PARALLEL_REPO_LINES,且确实跑满这个数。"""
+    in_flight = 0
+    peak = 0
+
+    async def _investigate(text, **kw):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0)  # 让出一次,其余的线才有机会进来
+        in_flight -= 1
+        return _line_envelope()
+
+    monkeypatch.setattr(bd, "GitHubClient", _ReadableGH)
+    monkeypatch.setattr(bd.ig, "run_investigation", _investigate)
+
+    names = [f"p{i}" for i in range(bd.MAX_REPO_LINES)]
+    envelope = await bd.run_bundle(_repo_fields(*names), resume_id=22, cycle_id=2026)
+
+    assert bd.MAX_PARALLEL_REPO_LINES < bd.MAX_REPO_LINES  # 否则上限不起作用,本用例测不到它
+    assert peak == bd.MAX_PARALLEL_REPO_LINES
+    assert [g["repo"] for g in envelope["groups"]] == [f"me/{name}" for name in names]
+
+
+async def test_bundle_failing_repo_line_leaves_running_siblings_alone(monkeypatch) -> None:
+    """一条仓线中途失败时,同时在跑的其他线照常跑完并交回自己的组。"""
+    meeting = _Rendezvous(parties=3)
+
+    async def _investigate(text, **kw):
+        name = kw["repo"][1]
+        await meeting.meet(name)  # 三条线都已在途
+        if name == "b":
+            raise RuntimeError("explore exploded")
+        await asyncio.sleep(0)  # 失败发生时其余线还没跑完
+        return _line_envelope(question=f"{name} 的入口题?")
+
+    monkeypatch.setattr(bd, "GitHubClient", _ReadableGH)
+    monkeypatch.setattr(bd.ig, "run_investigation", _investigate)
+
+    envelope = await asyncio.wait_for(
+        bd.run_bundle(_repo_fields("a", "b", "c"), resume_id=23, cycle_id=2026),
+        timeout=_DEADLOCK_TIMEOUT,
+    )
+
+    by_repo = {g["repo"]: g for g in envelope["groups"]}
+    assert list(by_repo) == ["me/a", "me/b", "me/c"]
+    assert by_repo["me/b"]["mode"] == "error"
+    assert "explore exploded" in by_repo["me/b"]["error"]
+    for name in ("a", "c"):
+        entry = by_repo[f"me/{name}"]["qbank_v2"]["group"]["entry"]
+        assert entry["question"] == f"{name} 的入口题?"
+    assert envelope["total_questions"] == 2
+
+
+async def test_bundle_contains_unexpected_line_error(monkeypatch, caplog) -> None:
+    """线内没兜住的异常也止步于该线:其余线的组照常进信封,失败留痕。"""
+
+    async def _investigate(text, **kw):
+        return _line_envelope()
+
+    async def _awards_boom(provider, fields, resume_id):
+        raise TypeError("fields 形状不对")
+
+    monkeypatch.setattr(bd, "GitHubClient", _ReadableGH)
+    monkeypatch.setattr(bd.ig, "run_investigation", _investigate)
+    monkeypatch.setattr(bd, "_awards_line", _awards_boom)
+
+    with caplog.at_level(logging.WARNING):
+        envelope = await bd.run_bundle(_repo_fields("a"), resume_id=24, cycle_id=2026)
+
+    assert [g["group"] for g in envelope["groups"]] == ["repo"]
+    assert any("证据线失败 line=awards" in r.getMessage() for r in caplog.records)
+
+
+async def test_bundle_keeps_only_first_cv_dive_group(monkeypatch, caplog) -> None:
+    """分线时可读、进子图后却读不到的仓各自回退到简历深挖 → 汇合处只留第一条。
+
+    「第一条」按分线顺序算,不按完成先后:排在前面的线即使最后才跑完,留下的
+    也是它。各线不被告知别的线挖没挖过简历;被裁掉的线花掉的 token 仍计入用量。
+    """
+    finished: list[str] = []
+    told_cv_dive_done: list[bool] = []
+
+    async def _investigate(text, **kw):
+        name = kw["repo"][1]
+        told_cv_dive_done.append(bool(kw.get("cv_dive_done")))
+        if name == "a":
+            for _ in range(5):
+                await asyncio.sleep(0)
+        finished.append(name)
+        if name == "b":
+            return _line_envelope()
+        return _line_envelope(
+            mode="cv_dive",
+            question=f"{name} 线的简历题?",
+            generation_usage={"input_tokens": 100, "output_tokens": 10},
+        )
+
+    monkeypatch.setattr(bd, "GitHubClient", _ReadableGH)
+    monkeypatch.setattr(bd.ig, "run_investigation", _investigate)
+
+    with caplog.at_level(logging.WARNING):
+        envelope = await bd.run_bundle(_repo_fields("a", "b", "c"), resume_id=25, cycle_id=2026)
+
+    assert finished[-1] == "a"
+    assert told_cv_dive_done == [False, False, False]
+    assert [(g["group"], g["repo"]) for g in envelope["groups"]] == [
+        ("cv_dive", "me/a"),
+        ("repo", "me/b"),
+    ]
+    assert envelope["total_questions"] == 2
+    assert envelope["explore_usage_total"]["input_tokens"] == 200  # a 线 + 被裁掉的 c 线
+    dedup_logs = [r.getMessage() for r in caplog.records if "bundle_cv_dive_dedup" in r.message]
+    assert len(dedup_logs) == 1 and "me/c" in dedup_logs[0]
+
+
+def test_keep_first_cv_dive_touches_nothing_else() -> None:
+    """只裁重复的简历深挖组:仓深挖组、错误组、单独一条简历深挖都原样保留。"""
+    deep = {"group": "repo", "repo": "me/a"}
+    failed = {"group": "repo", "repo": "me/b", "mode": "error"}
+    resume_dive = {"group": "cv_dive", "repo": "me/c"}
+
+    assert bd._keep_first_cv_dive([deep, failed], resume_id=1) == [deep, failed]
+    assert bd._keep_first_cv_dive([deep, resume_dive, failed], resume_id=1) == [
+        deep,
+        resume_dive,
+        failed,
+    ]
+
+
+async def test_repo_lines_probe_concurrently_in_resume_order(monkeypatch) -> None:
+    """可读性探测各仓同时发出;分线结果仍按简历里的出现序,读不到的只留第一个。"""
+    meeting = _Rendezvous(parties=4)
+
+    class _MixedGH:
+        def __init__(self, base_url: str = "", token: str = "") -> None:
+            pass
+
+        async def repo(self, owner, repo):
+            await meeting.meet(repo)  # 四个探测都已发出才有人拿到结果
+            if repo.startswith("private"):
+                raise bd.GitHubUnavailable("GitHub 404")
+            return {"default_branch": "main"}
+
+    monkeypatch.setattr(bd, "GitHubClient", _MixedGH)
+    project_text = " ".join(
+        f"https://github.com/me/{name}" for name in ("private1", "open1", "private2", "open2")
+    )
+
+    pins = await asyncio.wait_for(
+        bd._repo_lines(project_text, resume_id=26, github_token=""),
+        timeout=_DEADLOCK_TIMEOUT,
+    )
+
+    assert pins == [("me", "open1"), ("me", "open2"), ("me", "private1")]

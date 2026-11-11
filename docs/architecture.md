@@ -87,7 +87,7 @@ src/official_agent/
 │   ├── runner.py           #   EvaluationRunner:submit/派发/_execute_job(评分段+题库段)
 │   ├── graph.py            #   评分子图:precheck→(hard_zero? finalize_hard : llm_score)→finalize
 │   ├── investigate_graph.py#   调查出题子图:route→explore→generate(含 skip/guided 分支)
-│   ├── bundle.py           #   出题证据线:仓线/评测错因线/奖项线/兜底线 → qbank 信封
+│   ├── bundle.py           #   出题证据线:仓线/评测错因线/奖项线并发跑,汇合后按需兜底 → qbank 信封
 │   ├── explore.py          #   受限 ReAct 仓探索(轮数/墙钟双闸 + dossier 槽位)
 │   ├── judge.py / tech_stack.py / awards.py   # 专项出题
 │   ├── scoring.py          #   绝对卡短路 + 清单派生 0-10 分
@@ -273,6 +273,32 @@ stateDiagram-v2
     adopted --> draft: 复评(新版本卡)
     rejected --> draft: 复评(新版本卡)
 ```
+
+### 6.5 出题 bundle:证据线并发与汇合
+
+```mermaid
+flowchart LR
+    SPLIT["_repo_lines<br/>各仓可读性并发探测 → 分线<br/>可读的仓各一条,读不到的合成一条<br/>至多 5 条"] --> REPO["仓线 ×N<br/>各一次调查子图(6.3)<br/>至多 3 条同时在跑"]
+    SPLIT --> AG["评测错因线"]
+    SPLIT --> AW["奖项线"]
+    REPO --> JOIN["汇合(纯代码)<br/>简历深挖只留分线顺序上的第一条<br/>用量在裁组之前聚合"]
+    AG --> JOIN
+    AW --> JOIN
+    JOIN -->|各线都没有题| FB["兜底线<br/>基础三维 + 部门技能题组"]
+    JOIN --> ENV["suggest_plan → qbank 信封"]
+    FB --> ENV
+```
+
+三路证据线同时跑(`asyncio.gather`),线与线之间不共享可变状态:每条仓线是一次独立的子图调用,
+档案与消息历史都在线内,一个仓里的文本进不了另一条线的模型上下文。跨线的约束全部在汇合处由
+代码裁决,所以信封里组的顺序固定为仓线(简历里的出现序)→ 评测 → 奖项 → 兜底,与谁先跑完
+无关。单线失败只损失该线:仓线留 `mode=error` 的错误组,评测线与奖项线缺席。
+
+并发有两处封顶,数值都在代码里:一个 bundle 里同时在跑的仓线至多 3 条
+(`bundle.MAX_PARALLEL_REPO_LINES`);进程内同时在途的 GitHub 请求至多 4 个
+(`github_client.MAX_CONCURRENT_REQUESTS`,所有 client 共用——各线各建各的 client,却共用同一个
+令牌的速率配额)。评估域目前没有统一的模型并发闸:4 个 job 同时在题库段时,模型调用峰值是
+4 ×(3 条仓线 + 评测线)= 16。
 
 ## 7. 会话生命周期(web)
 

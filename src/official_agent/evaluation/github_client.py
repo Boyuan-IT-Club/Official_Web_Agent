@@ -7,19 +7,47 @@
   code search 等端点无 token 必 401
 - 私有/不可达统一抛 GitHubUnavailable(路由降级为通用引导题)
 - 单工具结果截断:单文件/单 patch ≤8K 字符,截断留痕
+- 出站请求过进程内并发闸(MAX_CONCURRENT_REQUESTS):闸在所有实例之间共用,
+  因为各条证据线各建各的 client,却共用同一个令牌的速率配额
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import re
+import weakref
 from urllib.parse import quote
 
 import httpx
 
 _DEFAULT_BASE = "https://api.github.com"
 _MAX_TEXT_CHARS = 8000  # 单文件/单 patch 截断上限
+
+#: 同时在途的 GitHub 请求上限。出题证据线并发执行,多条线、多个评估 job 的
+#: 请求会在同一瞬间叠到一个令牌上;GitHub 的次级限流按并发与突发速率计,而被
+#: 限流在这里等价于「仓不可读」——一批线会一起降级成简历题。
+#: 取 4:等于评估 runner 的 job 并发数(runner._MAX_CONCURRENCY),即峰值不高于
+#: 「每个 job 同一时刻只发一个请求」的水平。一条线的请求之间隔着模型调用,
+#: 这个上限平时排不起队;排队时间不计入单请求的 20s 超时。
+MAX_CONCURRENT_REQUESTS = 4
+
+#: 每个事件循环一把闸:信号量绑定在首次等待它的循环上,而测试里每个用例一个
+#: 新循环。生产只有一个循环,所以这就是进程级的闸。
+_request_gates: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _request_gate() -> asyncio.Semaphore:
+    """当前事件循环的请求并发闸(首次使用时按 MAX_CONCURRENT_REQUESTS 建)。"""
+    loop = asyncio.get_running_loop()
+    gate = _request_gates.get(loop)
+    if gate is None:
+        gate = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+        _request_gates[loop] = gate
+    return gate
 
 
 class GitHubUnavailable(RuntimeError):
@@ -318,11 +346,9 @@ class GitHubClient:
     async def readme(self, owner: str, repo: str) -> str:
         """README 原文(raw);没有 README → 空串(值得度扣分项,不报错)。"""
         url = f"{self._base}/repos/{_seg(owner)}/{_seg(repo)}/readme"
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(
-                url,
-                headers={**self._headers(), "Accept": "application/vnd.github.raw+json"},
-            )
+        resp = await self._send(
+            url, headers={**self._headers(), "Accept": "application/vnd.github.raw+json"}
+        )
         if resp.status_code == 404:
             return ""
         if resp.status_code != 200:
@@ -364,11 +390,17 @@ class GitHubClient:
         truncated = bool(data.get("truncated")) or len(paths) > limit
         return paths[:limit], truncated
 
+    async def _send(
+        self, url: str, *, headers: dict[str, str], params: dict | None = None
+    ) -> httpx.Response:
+        """发一个 GET。全部出站请求的唯一出口——并发闸设在这里才没有旁路。"""
+        async with _request_gate(), httpx.AsyncClient(timeout=20) as client:
+            return await client.get(url, headers=headers, params=params)
+
     async def _get_json(self, path: str, params: dict | None = None) -> dict | list:
         url = f"{self._base}{path}"
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                resp = await client.get(url, headers=self._headers(), params=params)
+            resp = await self._send(url, headers=self._headers(), params=params)
         except httpx.HTTPError as exc:
             raise GitHubUnavailable(f"GitHub 连接失败:{exc}") from exc
         if resp.status_code != 200:

@@ -75,8 +75,9 @@ class InvestigationState(TypedDict, total=False):
     github_token: str
     candidate_login: str
     #: 本份简历是否已有一条线走过简历深挖。多仓候选是一个仓跑一次子图,而简历
-    #: 自述只有一份——仓读不到时那份自述就是全部材料,第一条线挖过之后,后面的
-    #: 仓再挖只会得到一套一模一样的题。由调用方在**上一次结果**上读出来回填。
+    #: 自述只有一份——仓读不到时那份自述就是全部材料,已有线挖过之后,别的仓
+    #: 再挖只会得到一套一模一样的题。只有逐条顺序跑线的调用方答得出这个问题;
+    #: 并发跑线的调用方(evaluation/bundle.py)不传,改在汇合处只留一条。
     cv_dive_done: bool
     route: str
     repo_owner: str
@@ -715,9 +716,10 @@ async def run_investigation(
     看不见它);缺省退化为 project_text,单栏调用方行为不变。
     grade 传年级原文(元信息):只用来派生**出题深度档**,不进评分;缺省即
     「年级缺失」,分档走标准档(与加档位之前的行为一致)。
-    cv_dive_done 传「本份简历此前是否已有线走过简历深挖」:多仓循环里的调用方
-    在上一次返回的信封上读 mode 回填。为 True 时,读不到的仓不再重复挖同一份
-    自述,直接出空组。
+    cv_dive_done 传「本份简历此前是否已有线走过简历深挖」:为 True 时,读不到
+    的仓不再重复挖同一份自述,直接出空组。逐条顺序跑线的调用方可在上一次返回
+    的信封上读 mode 回填;并发跑线时各线互不等待、答不出这个问题,保持缺省,
+    由调用方在汇合处去重(见 evaluation/bundle.py 的 _keep_first_cv_dive)。
     """
     graph = build_investigation_subgraph()
     init: InvestigationState = {

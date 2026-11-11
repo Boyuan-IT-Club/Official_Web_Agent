@@ -2,11 +2,18 @@
 
 与仓深挖线平行的一条「调查 bundle」:一次跑完所有证据线,产出一个
 qbank 信封(groups 分线,source 汇总)。题数硬校验纪律与仓线深挖一致。
+
+并发约定:仓线、评测线、奖项线同时跑,线与线之间不共享可变状态——每条线
+自带材料与模型上下文,只把自己的组交回汇合处。跨线的约束(简历深挖全局只留
+一条、无证据才兜底)全部在汇合处由代码裁决,所以信封里组的顺序与各线谁先
+跑完无关。
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Awaitable
 from typing import Any
 
 from langchain_core.messages import HumanMessage
@@ -39,6 +46,11 @@ PROMPT_FILE = "evaluation/b4.md"
 #: 自填的项目栏——不封顶就等于把成本开关交给候选人(贴 50 个链接即 50 次探索)。
 #: 取 5 与同文件既有风格一致(奖项 [:3]、技术名词 MAX_ITEMS=6)。
 MAX_REPO_LINES = 5
+
+#: 一个 bundle 里同时在跑的仓线上限。每条仓线同一时刻至多一次模型调用、一个
+#: GitHub 请求,所以这个数就是单个 bundle 在仓线上的峰值并发;全部放开等于让
+#: 候选人贴了几个链接来决定同时起几个探索者。取 3:封顶的 5 条线两批跑完。
+MAX_PARALLEL_REPO_LINES = 3
 
 
 def _prompt_version() -> str:
@@ -121,6 +133,9 @@ async def _repo_lines(
     仓读不到时材料只剩简历自述,而自述只有一份——逐个仓跑只会得到一堆
     一模一样的简历题。无仓/有项目文本但无仓 URL → 仍跑一次([None]),
     让子图内部按简历内容路由。
+
+    各仓同时探(并发度由 GitHubClient 的请求闸封顶),结果仍按简历里的出现序
+    排:GitHub 整体不可达时每个探测都要等满超时,逐个探就是几倍的空等。
     """
     repo_candidates = extract_repos(project_text)
     if len(repo_candidates) > MAX_REPO_LINES:
@@ -135,15 +150,17 @@ async def _repo_lines(
     if not repo_candidates:
         return [None]
     probe = GitHubClient(token=github_token)
-    readable: list[tuple[str, str]] = []
-    unreadable: list[tuple[str, str]] = []
-    for owner, name in repo_candidates:
+
+    async def _is_readable(owner: str, name: str) -> bool:
         try:
             await probe.repo(owner, name)
         except GitHubUnavailable:
-            unreadable.append((owner, name))
-        else:
-            readable.append((owner, name))
+            return False
+        return True
+
+    verdicts = await asyncio.gather(*(_is_readable(o, n) for o, n in repo_candidates))
+    readable = [repo for repo, ok in zip(repo_candidates, verdicts, strict=True) if ok]
+    unreadable = [repo for repo, ok in zip(repo_candidates, verdicts, strict=True) if not ok]
     return [*readable, *unreadable[:1]]
 
 
@@ -155,10 +172,14 @@ async def _repo_line(
     github_key: str | None,
     github_token: str,
     grade: str,
-    cv_dive_done: bool,
-) -> tuple[dict[str, Any], bool]:
-    """跑一个仓的调查子图,返回 (组, 本线是否走了简历深挖)。"""
+) -> dict[str, Any]:
+    """跑一个仓的调查子图,返回该线的组;失败降级为错误组,不向外抛。
+
+    不告诉子图「别的线有没有挖过简历」:各线同时在跑,谁也不知道别的线会不会
+    回退到简历深挖。重复的简历深挖组由汇合处裁掉(_keep_first_cv_dive)。
+    """
     owner, name = pinned if pinned else ("", "")
+    repo_label = f"{owner}/{name}" if pinned else ""
     try:
         repo_envelope = await ig.run_investigation(
             project_text,
@@ -167,35 +188,102 @@ async def _repo_line(
             github_token=github_token,
             candidate_login=github_key or "",
             grade=grade,
-            cv_dive_done=cv_dive_done,
         )
+        return {
+            "group": _group_kind(repo_envelope),
+            "owner": owner,
+            "repo": repo_label,
+            # v2 信封整体嵌套(qbank_v2),不展开——QbankV2 自带
+            # group 键(dict),展开会覆盖 kind 字符串并污染 pick log
+            "qbank_v2": repo_envelope,
+        }
     except Exception as exc:  # noqa: BLE001 — 单线失败降级为错误组,不炸 bundle
         # 仓线失败必须留痕:信封 error 字段只有截断摘要,没有堆栈(对照评测线)
         logging.getLogger(__name__).warning(
             "仓线探测失败 repo=%s/%s", owner, name, exc_info=True
         )
-        return (
-            {
-                "group": "repo",
-                "owner": owner,
-                "repo": f"{owner}/{name}" if pinned else "",
-                "mode": "error",
-                "repo_summary": "",
-                "questions": [],
-                "error": f"{type(exc).__name__}: {exc}"[:300],
-            },
-            False,
+        return {
+            "group": "repo",
+            "owner": owner,
+            "repo": repo_label,
+            "mode": "error",
+            "repo_summary": "",
+            "questions": [],
+            "error": f"{type(exc).__name__}: {exc}"[:300],
+        }
+
+
+async def _repo_groups(
+    pins: list[tuple[str, str] | None],
+    *,
+    project_text: str,
+    resume_text: str,
+    github_key: str | None,
+    github_token: str,
+    grade: str,
+) -> list[dict[str, Any]]:
+    """各仓线并发跑,返回与 pins 同序的组(至多 MAX_PARALLEL_REPO_LINES 条同时在跑)。
+
+    每条线是一次独立的子图调用,档案与消息历史都在线内:一个仓里的文本进不了
+    另一条线的模型上下文,一条线失败也只换来它自己的错误组。
+    """
+    gate = asyncio.Semaphore(MAX_PARALLEL_REPO_LINES)
+
+    async def _gated_line(pinned: tuple[str, str] | None) -> dict[str, Any]:
+        async with gate:
+            return await _repo_line(
+                pinned,
+                project_text=project_text,
+                resume_text=resume_text,
+                github_key=github_key,
+                github_token=github_token,
+                grade=grade,
+            )
+
+    return list(await asyncio.gather(*(_gated_line(pinned) for pinned in pins)))
+
+
+def _keep_first_cv_dive(
+    repo_groups: list[dict[str, Any]], *, resume_id: int
+) -> list[dict[str, Any]]:
+    """简历深挖全局只留一条:按分线顺序保留第一组,其余丢弃并留痕。
+
+    简历自述只有一份,几条线各自回退到简历深挖时拿到的是同一份材料,题目也就
+    近乎相同。分线(_repo_lines)已把读不到的仓合成一条线,这里裁的是分线时
+    可读、进了子图却恰好读不到(限流等瞬时故障)的仓。
+    """
+    kept: list[dict[str, Any]] = []
+    dropped: list[str] = []
+    has_cv_dive = False
+    for group in repo_groups:
+        if group.get("group") != "cv_dive":
+            kept.append(group)
+        elif has_cv_dive:
+            dropped.append(str(group.get("repo", "")))
+        else:
+            has_cv_dive = True
+            kept.append(group)
+    if dropped:
+        logging.getLogger(__name__).warning(
+            "bundle_cv_dive_dedup resume_id=%s dropped=%r", resume_id, dropped
         )
-    became_cv_dive = repo_envelope.get("mode") == "cv_dive"
-    group = {
-        "group": _group_kind(repo_envelope),
-        "owner": owner,
-        "repo": f"{owner}/{name}" if pinned else "",
-        # v2 信封整体嵌套(qbank_v2),不展开——QbankV2 自带
-        # group 键(dict),展开会覆盖 kind 字符串并污染 pick log
-        "qbank_v2": repo_envelope,
-    }
-    return group, became_cv_dive
+    return kept
+
+
+async def _contained[T](name: str, line: Awaitable[T], *, resume_id: int, fallback: T) -> T:
+    """把一条证据线的异常关在线内:降级为 fallback 并留痕。
+
+    各线自己处理了预期内的失败(取数被拒、搜索不可达);这里兜的是没料到的那
+    一类。并发执行时放它出去,除了整包失败,其余还在跑的线会成为没人收结果的
+    孤儿任务,白花模型调用。
+    """
+    try:
+        return await line
+    except Exception:  # noqa: BLE001 — 单线失败只损失该线
+        logging.getLogger(__name__).warning(
+            "证据线失败 line=%s resume=%s", name, resume_id, exc_info=True
+        )
+        return fallback
 
 
 async def _autograding_line(github_key: str, resume_id: int) -> dict[str, Any] | None:
@@ -354,45 +442,51 @@ async def run_bundle(
     """跑全部证据线,返回 qbank 信封(groups 分线+15 分钟建议组合)。
 
     - 仓线:调查子图(deep/cv/guided/skip 内部自决);仓读不到时回退简历深挖,
-      而简历深挖全局只出一条线
+      而简历深挖全局只留一条线
     - 评测线:有评测记录且非满分 → 失败 test 错因追问
     - 奖项线:简历有奖项 → 背景卡+纯过程追问;搜索通道不可用 → 不可考
     - 兜底线:以上全无 → 基础三维 + 部门技能题组
+
+    仓线、评测线、奖项线并发执行;单线失败只损失该线(仓线留错误组,评测线与
+    奖项线缺席)。信封里组的顺序固定为仓线(简历里的出现序)→ 评测 → 奖项 →
+    兜底,与各线完成的先后无关。
 
     grade 是**元信息**(年级原文):只透传给调查子图调节出题深度,不参与
     任何评分线;缺省空串即「年级缺失」,子图走安全默认。
     """
     provider = search_provider or NullSearchProvider()
-    groups: list[dict[str, Any]] = []
     project_text = _project_text(fields)
     resume_text = _resume_text(fields)
 
-    # 仓线。多仓:项目文本里每个 GitHub 仓各深挖一次,产出独立 repo group;
-    # 单线失败降级为空错误组,不炸整条 bundle。简历深挖全局只出一条线,
-    # 由分线保证;cv_dive_done 是兜底:可读的仓若在子图内探测时恰好也读不到
-    # (限流等瞬时故障),它会回退到简历深挖,而那时简历线不该再挖第二遍。
-    cv_dive_done = False
-    for pinned in await _repo_lines(project_text, resume_id=resume_id, github_token=github_token):
-        group, became_cv_dive = await _repo_line(
-            pinned,
+    # 多仓:项目文本里每个 GitHub 仓各深挖一次,产出独立 repo group。
+    pins = await _repo_lines(project_text, resume_id=resume_id, github_token=github_token)
+    repo_groups, autograding_group, awards_group = await asyncio.gather(
+        _repo_groups(
+            pins,
             project_text=project_text,
             resume_text=resume_text,
             github_key=github_key,
             github_token=github_token,
             grade=grade,
-            cv_dive_done=cv_dive_done,
-        )
-        cv_dive_done = cv_dive_done or became_cv_dive
-        groups.append(group)
+        ),
+        _contained(
+            "autograding",
+            _autograding_line(github_key, resume_id),
+            resume_id=resume_id,
+            fallback=None,
+        ),
+        _contained(
+            "awards",
+            _awards_line(provider, fields, resume_id),
+            resume_id=resume_id,
+            fallback=None,
+        ),
+    )
 
-    autograding_group = await _autograding_line(github_key, resume_id)
-    if autograding_group is not None:
-        groups.append(autograding_group)
-
-    awards_group = await _awards_line(provider, fields, resume_id)
-    if awards_group is not None:
-        groups.append(awards_group)
-
+    # 用量按实际跑过的线算,所以取在裁重复组之前:被裁掉的线同样花了 token。
+    explore_usage_total = _aggregate_usage(repo_groups)
+    groups = _keep_first_cv_dive(repo_groups, resume_id=resume_id)
+    groups.extend(g for g in (autograding_group, awards_group) if g is not None)
     if not any(_group_has_evidence(g) for g in groups):
         groups.append(await _fallback_line(fields))
 
@@ -402,6 +496,6 @@ async def run_bundle(
         "groups": groups,
         "suggested_plan": suggest_plan(all_questions, budget_minutes=15),
         "total_questions": len(all_questions),
-        "explore_usage_total": _aggregate_usage(groups),
+        "explore_usage_total": explore_usage_total,
         "prompt_version": _prompt_version(),
     }
