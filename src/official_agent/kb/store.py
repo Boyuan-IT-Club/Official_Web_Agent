@@ -9,11 +9,14 @@
 - 检索只回 enabled 且 model_version=当前 meta.version 的块(禁混排的读侧配套)
 - 检索 = 向量一路 + 关键词一路,RRF 合并;低于相似度门槛且字面也对不上的
   候选直接丢掉——「查不到」必须能真的返回空,否则模型会拿不相关片段硬凑答案
+- 绑定了招新周期的条目(kb_source.cycle_id)只在调用方给出该周期时才进检索;
+  不给周期只查常青条目——宁可查不到,也不拿往届的时间地点作答
 """
 
 import asyncio
 import secrets
 import threading
+from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any
@@ -29,7 +32,8 @@ from official_agent.kb.keywords import query_terms
 from official_agent.kb.schema import current_embed_target, ensure_kb_schema
 
 _SOURCE_COLUMNS = (
-    "source_id, source_title, source_type, kind, tags, enabled, updated_by, created_at, updated_at"
+    "source_id, source_title, source_type, kind, tags, enabled, updated_by, cycle_id, "
+    "created_at, updated_at"
 )
 
 
@@ -39,7 +43,10 @@ class KbValidationError(ValueError):
 
 @dataclass(frozen=True)
 class SourceInput:
-    """新建/更新一条知识的输入。type=faq 用 question/answer;type=doc 用 content_md。"""
+    """新建/更新一条知识的输入。type=faq 用 question/answer;type=doc 用 content_md。
+
+    cycle_id 为 None 表示常青条目;填招新周期 id 表示只在该周期开放期间可被检索。
+    """
 
     title: str
     type: str  # 'faq' | 'doc'
@@ -49,6 +56,7 @@ class SourceInput:
     answer: str = ""
     content_md: str = ""
     updated_by: str = ""
+    cycle_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +72,7 @@ class SourceRecord:
     answer: str = ""
     content_md: str = ""
     chunk_count: int = 0
+    cycle_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -79,6 +88,20 @@ class SearchHit:
     heading_path: str
     score: float
     keyword_score: float = 0.0
+
+
+@dataclass(frozen=True)
+class SearchOutcome:
+    """一次检索的命中,加上过门槛**之前**的最高分(检索日志的原料)。
+
+    best_vec_score / best_kw_ratio 取全部候选里的最高值,不管候选有没有过门槛:
+    没命中时靠它区分「差一点就命中」(多半是用词没对上)与「库里根本没有」。
+    没有任何候选时两者都是 None;问题里抽不出关键词时 best_kw_ratio 是 None。
+    """
+
+    hits: list[SearchHit]
+    best_vec_score: float | None = None
+    best_kw_ratio: float | None = None
 
 
 _pools: dict[str, ConnectionPool] = {}
@@ -190,17 +213,27 @@ def _write_source(
     with _conn() as conn:
         conn.execute(
             """
-            INSERT INTO kb_source (source_id, source_title, source_type, kind, tags, updated_by)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO kb_source
+                (source_id, source_title, source_type, kind, tags, updated_by, cycle_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (source_id) DO UPDATE SET
                 source_title = EXCLUDED.source_title,
                 source_type = EXCLUDED.source_type,
                 kind = EXCLUDED.kind,
                 tags = EXCLUDED.tags,
                 updated_by = EXCLUDED.updated_by,
+                cycle_id = EXCLUDED.cycle_id,
                 updated_at = now()
             """,
-            (sid, source.title, source.type, source.kind, list(source.tags), source.updated_by),
+            (
+                sid,
+                source.title,
+                source.type,
+                source.kind,
+                list(source.tags),
+                source.updated_by,
+                source.cycle_id,
+            ),
         )
         # 内容两表都清再插:类型迁移(faq↔doc)天然正确
         conn.execute("DELETE FROM kb_faq WHERE source_id = %s", (sid,))
@@ -318,11 +351,35 @@ async def search(
     include_test: bool = False,
     embedder: Embedder | None = None,
     min_score: float | None = None,
+    cycle_ids: Sequence[int] = (),
 ) -> list[SearchHit]:
     """混合检索 top-k。默认排除 kind=test;都不达标返回空表(降级话术归调用方)。
 
     min_score 缺省取配置 kb_min_score;传 0 等于关掉门槛(评测看原始分布用)。
+    cycle_ids 是当前开放的招新周期:常青条目始终参与,绑定了周期的条目只在
+    其周期出现在这里时参与;缺省(空)只查常青条目。
     """
+    outcome = await search_with_signals(
+        query,
+        top_k=top_k,
+        include_test=include_test,
+        embedder=embedder,
+        min_score=min_score,
+        cycle_ids=cycle_ids,
+    )
+    return outcome.hits
+
+
+async def search_with_signals(
+    query: str,
+    *,
+    top_k: int = 4,
+    include_test: bool = False,
+    embedder: Embedder | None = None,
+    min_score: float | None = None,
+    cycle_ids: Sequence[int] = (),
+) -> SearchOutcome:
+    """同 search,另带过门槛之前的最高分(见 SearchOutcome)。参数含义与 search 一致。"""
     if embedder is None:
         query_vec = await embed_query(query)
     else:
@@ -337,6 +394,7 @@ async def search(
         query=query,
         min_score=threshold,
         keyword_min_ratio=settings.kb_keyword_min_ratio,
+        cycle_ids=cycle_ids,
     )
 
 
@@ -353,10 +411,13 @@ def _search_sync(
     query: str = "",
     min_score: float = 0.0,
     keyword_min_ratio: float = 1.0,
-) -> list[SearchHit]:
+    cycle_ids: Sequence[int] = (),
+) -> SearchOutcome:
     version = _schema_version()
     terms = query_terms(query) if query else []
     kind_filter = "" if include_test else " AND s.kind = 'normal'"
+    # 空数组时 ANY 恒假,只剩 cycle_id IS NULL 的常青条目
+    cycle_filter = " AND (s.cycle_id IS NULL OR s.cycle_id = ANY(%(cycle_ids)s::int[]))"
     vec = _to_pgvector(query_vec)
     # 两路候选取并集,再对并集里每个块同时算向量分与字面命中数:
     # 只出现在关键词一路的块也要有向量分,门槛与排序才可比。
@@ -368,7 +429,7 @@ def _search_sync(
             vec AS (
                 SELECT c.chunk_id
                 FROM kb_chunks c JOIN kb_source s USING (source_id), q
-                WHERE s.enabled AND c.model_version = %(version)s{kind_filter}
+                WHERE s.enabled AND c.model_version = %(version)s{kind_filter}{cycle_filter}
                 ORDER BY c.embedding <=> q.v, c.chunk_ordinal, c.source_id
                 LIMIT %(candidates)s
             ),
@@ -378,7 +439,7 @@ def _search_sync(
                 JOIN unnest(%(patterns)s::text[]) AS t(pattern)
                   ON (s.source_title || ' ' || c.heading_path || ' ' || c.chunk_text)
                      ILIKE t.pattern
-                WHERE s.enabled AND c.model_version = %(version)s{kind_filter}
+                WHERE s.enabled AND c.model_version = %(version)s{kind_filter}{cycle_filter}
                 GROUP BY c.chunk_id
                 ORDER BY matched DESC, c.chunk_id
                 LIMIT %(candidates)s
@@ -394,15 +455,35 @@ def _search_sync(
                 "version": version,
                 "candidates": max(_CANDIDATES, top_k),
                 "patterns": [f"%{_escape_like(t)}%" for t in terms],
+                "cycle_ids": list(cycle_ids),
             },
         ).fetchall()
-    return _fuse(
+    hits = _fuse(
         rows,
         n_terms=len(terms),
         top_k=top_k,
         min_score=min_score,
         keyword_min_ratio=keyword_min_ratio,
     )
+    best_vec_score, best_kw_ratio = _best_signals(rows, n_terms=len(terms))
+    return SearchOutcome(hits=hits, best_vec_score=best_vec_score, best_kw_ratio=best_kw_ratio)
+
+
+def _best_signals(
+    rows: list[dict[str, Any]], *, n_terms: int
+) -> tuple[float | None, float | None]:
+    """候选里的最高向量分与最高关键词命中比,不看门槛。纯函数。
+
+    候选是两路各取前若干名的并集,向量一路按距离排序,所以这里的最高向量分
+    就是过滤条件内全部块的最高分(HNSW 是近似检索,个别时候会略低于真实最高分)。
+    """
+    if not rows:
+        return None, None
+    best_vec_score = max(float(r["score"]) for r in rows)
+    if not n_terms:
+        return best_vec_score, None
+    best_kw_ratio = max(int(r.get("matched") or 0) for r in rows) / n_terms
+    return best_vec_score, best_kw_ratio
 
 
 def _fuse(
@@ -485,6 +566,7 @@ def _record(
         answer=content.get("answer", ""),
         content_md=content.get("content_md", ""),
         chunk_count=chunk_count,
+        cycle_id=row.get("cycle_id"),
     )
 
 

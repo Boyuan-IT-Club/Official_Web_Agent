@@ -71,6 +71,9 @@ def test_ensure_conversation_table_creates_table() -> None:
     # 老库幂等补列(prefix_hash / compress_event):缺列 = INSERT 全失败
     assert any("ADD COLUMN IF NOT EXISTS prefix_hash" in c for c in calls)
     assert any("ADD COLUMN IF NOT EXISTS compress_event" in c for c in calls)
+    assert any("ADD COLUMN IF NOT EXISTS trace_id" in c for c in calls)
+    assert any("ADD COLUMN IF NOT EXISTS guard_verdict" in c for c in calls)
+    assert any("idx_conversation_trace" in c for c in calls)
 
 
 # ── 写入 ────────────────────────────────────────────────────────────────
@@ -112,7 +115,41 @@ def test_write_conversation_records_compress_event() -> None:
     sql = str(conn.execute.call_args.args[0])
     assert "compress_event" in sql
     params = conn.execute.call_args.args[1]
-    assert params[-1] == "trigger_tokens=31500;covered=38;kept=13;summary_tokens=812"
+    assert "trigger_tokens=31500;covered=38;kept=13;summary_tokens=812" in params
+
+
+def test_write_conversation_records_trace_id_and_guard_verdict() -> None:
+    """轮级 trace id 与守卫判定随轮落行;读回的记录带着它们。"""
+    row = _conversation_row()
+    row.update(trace_id="ab" * 16, guard_verdict="triggered:查询结果")
+    conn = _mock_conn(row)
+    with patch.object(conversation, "_conn", return_value=conn):
+        rec = conversation.write_conversation(
+            thread_id="web:u7:8f3a9c2b",
+            user_id=7,
+            user_message="帮我查一下",
+            reply_summary="抱歉,我无法查询。",
+            trace_id="ab" * 16,
+            guard_verdict="triggered:查询结果",
+        )
+    sql, params = conn.execute.call_args.args
+    assert "trace_id, guard_verdict" in str(sql)
+    assert params[-2:] == ("ab" * 16, "triggered:查询结果")
+    assert str(sql).count("%s") == len(params)  # 占位符与参数个数对齐
+    assert rec.trace_id == "ab" * 16
+    assert rec.guard_verdict == "triggered:查询结果"
+
+
+def test_write_conversation_without_guard_leaves_verdict_null() -> None:
+    """没跑守卫的轮次不写判定(NULL 与 "clean" 含义不同)。"""
+    conn = _mock_conn(_conversation_row())  # 存量行形状:没有这两列
+    with patch.object(conversation, "_conn", return_value=conn):
+        rec = conversation.write_conversation(
+            thread_id="web:u7:8f3a9c2b", user_id=7, user_message="hi"
+        )
+    params = conn.execute.call_args.args[1]
+    assert params[-2:] == (None, None)
+    assert rec.trace_id is None and rec.guard_verdict is None
 
 
 def test_write_conversation_masks_pii_before_insert() -> None:
@@ -404,3 +441,53 @@ def test_extract_usage_no_cache_info_stays_none() -> None:
     out = conversation.extract_usage(um)
     assert out["cache_hit_tokens"] is None
     assert out["cache_miss_tokens"] is None
+
+
+# ── 真 PG:trace_id / guard_verdict 写入读回 ──────────────────────────────
+
+
+def test_trace_id_and_guard_verdict_roundtrip_real_pg() -> None:
+    """真库冒烟:建表自举(含存量表补列)后,两列能写入、读回、随会话删除。
+
+    只做非破坏性操作(幂等 DDL + 本用例自己的行),可以指向开发库。
+    """
+    import os
+    import uuid
+
+    import pytest
+
+    from official_agent.config import get_settings
+
+    url = os.environ.get("POSTGRES_URL", "")
+    if not url:
+        pytest.skip("需要真 PostgreSQL(POSTGRES_URL)")
+    thread_id = f"it:conv:{uuid.uuid4().hex[:8]}"
+    trace_id = uuid.uuid4().hex
+    original = get_settings().postgres_url
+    get_settings().postgres_url = url
+    try:
+        conversation.ensure_conversation_table()
+        conversation.ensure_conversation_table()  # 幂等:第二次不报错
+        rec = conversation.write_conversation(
+            thread_id=thread_id,
+            user_id=None,
+            user_message="有几份简历?",
+            reply_summary="我没有可用的数据查询权限。",
+            trace_id=trace_id,
+            guard_verdict="triggered:查询结果",
+        )
+        assert rec.trace_id == trace_id and rec.guard_verdict == "triggered:查询结果"
+        plain = conversation.write_conversation(
+            thread_id=thread_id, user_id=None, user_message="在吗", reply_summary="在"
+        )
+        assert plain.trace_id is None and plain.guard_verdict is None
+
+        detail = conversation.get_conversation(rec.id)
+        assert detail is not None
+        assert detail["trace_id"] == trace_id
+        assert detail["guard_verdict"] == "triggered:查询结果"
+    finally:
+        try:
+            assert conversation.delete_thread_conversations(thread_id) == 2
+        finally:
+            get_settings().postgres_url = original

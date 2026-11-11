@@ -80,7 +80,7 @@ C:管理端面试页(规划)      ─┘        │
 | `evaluation/` | 评估域 | 流水线领域逻辑:`runner`(job 执行)、`bundle`(出题证据线)、`explore`+`investigate_graph`(仓探索/出题)、`graph`(评分子图)、`judge`/`tech_stack`/`awards`(专项出题)、`scoring`(量规)、`schema`(数据契约)、`llm_common`(共享 LLM 小件)、`github_client`/`autograding`/`attribution`/`dossier` |
 | `tools/` | 基础设施 | `client`(后端 REST 客户端,异常层级在此)、`readonly`/`knowledge`(语义化只读工具)、`write`(interrupt 写工具)、`credentials`(服务账号)、`interrupt_guard` |
 | `state/` | 基础设施 | Postgres 状态面:`pg`(checkpointer 连接)、`threads`(会话档案)、`conversation`(对话日志)、`evaluation/`(分卡/job/评审队列,包)、`qbank`(题库)、`audit`(审计)、`config_store`(热配置) |
-| `kb/` | 基础设施 | 知识库:入库分块/向量检索/表自举 |
+| `kb/` | 基础设施 | 知识库:入库分块/混合检索(按招新周期过滤)/表自举/检索日志(`query_log`) |
 | `security/` | 横切 | `pii`(脱敏)、`injection_guard`(数据区+注入扫描)、`fabrication_guard`(编造守卫) |
 | `prompts/` | 资源 | prompt 唯一权威(一图一节点一文件 + frontmatter,ADR-0004) |
 | `evals/` | 质量门 | eval 集 + 统一 runner(`python evals/run_evals.py`) |
@@ -128,7 +128,8 @@ POST /admin/evaluation/run(evaluation_admin,权限 evaluation:run)
 ## 7. 状态与安全
 
 - **存储只有 Postgres**(ADR-0007):checkpointer、会话档案(agent_threads)、
-  对话日志、评测三表(分卡/job/题库)、审计、kb 向量
+  对话日志、评测三表(分卡/job/题库)、审计、kb 向量、kb 检索日志(kb_query_log,
+  随会话删除)
 - **PII 是分层边界**:进模型前脱敏(tools 出口)+ trace 采集侧遮蔽(observability
   handler)+ 模型输出侧守卫 + 挂起载荷 TTL
 - **不可信输入**:简历/评测记录/候选人自述进 prompt 一律包数据区;批判节点兼作
@@ -151,5 +152,7 @@ POST /admin/evaluation/run(evaluation_admin,权限 evaluation:run)
 - 决策记录(ADR):`docs/adr/`(工作区根)
 - 工程规范:`docs/standards/`(入口 README 有加载地图)
 - 重构计划与进度:`docs/refactor-roadmap.md`
+- 多 agent 方向的设计稿:`docs/proposals/`(入口 README)。其中知识库运营闭环的 P0
+  (检索信号落库、周期过滤)已实现,其余无实现无排期
 - 历史过程记录(评审纪要/谈判清单/里程碑规划):`docs/archive/`(仅追溯用)
 - 架构决策的背景与备选:git 历史与 ADR;本文件只描述**当前**形态

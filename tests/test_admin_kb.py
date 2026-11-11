@@ -401,3 +401,70 @@ def test_kb_unexpected_error_no_internal_detail(
     detail = resp.json()["detail"]
     assert detail == "KB 操作失败,请稍后重试"
     assert "postgresql://" not in detail, "内部细节不得进响应体"
+
+
+# ── 招新周期绑定(cycle_id)──────────────────────────────
+
+
+def _capture_ingest(monkeypatch: pytest.MonkeyPatch) -> dict:
+    from official_agent.web import kb_admin
+
+    captured: dict = {}
+
+    async def _fake_ingest(source, *, embedder=None, source_id=None):
+        captured.update(source=source, source_id=source_id)
+        return source_id or "kb_new1"
+
+    monkeypatch.setattr(kb_admin.kb_store, "ingest_source", _fake_ingest)
+    return captured
+
+
+def test_kb_create_binds_source_to_cycle(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_resolve(monkeypatch, _kb_admin_identity())
+    captured = _capture_ingest(monkeypatch)
+    body = {"title": "本届面试安排", "type": "doc", "content_md": "# 周六面试", "cycle_id": 12}
+    resp = client.post("/api/agent/admin/kb/sources", headers=_AUTH, json=body)
+    assert resp.status_code == 201
+    assert captured["source"].cycle_id == 12
+
+
+def test_kb_create_without_cycle_is_evergreen(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """不带 cycle_id 的请求体(存量前端)照常可用,条目为常青。"""
+    _install_resolve(monkeypatch, _kb_admin_identity())
+    captured = _capture_ingest(monkeypatch)
+    body = {"title": "社团简介", "type": "doc", "content_md": "# 博远"}
+    resp = client.post("/api/agent/admin/kb/sources", headers=_AUTH, json=body)
+    assert resp.status_code == 201
+    assert captured["source"].cycle_id is None
+
+
+def test_kb_create_rejects_non_positive_cycle(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_resolve(monkeypatch, _kb_admin_identity())
+    _capture_ingest(monkeypatch)
+    body = {"title": "x", "type": "doc", "content_md": "# x", "cycle_id": 0}
+    resp = client.post("/api/agent/admin/kb/sources", headers=_AUTH, json=body)
+    assert resp.status_code == 422
+
+
+def test_kb_detail_and_reembed_keep_cycle_binding(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """详情回显周期;重嵌只重建向量,不能把周期绑定冲掉(冲掉 = 往届条目变常青)。"""
+    from official_agent.web import kb_admin
+
+    _install_resolve(monkeypatch, _kb_admin_identity())
+    captured = _capture_ingest(monkeypatch)
+    monkeypatch.setattr(kb_admin.kb_store, "get_source", lambda sid: _record(cycle_id=12))
+
+    detail = client.get("/api/agent/admin/kb/sources/kb_abc123", headers=_AUTH)
+    assert detail.status_code == 200 and detail.json()["cycle_id"] == 12
+
+    resp = client.post("/api/agent/admin/kb/sources/kb_abc123/reembed", headers=_AUTH)
+    assert resp.status_code == 200
+    assert captured["source"].cycle_id == 12

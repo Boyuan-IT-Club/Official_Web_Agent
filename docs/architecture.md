@@ -111,8 +111,9 @@ src/official_agent/
 │   ├── projection.py       #   工具返回投影(只留回答要用的字段,姓名/打分不进)
 │   ├── envelope.py         #   统一信封 {status: ok|error|unavailable, hint}
 │   ├── write.py            #   写工具(官网通道:确认卡片 → 指纹核对 → 意图审计 → 本人令牌执行 → 结果审计)
-│   └── knowledge.py        #   search_knowledge(知识库检索,降级契约)
-├── kb/                     # 知识库:chunking / embedding / keywords(分词) / schema / store(混合检索)
+│   └── knowledge.py        #   search_knowledge(知识库检索,降级契约;解析开放周期、落检索日志)
+├── kb/                     # 知识库:chunking / embedding / keywords(分词) / schema / store(混合检索+周期过滤)
+│                           #   / query_log(kb_query_log:每次检索的结局与门槛前最高分)
 ├── memory/                 # 长期记忆:store(agent_memory 表) / extract(后台提取+闸门) / recall(注入 system 末尾)
 ├── security/               # 横切:pii(脱敏)/ injection_guard(数据区+扫描)/ fabrication_guard
 ├── prompts/                # prompt 唯一权威(一图一节点一文件 + frontmatter,ADR-0004)
@@ -179,6 +180,7 @@ sequenceDiagram
     W->>W: 模型并发闸 + 墙钟超时
     loop 流式消费(astream 双模式)
         A->>TL: 工具调用(只读直连/写操作 interrupt)
+        Note right of TL: search_knowledge 每查一次<br/>后台落一行 kb_query_log(fail-open)
         A-->>W: delta 块(PII 掩码逐块) / tool 事件 / usage 终块
         W-->>C: event: delta / tool
     end
@@ -186,7 +188,7 @@ sequenceDiagram
         W->>W: 编造守卫 → 改写/放行
     end
     W->>W: 轮末压缩(超阈值,摘要回写 checkpoint)
-    W->>T: conversation_log 落一行(to_thread,fail-open)
+    W->>T: conversation_log 落一行(带轮级 trace_id 与守卫判定;to_thread,fail-open)
     W-->>C: event: done(带 sources 引用锚) 或 error(稳定文案+trace_id)
 ```
 
@@ -300,19 +302,23 @@ flowchart TD
 | 表 | 内容 | 关键约束 |
 |---|---|---|
 | `agent_threads` | 会话档案(thread_id/属主/状态) | thread_id 全局唯一;软删+保留期清理 |
-| `agent_conversation_log` | 对话日志(问题摘要/工具/耗时/usage/trace) | fail-open 写入 |
+| `agent_conversation_log` | 对话日志(问题摘要/工具/耗时/usage/轮级 trace_id/守卫判定) | fail-open 写入 |
 | `evaluation_scorecard` | AI 参考分卡(card JSONB/total/hard_zero) | UNIQUE(resume,cycle,card_version);状态机 CHECK |
 | `evaluation_job` | 执行 job(状态机/attempts/qbank_status) | 部分唯一索引:活跃 job 每 (resume,cycle) 一条 |
 | `interview_qbank` | 题库信封(v2 JSONB) | 版本递增 |
 | `qbank_pick_log` | 面试官选题记录 | 服务端权威引用(防伪造证据路径) |
 | `agent_audit_log` | 审计(ADR-0006 五字段) | 代理身份+trace_id |
 | `agent_config` | 热配置低敏键 | 白名单 HOT_KEYS |
-| `kb_source` / `kb_faq` / `kb_doc` / `kb_chunks` | 知识库来源/内容/向量 | 禁跨 embedding 模型混排 |
+| `kb_source` / `kb_faq` / `kb_doc` / `kb_chunks` | 知识库来源/内容/向量 | 禁跨 embedding 模型混排;`kb_source.cycle_id` 非空的条目只在该招新周期开放时进检索 |
+| `kb_query_log` | 对话里每次知识库检索一行(脱敏后的问题/结局/门槛前最高分/命中条目/生效周期) | fail-open 写入;按 `thread_id` 随会话删除;`trace_id` 关联对话日志 |
 
 ## 9. 横切机制
 
 - **trace 串联**:三入口(web 中间件/CLI/eval job)置轮级 id(归一 W3C 32-hex)→
-  出站 `traceparent` → 审计 trace_id → 日志 `[trace_id]`,四面同 id(ADR-0012)
+  出站 `traceparent` → 审计 trace_id → 日志 `[trace_id]`,四面同 id(ADR-0012)。
+  对话日志与知识库检索日志存的是入口那个 id(`observability.turn_trace_id`),两表按它
+  关联;Langfuse 开启时图内取到的是 span 的 id,与入口 id 不同(见
+  `docs/proposals/kb-ops-loop.md` D1)
 - **PII 分层边界**:工具出口 `mask_pii_deep` → trace 采集侧遮蔽(handler)→ 模型输出
   侧守卫 → 挂起载荷 TTL
 - **错误分类**:类型判定(`BackendAuthError`/`BackendUnavailableError`/`BackendError`)→

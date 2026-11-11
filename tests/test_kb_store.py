@@ -140,6 +140,19 @@ async def test_ingest_respects_explicit_source_id_and_updated_by(monkeypatch) ->
     )
     assert src_params[0] == "kb_fixed"
     assert src_params[5] == "ops-9"  # updated_by
+    assert src_params[6] is None  # 不指定周期 = 常青条目
+
+
+async def test_ingest_writes_cycle_id_and_overwrites_on_update(monkeypatch) -> None:
+    """周期绑定随条目落库;更新时照写(改回常青要能把旧周期清掉)。"""
+    conn = _mock_conn()
+    _patch_write(monkeypatch, conn)
+    await store.ingest_source(_source(cycle_id=12), embedder=_fake_embedder())
+    sql, params = next(
+        c.args for c in conn.execute.call_args_list if "INSERT INTO kb_source" in c.args[0]
+    )
+    assert params[6] == 12
+    assert "cycle_id = EXCLUDED.cycle_id" in sql
 
 
 async def test_ingest_vector_count_mismatch_rejected() -> None:
@@ -199,6 +212,33 @@ def test_get_source_maps_faq_content() -> None:
     assert rec is not None
     assert rec.question == "Q" and rec.answer == "A" and rec.content_md == ""
     assert rec.chunk_count == 1 and rec.tags == ["招新"]
+    assert rec.cycle_id is None
+
+
+def test_get_source_maps_cycle_id() -> None:
+    row = {
+        "source_id": "kb_2",
+        "source_title": "本届面试安排",
+        "source_type": "doc",
+        "kind": "normal",
+        "tags": [],
+        "enabled": True,
+        "updated_by": "ops",
+        "cycle_id": 12,
+    }
+    conn = MagicMock()
+    conn.__enter__.return_value = conn
+    conn.__exit__.return_value = False
+    conn.execute.side_effect = [
+        MagicMock(fetchone=lambda: row),
+        MagicMock(fetchone=lambda: None),  # 不是 faq
+        MagicMock(fetchone=lambda: {"content_md": "# 安排"}),
+        MagicMock(fetchone=lambda: {"n": 1}),
+    ]
+    with patch.object(store, "_conn", lambda: conn):
+        rec = store.get_source("kb_2")
+    assert rec is not None and rec.cycle_id == 12
+    assert "cycle_id" in conn.execute.call_args_list[0].args[0]
 
 
 def test_list_sources_applies_kind_and_keyword_filters() -> None:
@@ -241,7 +281,8 @@ def _row(source_id: str, score: float, matched: int = 0, ordinal: int = 0) -> di
 def test_search_excludes_test_and_disabled_by_default(monkeypatch) -> None:
     conn = _mock_conn(fetchall=[_row("kb_a", 0.87)])
     _patch_search(monkeypatch, conn)
-    hits = store._search_sync([0.1, 0.2], top_k=4, include_test=False, query="技术部做什么")
+    outcome = store._search_sync([0.1, 0.2], top_k=4, include_test=False, query="技术部做什么")
+    hits = outcome.hits
     assert len(hits) == 1
     assert hits[0].source_id == "kb_a" and hits[0].score == pytest.approx(0.87)
     sql = conn.execute.call_args.args[0]
@@ -251,6 +292,63 @@ def test_search_excludes_test_and_disabled_by_default(monkeypatch) -> None:
     params = conn.execute.call_args.args[1]
     assert params["version"] == 7  # version 过滤
     assert params["patterns"] == ["%技术部%"]  # 疑问词不进字面匹配
+
+
+def test_search_without_cycle_only_sees_evergreen_sources(monkeypatch) -> None:
+    """不给周期:过滤条件仍在,周期数组为空 → 只剩 cycle_id IS NULL 的常青条目。"""
+    conn = _mock_conn(fetchall=[])
+    _patch_search(monkeypatch, conn)
+    store._search_sync([0.1], top_k=2, include_test=False)
+    sql, params = conn.execute.call_args.args
+    # 向量、关键词两路都要过滤,否则往届条目能从另一路混进候选
+    assert sql.count("s.cycle_id IS NULL OR s.cycle_id = ANY(%(cycle_ids)s::int[])") == 2
+    assert params["cycle_ids"] == []
+
+
+def test_search_passes_open_cycles_to_filter(monkeypatch) -> None:
+    conn = _mock_conn(fetchall=[])
+    _patch_search(monkeypatch, conn)
+    store._search_sync([0.1], top_k=2, include_test=False, cycle_ids=(12, 13))
+    assert conn.execute.call_args.args[1]["cycle_ids"] == [12, 13]
+
+
+async def test_search_forwards_cycle_ids_and_returns_hits_only(monkeypatch) -> None:
+    conn = _mock_conn(fetchall=[_row("kb_a", 0.87)])
+    _patch_search(monkeypatch, conn)
+    monkeypatch.setattr(
+        "official_agent.kb.store.get_settings",
+        lambda: MagicMock(kb_min_score=0.45, kb_keyword_min_ratio=0.5, postgres_url="x"),
+    )
+    hits = await store.search("技术部做什么", embedder=_fake_embedder(), cycle_ids=[12])
+    assert [h.source_id for h in hits] == ["kb_a"]
+    assert conn.execute.call_args.args[1]["cycle_ids"] == [12]
+
+
+def test_search_reports_best_scores_even_when_nothing_passes(monkeypatch) -> None:
+    """没命中也要带回过门槛之前的最高分:检索日志靠它分辨「差一点」与「完全没有」。"""
+    conn = _mock_conn(fetchall=[_row("kb_a", 0.42, matched=1), _row("kb_b", 0.31, matched=0)])
+    _patch_search(monkeypatch, conn)
+    outcome = store._search_sync(
+        [0.1],
+        top_k=4,
+        include_test=False,
+        query="计拔怎么报名",
+        min_score=0.45,
+        keyword_min_ratio=1.0,
+    )
+    assert outcome.hits == []
+    assert outcome.best_vec_score == pytest.approx(0.42)
+    assert outcome.best_kw_ratio is not None and 0 < outcome.best_kw_ratio < 1
+
+
+def test_best_signals_edge_cases() -> None:
+    # 没有候选:两项都没有值(区别于「有候选但分数是 0」)
+    assert store._best_signals([], n_terms=2) == (None, None)
+    # 问题里抽不出关键词:关键词命中比无从谈起
+    assert store._best_signals([_row("kb_a", 0.5)], n_terms=0) == (0.5, None)
+    # 两路各取最高,不要求来自同一个块
+    rows = [_row("kb_a", 0.9, matched=0), _row("kb_b", 0.2, matched=3)]
+    assert store._best_signals(rows, n_terms=4) == (0.9, 0.75)
 
 
 def test_search_include_test_drops_kind_filter(monkeypatch) -> None:
