@@ -43,6 +43,12 @@ last_qbank_judge_report.json
 !evals/datasets/panel_probes.yaml
 !evals/datasets/critic_probes.yaml
 !evals/datasets/calibration_probes.yaml
+# 知识库运营门禁:手写向量夹具与合成提问,无真实数据
+!evals/datasets/kb_ops_probes.yaml
+!evals/datasets/kb_ops_triage.yaml
+!evals/datasets/kb_ops_verify.yaml
+!evals/datasets/kb_ops_injection.yaml
+!evals/datasets/kb_ops_faithfulness.yaml
 # CV 深挖报告逐字引用简历原文(防编造设计使然),与样本同级敏感:整体忽略,
 # 防误 add 把 PII 带进仓库。
 evals/reports/cv_dive_report.md

@@ -542,3 +542,118 @@ def test_query_log_roundtrip_real_pg(monkeypatch) -> None:
         with psycopg.connect(url) as conn:
             conn.execute("DELETE FROM kb_query_log WHERE thread_id = %s", (thread,))
             conn.commit()
+
+
+# ── FAQ 附加问法与按块读取 ───────────────────────────────
+
+
+async def test_faq_alt_questions_are_searchable_and_take_one_slot(kb_env) -> None:
+    """每种问法各自成块、都能检到;同一条 FAQ 在一次检索结果里只占一个名额。"""
+    run = secrets.token_hex(3)
+    faq_id = await store.ingest_source(
+        SourceInput(
+            title="会费说明",
+            type="faq",
+            question="ax0 加入社团需要交费吗?",
+            answer="不收费。",
+            alt_questions=("ax1 入社要钱吗", "ax1 社团收会费吗", " "),
+            updated_by=f"it-{run}",
+        ),
+        embedder=_axis_embedder(),
+    )
+    other_id = await store.ingest_source(
+        SourceInput(
+            title="别的条目", type="doc", content_md="ax1 别的内容", updated_by=f"it-{run}"
+        ),
+        embedder=_axis_embedder(),
+    )
+    record = store.get_source(faq_id)
+    assert record is not None and record.chunk_count == 3
+    assert record.alt_questions == ["ax1 入社要钱吗", "ax1 社团收会费吗"]  # 空白的那条没存
+
+    # 问题向量落在 ax1 轴:主问法(ax0)对不上,靠附加问法那两块召回
+    hits = await store.search("ax1 交钱", embedder=_axis_embedder(), top_k=2, min_score=0.45)
+    ours = [h for h in hits if h.source_id in (faq_id, other_id)]
+    assert sorted(h.source_id for h in ours) == sorted([faq_id, other_id])  # FAQ 没有占掉两个名额
+    faq_hit = next(h for h in ours if h.source_id == faq_id)
+    assert faq_hit.chunk_id == f"{faq_id}#1" and faq_hit.source_type == "faq"
+    assert faq_hit.chunk_text == "Q: ax1 入社要钱吗\nA: 不收费。"  # 命中的那块带着完整答案
+
+    # 再加一种问法:幂等,已有的问法不重复加
+    assert await store.add_alt_question(
+        faq_id, "ax1 要不要交会费", updated_by=f"it-{run}", embedder=_axis_embedder()
+    )
+    assert not await store.add_alt_question(
+        faq_id, "ax1  要不要 交会费", updated_by=f"it-{run}", embedder=_axis_embedder()
+    )
+    record = store.get_source(faq_id)
+    assert record is not None and record.chunk_count == 4 and len(record.alt_questions) == 3
+    listed = [q for sid, q in store.list_faq_questions() if sid == faq_id]
+    assert listed == ["ax0 加入社团需要交费吗?", *record.alt_questions]
+
+
+async def test_alt_questions_column_is_added_to_an_existing_database(kb_env) -> None:
+    """存量库的 kb_faq 没有 alt_questions 列:下次自举补上,已有 FAQ 照常可检、问法为空。"""
+    import psycopg
+
+    run = secrets.token_hex(3)
+    sid = await store.ingest_source(
+        SourceInput(
+            title="存量 FAQ",
+            type="faq",
+            question="ax0 旧问题",
+            answer="旧答案",
+            updated_by=f"it-{run}",
+        ),
+        embedder=_axis_embedder(),
+    )
+    with psycopg.connect(os.environ["KB_TEST_DATABASE_URL"]) as conn:
+        conn.execute("ALTER TABLE kb_faq DROP COLUMN alt_questions")
+        conn.commit()
+    store.reset_schema_cache()  # 相当于新版本进程启动后的第一次检索
+
+    hits = await store.search("ax0", embedder=_axis_embedder(), top_k=10)
+    assert any(h.source_id == sid for h in hits)
+    record = store.get_source(sid)
+    assert record is not None and record.alt_questions == [] and record.answer == "旧答案"
+    assert await store.add_alt_question(
+        sid, "ax1 新问法", updated_by=f"it-{run}", embedder=_axis_embedder()
+    )
+
+
+async def test_chunk_reads_follow_search_visibility(kb_env) -> None:
+    """按块取原文与检索同一口径:停用、评测、不在开放周期内的块都取不到。"""
+    run = secrets.token_hex(3)
+
+    async def add(title: str, **over) -> str:
+        return await store.ingest_source(
+            SourceInput(
+                title=title,
+                type="doc",
+                content_md=f"ax0 {title}的内容\n## 第二节\nax1 {title}的第二节",
+                updated_by=f"it-{run}",
+                **over,
+            ),
+            embedder=_axis_embedder(),
+        )
+
+    evergreen = await add("常青条目")
+    bound = await add("本届条目", cycle_id=12)
+    disabled = await add("停用条目")
+    probe = await add("评测条目", kind="test")
+    store.set_source_enabled(disabled, False, updated_by=f"it-{run}")
+    ids = [f"{sid}#0" for sid in (evergreen, bound, disabled, probe)] + ["kb_nope#0"]
+
+    assert set(store.get_chunks(ids)) == {f"{evergreen}#0"}
+    visible = store.get_chunks(ids, cycle_ids=(12,))
+    assert set(visible) == {f"{evergreen}#0", f"{bound}#0"}
+    assert visible[f"{bound}#0"].cycle_id == 12 and visible[f"{evergreen}#0"].cycle_id is None
+    assert visible[f"{bound}#0"].title == "本届条目" and visible[f"{bound}#0"].source_type == "doc"
+    assert set(store.get_chunks(ids, cycle_ids=(13,))) == {f"{evergreen}#0"}  # 换届后取不到
+
+    chunks = store.list_source_chunks(evergreen)
+    assert [c.chunk_id for c in chunks] == [f"{evergreen}#0", f"{evergreen}#1"]
+    assert chunks[1].heading_path == "第二节" and chunks[1].text == "ax1 常青条目的第二节"
+    assert store.list_source_chunks(bound) == []  # 不给周期读不到本届条目
+    assert len(store.list_source_chunks(bound, cycle_ids=(12,))) == 2
+    assert store.list_source_chunks(disabled) == [] and store.list_source_chunks(probe) == []

@@ -93,6 +93,14 @@ async def search_knowledge(query: str) -> dict[str, Any]:
     }
 
 
+async def open_cycle_ids() -> tuple[int, ...]:
+    """当前开放的招新周期 id;读不到返回空元组(只查常青条目)。
+
+    给对话之外、需要与在线检索同一过滤口径的调用方用(如离线起草)。
+    """
+    return await _open_cycle_ids()
+
+
 async def _open_cycle_ids() -> tuple[int, ...]:
     """当前开放的招新周期 id(可能同时开着多个);读不到或超时返回空元组。"""
     try:

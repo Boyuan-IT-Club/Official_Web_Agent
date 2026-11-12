@@ -11,6 +11,8 @@
   候选直接丢掉——「查不到」必须能真的返回空,否则模型会拿不相关片段硬凑答案
 - 绑定了招新周期的条目(kb_source.cycle_id)只在调用方给出该周期时才进检索;
   不给周期只查常青条目——宁可查不到,也不拿往届的时间地点作答
+- FAQ 可以带附加问法(alt_questions):每种问法各自成块参与检索,但同一条 FAQ
+  在一次检索结果里只占一个名额
 """
 
 import asyncio
@@ -18,7 +20,7 @@ import secrets
 import threading
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import psycopg
@@ -46,6 +48,7 @@ class SourceInput:
     """新建/更新一条知识的输入。type=faq 用 question/answer;type=doc 用 content_md。
 
     cycle_id 为 None 表示常青条目;填招新周期 id 表示只在该周期开放期间可被检索。
+    alt_questions 只对 FAQ 有意义:同一个答案的其他问法。
     """
 
     title: str
@@ -57,6 +60,7 @@ class SourceInput:
     content_md: str = ""
     updated_by: str = ""
     cycle_id: int | None = None
+    alt_questions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -73,6 +77,7 @@ class SourceRecord:
     content_md: str = ""
     chunk_count: int = 0
     cycle_id: int | None = None
+    alt_questions: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -80,6 +85,7 @@ class SearchHit:
     """一条检索命中。source_id+title 是引用锚;chunk_text 供上下文/摘要。
 
     score 是向量相似度(0-1);keyword_score 是问题关键词在该块里字面出现的比例。
+    chunk_id 定位到具体的块(需要逐句对出处的调用方用);source_type 是 faq / doc。
     """
 
     source_id: str
@@ -88,6 +94,21 @@ class SearchHit:
     heading_path: str
     score: float
     keyword_score: float = 0.0
+    chunk_id: str = ""
+    source_type: str = ""
+
+
+@dataclass(frozen=True)
+class ChunkRecord:
+    """一个块的原文与它所属条目的标识。cycle_id 是所属条目绑定的招新周期,常青为 None。"""
+
+    chunk_id: str
+    source_id: str
+    title: str
+    source_type: str
+    text: str
+    heading_path: str
+    cycle_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -182,12 +203,30 @@ def _split_chunks(source: SourceInput) -> list[KbChunk]:
     if source.type == "faq":
         if not source.question.strip() or not source.answer.strip():
             raise KbValidationError("FAQ 条目必须同时有 question 与 answer")
-        return split_faq(source.question, source.answer)
+        return split_faq(source.question, source.answer, clean_alt_questions(source))
     if source.type == "doc":
         if not source.content_md.strip():
             raise KbValidationError("正文条目 content_md 不能为空")
         return split_doc(source.content_md)
     raise KbValidationError(f"source_type 只支持 faq/doc,收到 {source.type!r}")
+
+
+def same_question(a: str, b: str) -> bool:
+    """两种问法字面上是不是同一句(忽略空白与大小写)。"""
+    return "".join(a.split()).lower() == "".join(b.split()).lower()
+
+
+def clean_alt_questions(source: SourceInput) -> list[str]:
+    """附加问法去掉空的、与主问法相同的、彼此重复的,保持原有顺序。"""
+    kept: list[str] = []
+    for alt in source.alt_questions:
+        text = alt.strip()
+        if not text or same_question(text, source.question):
+            continue
+        if any(same_question(text, seen) for seen in kept):
+            continue
+        kept.append(text)
+    return kept
 
 
 async def ingest_source(
@@ -240,8 +279,9 @@ def _write_source(
         conn.execute("DELETE FROM kb_doc WHERE source_id = %s", (sid,))
         if source.type == "faq":
             conn.execute(
-                "INSERT INTO kb_faq (source_id, question, answer) VALUES (%s, %s, %s)",
-                (sid, source.question, source.answer),
+                "INSERT INTO kb_faq (source_id, question, answer, alt_questions) "
+                "VALUES (%s, %s, %s, %s::text[])",
+                (sid, source.question, source.answer, clean_alt_questions(source)),
             )
         else:
             conn.execute(
@@ -331,7 +371,7 @@ def list_sources(
             """,
             [*params, size, (page - 1) * size],
         ).fetchall()
-    empty_content = {"question": "", "answer": "", "content_md": ""}
+    empty_content: dict[str, Any] = {"question": "", "answer": "", "content_md": ""}
     items = [
         _record(r, empty_content, chunk_count=r["chunk_count"]) for r in rows
     ]
@@ -444,7 +484,8 @@ def _search_sync(
                 ORDER BY matched DESC, c.chunk_id
                 LIMIT %(candidates)s
             )
-            SELECT s.source_id, s.source_title, c.chunk_text, c.heading_path, c.chunk_ordinal,
+            SELECT s.source_id, s.source_title, s.source_type, c.chunk_id, c.chunk_text,
+                   c.heading_path, c.chunk_ordinal,
                    1 - (c.embedding <=> q.v) AS score, COALESCE(kw.matched, 0) AS matched
             FROM kb_chunks c JOIN kb_source s USING (source_id) CROSS JOIN q
             LEFT JOIN kw USING (chunk_id)
@@ -499,6 +540,8 @@ def _fuse(
     门槛是「或」:向量分达标,或问题关键词有足够比例字面出现在块里。后者兜住
     专有名词——向量对「计拔」这种词不敏感,但条目里写了它就该召回。
     同分按 (块序号, source_id) 决胜:否则同分行的顺序由 PG 计划形态决定,结果抖动。
+    同一条 FAQ 的多种问法各有一块、答案相同,只留排名最前的那块,不让一条 FAQ
+    占掉多个名额;正文条目的各块内容不同,不合并。
     """
 
     def tiebreak(r: dict[str, Any]) -> tuple[int, str]:
@@ -524,6 +567,14 @@ def _fuse(
         if float(r["score"]) >= min_score or (n_terms and keyword_ratio(r) >= keyword_min_ratio)
     ]
     passed.sort(key=lambda r: (-rrf[id(r)], -float(r["score"]), *tiebreak(r)))
+    kept: list[dict[str, Any]] = []
+    faq_sources_seen: set[str] = set()
+    for r in passed:
+        if r.get("source_type") == "faq":
+            if r["source_id"] in faq_sources_seen:
+                continue
+            faq_sources_seen.add(r["source_id"])
+        kept.append(r)
     return [
         SearchHit(
             source_id=r["source_id"],
@@ -532,17 +583,144 @@ def _fuse(
             heading_path=r["heading_path"],
             score=float(r["score"]),
             keyword_score=round(keyword_ratio(r), 3),
+            chunk_id=str(r.get("chunk_id") or ""),
+            source_type=str(r.get("source_type") or ""),
         )
-        for r in passed[:top_k]
+        for r in kept[:top_k]
     ]
 
 
-def _fetch_content(conn: psycopg.Connection[dict[str, Any]], source_id: str) -> dict[str, str]:
+#: 块读取的可见性条件,与检索一致:条目启用、不是评测条目、向量版本是当前的、
+#: 常青或绑定在给定的开放周期上
+_VISIBLE_CHUNK = (
+    "s.enabled AND s.kind = 'normal' AND c.model_version = %(version)s "
+    "AND (s.cycle_id IS NULL OR s.cycle_id = ANY(%(cycle_ids)s::int[]))"
+)
+_CHUNK_COLUMNS = (
+    "c.chunk_id, c.source_id, s.source_title, s.source_type, s.cycle_id, c.chunk_text, "
+    "c.heading_path"
+)
+
+
+def get_chunks(
+    chunk_ids: Sequence[str], *, cycle_ids: Sequence[int] = ()
+) -> dict[str, ChunkRecord]:
+    """按块 id 取原文,返回 {chunk_id: ChunkRecord}。
+
+    只回当前检索得到的块(条件与 search 相同,cycle_ids 含义也相同):条目已停用、
+    是评测条目、不在开放周期内、或向量版本已过期的块不在结果里——引用它们的一方
+    应当把这当作「出处不存在」。
+    """
+    if not chunk_ids:
+        return {}
+    params = {
+        "chunk_ids": list(chunk_ids),
+        "version": _schema_version(),
+        "cycle_ids": list(cycle_ids),
+    }
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {_CHUNK_COLUMNS}
+            FROM kb_chunks c JOIN kb_source s USING (source_id)
+            WHERE c.chunk_id = ANY(%(chunk_ids)s::text[]) AND {_VISIBLE_CHUNK}
+            """,
+            params,
+        ).fetchall()
+    return {r["chunk_id"]: _chunk_record(r) for r in rows}
+
+
+def list_source_chunks(source_id: str, *, cycle_ids: Sequence[int] = ()) -> list[ChunkRecord]:
+    """一条条目的全部块,按块序号;条目不存在或当前检索不到(条件同 get_chunks)返回空表。"""
+    params = {"source_id": source_id, "version": _schema_version(), "cycle_ids": list(cycle_ids)}
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT {_CHUNK_COLUMNS}
+            FROM kb_chunks c JOIN kb_source s USING (source_id)
+            WHERE c.source_id = %(source_id)s AND {_VISIBLE_CHUNK}
+            ORDER BY c.chunk_ordinal
+            """,
+            params,
+        ).fetchall()
+    return [_chunk_record(r) for r in rows]
+
+
+def list_faq_questions() -> list[tuple[str, str]]:
+    """全部可检索 FAQ 的问法,(source_id, 问法) 逐条列出,主问法在前、附加问法在后。"""
+    _schema_version()
+    with _conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT f.source_id, f.question, f.alt_questions
+            FROM kb_faq f JOIN kb_source s USING (source_id)
+            WHERE s.enabled AND s.kind = 'normal'
+            ORDER BY f.source_id
+            """
+        ).fetchall()
+    return [
+        (r["source_id"], question)
+        for r in rows
+        for question in [r["question"], *(r["alt_questions"] or [])]
+    ]
+
+
+async def add_alt_question(
+    source_id: str, question: str, *, updated_by: str, embedder: Embedder | None = None
+) -> bool:
+    """给一条 FAQ 加一种问法并重建它的块。已有同样的问法时什么都不做,返回 False。
+
+    条目不存在或不是 FAQ 抛 KbValidationError。重复调用是幂等的。
+    """
+    record = await asyncio.to_thread(get_source, source_id)
+    if record is None or record.type != "faq":
+        raise KbValidationError(f"条目 {source_id} 不存在或不是 FAQ,无法添加问法")
+    text = question.strip()
+    if not text:
+        raise KbValidationError("问法不能为空")
+    if any(same_question(text, known) for known in [record.question, *record.alt_questions]):
+        return False
+    await ingest_source(
+        SourceInput(
+            title=record.title,
+            type=record.type,
+            kind=record.kind,
+            tags=tuple(record.tags),
+            question=record.question,
+            answer=record.answer,
+            updated_by=updated_by,
+            cycle_id=record.cycle_id,
+            alt_questions=(*record.alt_questions, text),
+        ),
+        embedder=embedder,
+        source_id=source_id,
+    )
+    return True
+
+
+def _chunk_record(row: dict[str, Any]) -> ChunkRecord:
+    return ChunkRecord(
+        chunk_id=row["chunk_id"],
+        source_id=row["source_id"],
+        title=row["source_title"],
+        source_type=row["source_type"],
+        text=row["chunk_text"],
+        heading_path=row["heading_path"],
+        cycle_id=row.get("cycle_id"),
+    )
+
+
+def _fetch_content(conn: psycopg.Connection[dict[str, Any]], source_id: str) -> dict[str, Any]:
     faq = conn.execute(
-        "SELECT question, answer FROM kb_faq WHERE source_id = %s", (source_id,)
+        "SELECT question, answer, alt_questions FROM kb_faq WHERE source_id = %s", (source_id,)
     ).fetchone()
     if faq:
-        return {"question": faq["question"], "answer": faq["answer"], "content_md": ""}
+        return {
+            "question": faq["question"],
+            "answer": faq["answer"],
+            "content_md": "",
+            "alt_questions": list(faq.get("alt_questions") or []),
+        }
     doc = conn.execute(
         "SELECT content_md FROM kb_doc WHERE source_id = %s", (source_id,)
     ).fetchone()
@@ -552,7 +730,7 @@ def _fetch_content(conn: psycopg.Connection[dict[str, Any]], source_id: str) -> 
 
 
 def _record(
-    row: dict[str, Any], content: dict[str, str], *, chunk_count: int = 0
+    row: dict[str, Any], content: dict[str, Any], *, chunk_count: int = 0
 ) -> SourceRecord:
     return SourceRecord(
         source_id=row["source_id"],
@@ -567,6 +745,7 @@ def _record(
         content_md=content.get("content_md", ""),
         chunk_count=chunk_count,
         cycle_id=row.get("cycle_id"),
+        alt_questions=list(content.get("alt_questions") or []),
     )
 
 

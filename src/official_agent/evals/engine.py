@@ -116,6 +116,11 @@ def default_registry() -> dict[str, SuiteSpec]:
         critic_probes,
         cv_dive_report,
         injection_probes,
+        kb_ops_faithfulness,
+        kb_ops_injection,
+        kb_ops_probes,
+        kb_ops_triage,
+        kb_ops_verify,
         kb_probes,
         memory_probes,
         org_memory_probes,
@@ -162,6 +167,21 @@ def default_registry() -> dict[str, SuiteSpec]:
         ),
         "calibration_probes": SuiteSpec(
             run=calibration_probes.run_suite, env_blocker=calibration_probes.env_blocker
+        ),
+        "kb_ops_probes": SuiteSpec(
+            run=kb_ops_probes.run_suite, env_blocker=kb_ops_probes.env_blocker
+        ),
+        "kb_ops_triage": SuiteSpec(
+            run=kb_ops_triage.run_suite, env_blocker=kb_ops_triage.env_blocker
+        ),
+        "kb_ops_verify": SuiteSpec(
+            run=kb_ops_verify.run_suite, env_blocker=kb_ops_verify.env_blocker
+        ),
+        "kb_ops_injection": SuiteSpec(
+            run=kb_ops_injection.run_suite, env_blocker=kb_ops_injection.env_blocker
+        ),
+        "kb_ops_faithfulness": SuiteSpec(
+            run=kb_ops_faithfulness.run_suite, env_blocker=kb_ops_faithfulness.env_blocker
         ),
     }
 

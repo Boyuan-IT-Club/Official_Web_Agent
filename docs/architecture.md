@@ -87,6 +87,7 @@ src/official_agent/
 │   ├── telemetry.py        #   conversation_log 落账、KB 引用锚收集、usage/前缀指纹
 │   ├── config_admin.py     #   /admin/config:低敏热改 + 高敏掩码 + base_url 白名单
 │   ├── kb_admin.py         #   /admin/kb*:知识条目 CRUD/入库重嵌
+│   ├── kb_ops_admin.py     #   /admin/kb/ops*:触发离线分析、运行列表、主题清单、草稿审核(列表/修改/批准发布/驳回)、忠实度抽样;挂在 kb_admin 的 router 下
 │   ├── evaluation_admin.py #   /admin/evaluation*:触发/队列/维卡/采纳/驳回/题库
 │   ├── retrospective_admin.py # /admin/retrospective/*:指标快照采集与读取;报告生成/审阅/发布
 │   └── org_memory_admin.py #   /admin/org-memory*:组织记忆的勾选/退役/续期/列表
@@ -130,6 +131,8 @@ src/official_agent/
 │   ├── qbank.py            #   interview_qbank:题库 + pick_log
 │   ├── qbank_index.py      #   qbank_question_index:题目向量索引(pgvector,惰性自举)
 │   ├── audit.py            #   agent_audit_log:审计(五字段,ADR-0006)
+│   ├── kb_ops.py           #   kb_ops_run / kb_ops_topic / kb_draft:离线分析的运行记录、主题清单、草稿 + 运行锁与草稿锁
+│   ├── kb_faithfulness.py  #   kb_faithfulness_run / _sample:回复忠实度抽样(样本随对话日志级联删除)
 │   ├── config_store.py     #   agent_config:热配置(DB 覆盖 env)
 │   └── retrospective/      #   包:snapshot_store(cycle_metrics_snapshot,只追加)/ aggregates(各域只读聚合)
 │                           #       / report_store(cycle_retrospective:报告版本与发布状态机)
@@ -140,8 +143,13 @@ src/official_agent/
 │   ├── envelope.py         #   统一信封 {status: ok|error|unavailable, hint}
 │   ├── write.py            #   写工具(官网通道:确认卡片 → 指纹核对 → 意图审计 → 本人令牌执行 → 结果审计)
 │   └── knowledge.py        #   search_knowledge(知识库检索,降级契约;解析开放周期、落检索日志)
-├── kb/                     # 知识库:chunking / embedding / keywords(分词) / schema / store(混合检索+周期过滤)
+├── kb/                     # 知识库:chunking(FAQ 一种问法一块)/ embedding / keywords(分词) / schema / store(混合检索+周期过滤+按块取原文)
 │                           #   / query_log(kb_query_log:每次检索的结局与门槛前最高分)
+├── kb_ops/                 # 知识库运营(离线):cluster(没命中的检索聚成主题,纯函数) / triage(缺口甄别)
+│                           #   / draft(受限检索循环起草)/ verify + citation(审核;引文与数字由代码复核、代码裁决)
+│                           #   / drafting + dedupe(主题级编排与查重)/ graph(聚类→并行甄别→起草,只计算)
+│                           #   / runner(抢锁、取数、落库)/ publish(管理员批准后才写知识库,唯一的写入口)
+│                           #   / faithfulness + faithfulness_runner(离线抽样核对回复与检索到的条目)
 ├── memory/                 # 长期记忆:store(agent_memory 表) / extract(后台提取+闸门) / recall(注入 system 末尾)
 │                           #   组织记忆:org_store(org_memory 表,人勾选才写入);recall 里按角色定可见范围
 ├── retrospective/          # 周期复盘:catalog(指标目录:id/名字/口径) / metrics(各域口径函数+collect_metrics)
@@ -151,6 +159,7 @@ src/official_agent/
 │                           #   / render(Markdown 渲染) / reports(后台生成任务)
 │                           #   / lessons(候选教训勾选成组织记忆的闸门)
 ├── security/               # 横切:pii(脱敏)/ injection_guard(数据区+扫描)/ fabrication_guard
+│                           #   / citation_guard(引用核验,只观测)/ guard_verdict(多个守卫的判定怎么存进一列)
 ├── prompts/                # prompt 唯一权威(一图一节点一文件 + frontmatter,ADR-0004)
 ├── evals/                  # eval 集 + 统一 runner(python -m evals / evals/run_evals.py)
 ├── observability.py        # Langfuse 接线(fail-open)+ trace id(contextvar/W3C)+ PII 遮蔽 handler
@@ -405,7 +414,7 @@ flowchart TD
 | 表 | 内容 | 关键约束 |
 |---|---|---|
 | `agent_threads` | 会话档案(thread_id/属主/状态) | thread_id 全局唯一;软删+保留期清理 |
-| `agent_conversation_log` | 对话日志(问题摘要/工具/耗时/usage/轮级 trace_id/守卫判定) | fail-open 写入 |
+| `agent_conversation_log` | 对话日志(问题摘要/工具/耗时/usage/轮级 trace_id/守卫判定) | fail-open 写入;`guard_verdict` 是 `守卫名=判定` 用分号连接 |
 | `evaluation_scorecard` | AI 参考分卡(card JSONB/total/hard_zero;critic / panel 模式的卡带 `panel` 块:模式/置信度/注入片段/分歧) | UNIQUE(resume,cycle,card_version);状态机 CHECK |
 | `evaluation_job` | 执行 job(状态机/attempts/qbank_status) | 部分唯一索引:活跃 job 每 (resume,cycle) 一条 |
 | `evaluation_calibration_case` | 初筛校准案例(条目级判例 + 向量 real[],记 embed_model) | 案例不可改,只能停用;同一张卡的同一判定项只入库一次;按周期用案例号水位冻结 |
@@ -414,11 +423,14 @@ flowchart TD
 | `qbank_question_index` | 题目向量索引(每道可挑的题一行) | 每行记 embed_model,不跨模型比较;一份简历只留最新一版 |
 | `agent_audit_log` | 审计(ADR-0006 五字段) | 代理身份+trace_id |
 | `agent_config` | 热配置低敏键 | 白名单 HOT_KEYS |
-| `kb_source` / `kb_faq` / `kb_doc` / `kb_chunks` | 知识库来源/内容/向量 | 禁跨 embedding 模型混排;`kb_source.cycle_id` 非空的条目只在该招新周期开放时进检索 |
+| `kb_source` / `kb_faq` / `kb_doc` / `kb_chunks` | 知识库来源/内容/向量 | 禁跨 embedding 模型混排;`kb_source.cycle_id` 非空的条目只在该招新周期开放时进检索;`kb_faq.alt_questions` 的每种问法各自成块,同一条 FAQ 在一次检索结果里只占一个名额 |
 | `kb_query_log` | 对话里每次知识库检索一行(脱敏后的问题/结局/门槛前最高分/命中条目/生效周期) | fail-open 写入;按 `thread_id` 随会话删除;`trace_id` 关联对话日志 |
 | `cycle_metrics_snapshot` | 每个招新周期的指标快照(过了小格子抑制的聚合数 + 当时的指标目录) | UNIQUE(cycle,version),只追加;没有 `thread_id`,不随会话删除或保留期清理 |
 | `cycle_retrospective` | 周期复盘报告(结构化正文/Markdown/被守卫删掉的句子/prompt 版本) | UNIQUE(cycle,version);状态机 CHECK;部分唯一索引:每周期至多一份已发布、一份在生成 |
 | `org_memory` | 组织记忆:已发布报告里经管理员勾选的教训(可见范围/保质期/出处/向量) | 只由人工动作写入;部分唯一索引:同一条候选教训至多一条生效;过期保留不召回 |
+| `kb_ops_run` / `kb_ops_topic` | 知识库运营的离线分析:一次运行一行,产出的主题清单(热度/近失数/归类/样本引用/起草结局)随运行级联 | 同一时刻只跑一次(advisory lock);主题不存提问原文,只存 `kb_query_log` 行 id,样本随会话删除消失;只留最近若干次运行 |
+| `kb_faithfulness_run` / `kb_faithfulness_sample` | 回复忠实度抽样:一次运行一行,抽到的每轮对话一行(逐条说法的结论与计数) | 样本外键挂对话日志行并级联删除(随会话删除);问题与回复不重复存;只留最近若干次运行 |
+| `kb_draft` | 知识库草稿(补问法/新 FAQ/待补充):逐句出处、审核结论、审核状态 | 是 agent 的私有状态,不是知识库条目;状态只从 pending 走一次;发布由管理员批准触发、按草稿加锁、先审计后发布;不随运行删除,处理完的到期清理 |
 
 ## 9. 横切机制
 
@@ -439,7 +451,7 @@ flowchart TD
 | 层 | 位置/命令 | 把关内容 |
 |---|---|---|
 | 单测 | `uv run pytest`(709+) | 确定性逻辑:工具/图结构/权限/脱敏/状态面(mock 连接) |
-| 集成 | pgvector 容器 + `POSTGRES_URL=... pytest tests/*_pg.py tests/test_kb_integration.py` | DDL 幂等/唯一索引/事务边界/锁纪律(自 SKIP 不算通过) |
+| 集成 | pgvector 容器 + `POSTGRES_URL=... pytest tests/*_pg.py tests/test_kb_integration.py`(知识库两档 `test_kb_integration.py` / `test_kb_ops_integration.py` 另需 `KB_TEST_DATABASE_URL` 指向一次性库) | DDL 幂等/唯一索引/事务边界/锁纪律(自 SKIP 不算通过) |
 | eval | `python evals/run_evals.py` | 工具选择/参数红线(forbidden_tools)、阈值门禁、LLM-as-judge、初筛评分基线(区间一致率/条目翻转率/注入拦截率) |
 | 机械 | `uv run ruff check .` | lint(line-length 100) |
 

@@ -46,6 +46,31 @@ class Settings(BaseSettings):
     kb_min_score: float = 0.45
     kb_keyword_min_ratio: float = 0.5
 
+    # 知识库运营(kb_ops/):把没答上的检索聚成主题。下面四个数都是起点,没有用真实
+    # 日志校准过;换 embedding 模型后相似度分布会变,聚类阈值要重校。
+    # 两个问题算同一个主题的最低余弦相似度
+    kb_ops_cluster_threshold: float = 0.75
+    # 主题的最小支持度:至少这么多次检索、来自至少这么多个会话。会话数同时是隐私
+    # 下限(只有多人问过的问题才摘给管理员看),代码里不接受小于 2 的值
+    kb_ops_min_queries: int = 3
+    kb_ops_min_threads: int = 2
+    # 没命中、但最高向量分落在 [kb_min_score - 本值, kb_min_score) 的检索算「差一点命中」
+    kb_ops_near_miss_margin: float = 0.08
+    # 主题清单只保留最近这么多次运行,更早的随下一次运行清掉
+    kb_ops_run_retention: int = 8
+    # 是否为「该由知识库回答」的主题起草带出处的草稿。默认关闭:离线分析只出主题清单,
+    # 没有起草与审核的模型调用。打开之前先在真实模型上跑过 kb_ops_triage 与
+    # kb_ops_verify 两个 eval 并留下基线(ADR-0004:新模型角色先有 eval 再上线)
+    kb_ops_drafting_enabled: bool = False
+    # 处理完(批准/驳回/被顶替)的草稿保留这么多天;待审的草稿不清
+    kb_ops_draft_retention_days: int = 365
+    # 在线引用核验:回复里用书名号引的条目是不是本轮检索到的。只把判定记进对话日志,
+    # 不改写回复、不调模型。默认关闭,打开后先看一段时间的误报再决定要不要据此做事
+    kb_citation_check_enabled: bool = False
+    # 离线忠实度抽样:抽已答复的回合,由模型核对回复与当时检索到的条目。默认关闭:
+    # 打开之前先在真实模型上跑过 kb_ops_faithfulness 这个 eval 并留下基线
+    kb_ops_faithfulness_enabled: bool = False
+
     # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)
     postgres_url: str = "postgresql://localhost:5432/official_agent"
 

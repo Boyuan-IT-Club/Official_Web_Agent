@@ -422,3 +422,268 @@ def test_escape_like_neutralises_wildcards() -> None:
 
 def test_to_pgvector_format() -> None:
     assert store._to_pgvector([0.5, -1]) == "[0.5,-1.0]"
+
+
+# ── FAQ 附加问法 ─────────────────────────────────────────
+
+
+def test_same_question_ignores_whitespace_and_case() -> None:
+    assert store.same_question("入社 要钱吗", "入社要钱吗\n")
+    assert store.same_question("FAQ 在哪", "faq在哪")
+    assert not store.same_question("入社要钱吗", "入社要钱吗?")  # 标点不同算不同:宁可多留一种问法
+
+
+def test_clean_alt_questions_drops_blank_duplicate_and_main_question() -> None:
+    source = _source(
+        type="faq",
+        question="加入社团需要交费吗?",
+        answer="不收费。",
+        alt_questions=("入社要钱吗", " ", "加入社团 需要交费吗?", "入社 要钱吗", "社团收会费吗"),
+    )
+    assert store.clean_alt_questions(source) == ["入社要钱吗", "社团收会费吗"]
+
+
+async def test_ingest_faq_with_alt_questions_writes_one_chunk_per_phrasing(monkeypatch) -> None:
+    conn = _mock_conn()
+    _patch_write(monkeypatch, conn)
+    embedded: list[str] = []
+
+    async def embedder(texts):
+        embedded.extend(texts)
+        return [[0.1] * 4 for _ in texts]
+
+    await store.ingest_source(
+        _source(type="faq", question="怎么报名?", answer="官网填表", alt_questions=("在哪报名",)),
+        embedder=embedder,
+        source_id="kb_faq1",
+    )
+    assert embedded == ["Q: 怎么报名?\nA: 官网填表", "Q: 在哪报名\nA: 官网填表"]
+    faq_sql, faq_params = next(
+        c.args for c in conn.execute.call_args_list if "INSERT INTO kb_faq" in c.args[0]
+    )
+    assert "alt_questions" in faq_sql
+    assert faq_params == ("kb_faq1", "怎么报名?", "官网填表", ["在哪报名"])
+    chunk_ids = [
+        c.args[1][0] for c in conn.execute.call_args_list if "INSERT INTO kb_chunks" in c.args[0]
+    ]
+    assert chunk_ids == ["kb_faq1#0", "kb_faq1#1"]
+
+
+def test_get_source_maps_alt_questions() -> None:
+    row = {
+        "source_id": "kb_1",
+        "source_title": "FAQ",
+        "source_type": "faq",
+        "kind": "normal",
+        "tags": [],
+        "enabled": True,
+        "updated_by": "ops",
+    }
+    conn = MagicMock()
+    conn.__enter__.return_value = conn
+    conn.__exit__.return_value = False
+    conn.execute.side_effect = [
+        MagicMock(fetchone=lambda: row),
+        MagicMock(fetchone=lambda: {"question": "Q", "answer": "A", "alt_questions": ["Q2"]}),
+        MagicMock(fetchone=lambda: {"n": 2}),
+    ]
+    with patch.object(store, "_conn", lambda: conn):
+        rec = store.get_source("kb_1")
+    assert rec is not None and rec.alt_questions == ["Q2"] and rec.chunk_count == 2
+
+
+def _faq_record(**over) -> store.SourceRecord:
+    base = {
+        "source_id": "kb_fee",
+        "title": "会费说明",
+        "type": "faq",
+        "kind": "normal",
+        "tags": ["招新"],
+        "enabled": True,
+        "updated_by": "ops",
+        "question": "加入社团需要交费吗?",
+        "answer": "不收费。",
+        "cycle_id": 12,
+        "alt_questions": ["入社要钱吗"],
+    }
+    return store.SourceRecord(**{**base, **over})
+
+
+async def test_add_alt_question_appends_and_reingests(monkeypatch) -> None:
+    captured: dict = {}
+
+    async def fake_ingest(source, *, embedder=None, source_id=None):
+        captured.update(source=source, source_id=source_id)
+        return source_id
+
+    monkeypatch.setattr(store, "get_source", lambda sid: _faq_record())
+    monkeypatch.setattr(store, "ingest_source", fake_ingest)
+    assert await store.add_alt_question("kb_fee", " 社团收会费吗 ", updated_by="user:2") is True
+    assert captured["source_id"] == "kb_fee"
+    # 其余内容原样保留(含周期绑定),只多一种问法;更新人记为批准的人
+    assert captured["source"] == SourceInput(
+        title="会费说明",
+        type="faq",
+        tags=("招新",),
+        question="加入社团需要交费吗?",
+        answer="不收费。",
+        updated_by="user:2",
+        cycle_id=12,
+        alt_questions=("入社要钱吗", "社团收会费吗"),
+    )
+
+
+@pytest.mark.parametrize("known", ["入社 要钱吗", "加入社团需要交费吗?"])
+async def test_add_alt_question_is_idempotent(monkeypatch, known: str) -> None:
+    async def never(*_a, **_k):
+        raise AssertionError("已有同样的问法时不该重新入库")
+
+    monkeypatch.setattr(store, "get_source", lambda sid: _faq_record())
+    monkeypatch.setattr(store, "ingest_source", never)
+    assert await store.add_alt_question("kb_fee", known, updated_by="user:2") is False
+
+
+@pytest.mark.parametrize(
+    ("record", "question"),
+    [(None, "入社要钱吗"), (_faq_record(type="doc"), "入社要钱吗"), (_faq_record(), "  ")],
+)
+async def test_add_alt_question_rejects_bad_targets(monkeypatch, record, question: str) -> None:
+    monkeypatch.setattr(store, "get_source", lambda sid: record)
+    with pytest.raises(KbValidationError):
+        await store.add_alt_question("kb_fee", question, updated_by="user:2")
+
+
+# ── 检索:块 id、同一条 FAQ 只占一个名额 ────────────────────
+
+
+def _typed_row(source_id: str, score: float, source_type: str, ordinal: int = 0) -> dict:
+    return {
+        **_row(source_id, score, ordinal=ordinal),
+        "source_type": source_type,
+        "chunk_id": f"{source_id}#{ordinal}",
+    }
+
+
+def test_fuse_keeps_one_chunk_per_faq_source() -> None:
+    rows = [
+        _typed_row("kb_faq", 0.90, "faq", ordinal=1),  # 附加问法那一块分最高
+        _typed_row("kb_faq", 0.85, "faq", ordinal=0),
+        _typed_row("kb_doc", 0.80, "doc", ordinal=0),
+        _typed_row("kb_faq", 0.75, "faq", ordinal=2),
+        _typed_row("kb_doc", 0.70, "doc", ordinal=3),
+    ]
+    hits = store._fuse(rows, n_terms=0, top_k=4, min_score=0.45, keyword_min_ratio=0.5)
+    # 同一条 FAQ 的三种问法只留最相关的一块;正文条目的各块内容不同,都留
+    assert [(h.chunk_id, h.source_type) for h in hits] == [
+        ("kb_faq#1", "faq"),
+        ("kb_doc#0", "doc"),
+        ("kb_doc#3", "doc"),
+    ]
+
+
+def test_fuse_faq_dedupe_frees_slots_for_other_sources() -> None:
+    rows = [_typed_row("kb_faq", 0.9 - i * 0.01, "faq", ordinal=i) for i in range(4)]
+    rows.append(_typed_row("kb_other", 0.5, "faq"))
+    hits = store._fuse(rows, n_terms=0, top_k=2, min_score=0.45, keyword_min_ratio=0.5)
+    assert [h.source_id for h in hits] == ["kb_faq", "kb_other"]
+
+
+def test_fuse_tolerates_rows_without_type_and_chunk_id() -> None:
+    hits = store._fuse(
+        [_row("kb_a", 0.9), _row("kb_a", 0.8, ordinal=1)],
+        n_terms=0,
+        top_k=4,
+        min_score=0.45,
+        keyword_min_ratio=0.5,
+    )
+    assert len(hits) == 2 and hits[0].chunk_id == "" and hits[0].source_type == ""
+
+
+def test_search_selects_chunk_id_and_source_type(monkeypatch) -> None:
+    conn = _mock_conn(fetchall=[_typed_row("kb_a", 0.87, "doc", ordinal=2)])
+    _patch_search(monkeypatch, conn)
+    outcome = store._search_sync([0.1, 0.2], top_k=4, include_test=False, query="技术部")
+    assert "s.source_type, c.chunk_id" in conn.execute.call_args.args[0]
+    assert (outcome.hits[0].chunk_id, outcome.hits[0].source_type) == ("kb_a#2", "doc")
+
+
+# ── 按块读取 ────────────────────────────────────────────
+
+_CHUNK_ROW = {
+    "chunk_id": "kb_a#1",
+    "source_id": "kb_a",
+    "source_title": "技术部面试",
+    "source_type": "doc",
+    "cycle_id": 12,
+    "chunk_text": "面试在周六。",
+    "heading_path": "招新 > 面试",
+}
+
+
+def test_get_chunks_applies_the_same_visibility_as_search(monkeypatch) -> None:
+    conn = _mock_conn(fetchall=[_CHUNK_ROW])
+    _patch_search(monkeypatch, conn)
+    chunks = store.get_chunks(["kb_a#1", "kb_gone#0"], cycle_ids=(12,))
+    assert chunks == {
+        "kb_a#1": store.ChunkRecord(
+            chunk_id="kb_a#1",
+            source_id="kb_a",
+            title="技术部面试",
+            source_type="doc",
+            text="面试在周六。",
+            heading_path="招新 > 面试",
+            cycle_id=12,
+        )
+    }
+    sql, params = conn.execute.call_args.args
+    # 停用的、评测用的、向量过期的、不在开放周期内的块一律取不到
+    for condition in (
+        "s.enabled",
+        "s.kind = 'normal'",
+        "c.model_version = %(version)s",
+        "s.cycle_id IS NULL OR s.cycle_id = ANY(%(cycle_ids)s::int[])",
+    ):
+        assert condition in sql
+    assert params == {"chunk_ids": ["kb_a#1", "kb_gone#0"], "version": 7, "cycle_ids": [12]}
+
+
+def test_get_chunks_defaults_to_evergreen_only_and_skips_empty_requests(monkeypatch) -> None:
+    conn = _mock_conn(fetchall=[])
+    _patch_search(monkeypatch, conn)
+    assert store.get_chunks(["kb_a#1"]) == {}
+    assert conn.execute.call_args.args[1]["cycle_ids"] == []  # 不给周期 = 只认常青条目
+    conn.execute.reset_mock()
+    assert store.get_chunks([]) == {}
+    conn.execute.assert_not_called()
+
+
+def test_list_source_chunks_in_order_with_cycle_filter(monkeypatch) -> None:
+    conn = _mock_conn(fetchall=[_CHUNK_ROW])
+    _patch_search(monkeypatch, conn)
+    (chunk,) = store.list_source_chunks("kb_a", cycle_ids=(12, 13))
+    assert chunk.chunk_id == "kb_a#1" and chunk.heading_path == "招新 > 面试"
+    sql, params = conn.execute.call_args.args
+    assert "c.source_id = %(source_id)s" in sql and "ORDER BY c.chunk_ordinal" in sql
+    assert "s.cycle_id = ANY(%(cycle_ids)s::int[])" in sql
+    assert params == {"source_id": "kb_a", "version": 7, "cycle_ids": [12, 13]}
+
+
+def test_list_faq_questions_flattens_main_and_alt_phrasings(monkeypatch) -> None:
+    conn = _mock_conn(
+        fetchall=[
+            {
+                "source_id": "kb_fee",
+                "question": "加入社团需要交费吗?",
+                "alt_questions": ["入社要钱吗"],
+            },
+            {"source_id": "kb_venue", "question": "面试在哪里?", "alt_questions": None},
+        ]
+    )
+    _patch_search(monkeypatch, conn)
+    assert store.list_faq_questions() == [
+        ("kb_fee", "加入社团需要交费吗?"),
+        ("kb_fee", "入社要钱吗"),
+        ("kb_venue", "面试在哪里?"),
+    ]
+    sql = conn.execute.call_args.args[0]
+    assert "s.enabled AND s.kind = 'normal'" in sql  # 停用与评测条目的问法不参与查重

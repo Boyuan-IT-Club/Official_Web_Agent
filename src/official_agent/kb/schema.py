@@ -3,8 +3,8 @@
 - CREATE EXTENSION vector 需超级用户(容器内 postgres 即是);镜像不带
   pgvector 时给出可操作的报错(本地 compose 已换 pgvector/pgvector:pg17)
 - 内容模型:kb_source 共享来源层(cycle_id 标记条目属于哪个招新周期,
-  NULL 为常青);kb_faq/kb_doc 两张内容表;kb_chunks 向量块;
-  kb_meta 单行记 embed_model/dim/version
+  NULL 为常青);kb_faq/kb_doc 两张内容表(kb_faq.alt_questions 是同一个答案的
+  其他问法);kb_chunks 向量块;kb_meta 单行记 embed_model/dim/version
 - 禁跨模型向量混排:meta 与配置的 model/dim 不一致 → 清空
   chunks + 版本 bump + 列维度 ALTER,等调用方全量 reindex
 """
@@ -70,9 +70,15 @@ def ensure_kb_schema(
         CREATE TABLE IF NOT EXISTS kb_faq (
             source_id text NOT NULL PRIMARY KEY REFERENCES kb_source(source_id) ON DELETE CASCADE,
             question  text NOT NULL,
-            answer    text NOT NULL
+            answer    text NOT NULL,
+            alt_questions text[] NOT NULL DEFAULT '{}'
         )
         """
+    )
+    # alt_questions 是增量列,存量库幂等补齐。同一个答案的其他问法:用户的说法与主问法
+    # 用词不同也能检到(每种问法各自成块,见 chunking.split_faq)
+    conn.execute(
+        "ALTER TABLE kb_faq ADD COLUMN IF NOT EXISTS alt_questions text[] NOT NULL DEFAULT '{}'"
     )
     conn.execute(
         """

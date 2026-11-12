@@ -255,3 +255,13 @@ def test_role_table_file_level() -> None:
     for role in ("admin", "member", "candidate"):
         assert "search_knowledge" in _ROLE_TOOL_NAMES[role]
     assert "search_knowledge" not in _ROLE_TOOL_NAMES["unknown"]
+
+
+async def test_public_open_cycle_ids_matches_the_tool_filter(monkeypatch) -> None:
+    """离线流程读开放周期与在线检索是同一个口径(含读不到时退到只查常青)。"""
+
+    async def _open() -> tuple[int, ...]:
+        return (12, 13)
+
+    monkeypatch.setattr(knowledge, "_open_cycle_ids", _open)
+    assert await knowledge.open_cycle_ids() == (12, 13)

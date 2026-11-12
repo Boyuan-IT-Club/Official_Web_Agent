@@ -190,3 +190,59 @@ def test_delete_thread_queries_propagates_failure(monkeypatch) -> None:
     monkeypatch.setattr(query_log, "pooled_conn", lambda: conn)
     with pytest.raises(RuntimeError):
         query_log.delete_thread_queries("web:u7:8f3a9c2b")
+
+
+# ── 读取(离线挖掘与主题清单用)────────────────────────────
+
+
+def test_list_unanswered_keeps_newest_rows_and_returns_them_oldest_first(conn) -> None:
+    from datetime import UTC, datetime
+
+    since, until = datetime(2026, 11, 1, tzinfo=UTC), datetime(2026, 11, 8, tzinfo=UTC)
+    conn.execute.return_value.fetchall.return_value = [{"id": 1, "query": "入社要交钱吗"}]
+    assert query_log.list_unanswered(since=since, until=until, limit=3000) == [
+        {"id": 1, "query": "入社要交钱吗"}
+    ]
+    sql, params = conn.execute.call_args.args
+    assert "status = 'not_found'" in sql
+    assert "created_at >= %s AND created_at < %s" in sql  # 左闭右开,相邻时间窗不重复计数
+    # 超量时留最新的(内层倒序截断),交给聚类时按时间正序(外层)
+    assert sql.index("ORDER BY created_at DESC, id DESC") < sql.index("ORDER BY created_at, id")
+    assert params == (since, until, 3000)
+
+
+def test_summarize_window_counts_each_outcome(conn) -> None:
+    from datetime import UTC, datetime
+
+    since, until = datetime(2026, 11, 1, tzinfo=UTC), datetime(2026, 11, 8, tzinfo=UTC)
+    conn.execute.return_value.fetchone.return_value = {
+        "total": 20,
+        "ok": 12,
+        "not_found": 6,
+        "unavailable": 2,
+        "near_miss": 3,
+    }
+    assert query_log.summarize_window(since=since, until=until, near_miss_floor=0.37) == {
+        "total": 20,
+        "ok": 12,
+        "not_found": 6,
+        "unavailable": 2,
+        "near_miss": 3,
+    }
+    sql, params = conn.execute.call_args.args
+    assert "status = 'not_found' AND best_vec_score >= %s" in sql
+    assert params == (0.37, since, until)
+
+
+def test_get_queries_maps_rows_by_id(conn) -> None:
+    conn.execute.return_value.fetchall.return_value = [
+        {"id": 7, "query": "入社要交钱吗", "created_at": "t"}
+    ]
+    assert query_log.get_queries([7, 8]) == {7: {"query": "入社要交钱吗", "created_at": "t"}}
+    sql, params = conn.execute.call_args.args
+    assert "WHERE id = ANY(%s::bigint[])" in sql and params == ([7, 8],)
+
+
+def test_get_queries_with_no_ids_skips_the_database(conn) -> None:
+    assert query_log.get_queries([]) == {}
+    conn.execute.assert_not_called()

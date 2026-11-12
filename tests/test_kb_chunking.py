@@ -68,3 +68,14 @@ def test_embed_text_prepends_heading_path() -> None:
     assert embed_text(chunks[0]) == "指南\n正文内容"
     plain = split_faq("问", "答")[0]
     assert embed_text(plain) == plain.text  # 无标题链不前缀
+
+
+def test_faq_alt_questions_each_get_their_own_chunk_with_the_answer() -> None:
+    chunks = split_faq("加入社团需要交费吗?", " 不收费。 ", ["入社要钱吗", " 社团收会费吗 "])
+    assert [(c.ordinal, c.text) for c in chunks] == [
+        (0, "Q: 加入社团需要交费吗?\nA: 不收费。"),
+        (1, "Q: 入社要钱吗\nA: 不收费。"),
+        (2, "Q: 社团收会费吗\nA: 不收费。"),
+    ]
+    # 命中哪一种问法,检索回来的那一块都带着完整答案
+    assert all(c.text.endswith("A: 不收费。") and c.heading_path == "" for c in chunks)

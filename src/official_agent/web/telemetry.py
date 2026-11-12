@@ -41,7 +41,8 @@ def log_conversation(
 
     fire-and-forget:psycopg 是同步驱动,写入经 to_thread 进线程池,
     不占事件循环、不阻塞 SSE 流尾(ADR-0005 fail-open)。
-    guard_verdict 是本轮回复出口守卫的判定,没跑守卫传 None。
+    guard_verdict 是本轮回复出口各守卫的判定(已编码成一列文本,见
+    security/guard_verdict.py),没跑任何守卫传 None。
     """
     from official_agent.observability import turn_trace_id
     from official_agent.state.conversation import write_conversation

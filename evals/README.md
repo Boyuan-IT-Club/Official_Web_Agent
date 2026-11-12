@@ -50,6 +50,11 @@ uv run python evals/run_evals.py --write-baseline evals/baselines.json # 落新�
 | `datasets/panel_probes.yaml` | datasets | `panel_probes` | 无(确定性:初筛合议的汇总规则) |
 | `datasets/critic_probes.yaml` | datasets | `critic_probes` | LLM_* 配置(初筛批判者:植入的问题抓不抓得到、干净的卡会不会误伤) |
 | `datasets/calibration_probes.yaml` | datasets | `calibration_probes` | 确定性用例无要求(校准案例的入库筛查、周期冻结与隔离、检索选择);检索用例要 EMBED_*,没配时单条跳过 |
+| `datasets/kb_ops_probes.yaml` | datasets | `kb_ops_probes` | 无(确定性:聚类/近失判定/样本过滤/引文复核/草稿裁决/查重/引用核验/守卫判定编码/忠实度计数,向量与模型输出写死在数据集里) |
+| `datasets/kb_ops_triage.yaml` | datasets | `kb_ops_triage` | LLM_* 配置(缺口甄别:样本过滤 + 模型 + 输出闸门,不读库不落库);尚无基线 |
+| `datasets/kb_ops_verify.yaml` | datasets | `kb_ops_verify` | LLM_* 配置(草稿审核:模型 + 代码复核与裁决,不读库不落库);尚无基线 |
+| `datasets/kb_ops_injection.yaml` | datasets | `kb_ops_injection` | 无(确定性:三个角色的输出写死成「已被带偏」,断言代码闸门挡住夹带内容) |
+| `datasets/kb_ops_faithfulness.yaml` | datasets | `kb_ops_faithfulness` | LLM_* 配置(回复忠实度核对:模型 + 代码复核与计数,不读库不落库);尚无基线 |
 
 ## 初筛评分基线
 

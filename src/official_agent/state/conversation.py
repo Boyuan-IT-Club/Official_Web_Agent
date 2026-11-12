@@ -48,7 +48,8 @@ class ConversationRecord:
     created_at: Any
     #: 轮级入口 trace id;与 kb_query_log.trace_id 同值,两表按它关联
     trace_id: str | None = None
-    #: 本轮回复出口守卫的判定(如 "clean" / "triggered:查询结果");没跑守卫的轮次为 None
+    #: 本轮回复出口各守卫的判定,`守卫名=判定` 用分号连接(格式见 security/guard_verdict.py);
+    #: 没跑任何守卫的轮次为 None
     guard_verdict: str | None = None
 
 

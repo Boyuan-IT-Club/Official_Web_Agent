@@ -5,6 +5,7 @@
 - 创建/更新即入库重嵌(分块+embedding 单事务);「重嵌」端点按已存内容
   重建向量——换 embedding 模型后逐条补齐用
 - store 层同步 psycopg,路由内一律 asyncio.to_thread,不阻塞事件循环
+- 运营分析与主题清单的路由(/admin/kb/ops*,web/kb_ops_admin.py)挂在本 router 下
 """
 
 import asyncio
@@ -21,6 +22,7 @@ from official_agent.kb.embedding import EmbeddingError, EmbeddingNotConfiguredEr
 from official_agent.kb.schema import KbSchemaError
 from official_agent.kb.store import KbValidationError
 from official_agent.web.auth import require_any as _require_any
+from official_agent.web.kb_ops_admin import router as kb_ops_router
 
 router = APIRouter()
 
@@ -33,6 +35,7 @@ class KbSourceUpsert(BaseModel):
 
     cycle_id 不填(null)= 常青条目;填招新周期 id = 只在该周期开放期间可被检索,
     周期结束后自动退出检索(条目本身保留,可改回常青或换绑下一届)。
+    alt_questions 只对 FAQ 生效:同一个答案的其他问法,每种问法都参与检索。
     """
 
     title: str = Field(min_length=1)
@@ -43,6 +46,7 @@ class KbSourceUpsert(BaseModel):
     answer: str = ""
     content_md: str = ""
     cycle_id: int | None = Field(default=None, ge=1)
+    alt_questions: list[str] = Field(default_factory=list, max_length=20)
 
 
 class KbEnabledBody(BaseModel):
@@ -65,6 +69,7 @@ def _to_input(body: KbSourceUpsert, identity: ResolvedIdentity) -> kb_store.Sour
         content_md=body.content_md,
         updated_by=_actor(identity),
         cycle_id=body.cycle_id,
+        alt_questions=tuple(body.alt_questions),
     )
 
 
@@ -202,9 +207,14 @@ async def reembed_kb_source(
         content_md=record.content_md,
         updated_by=_actor(identity),
         cycle_id=record.cycle_id,
+        alt_questions=tuple(record.alt_questions),
     )
     try:
         await kb_store.ingest_source(source, source_id=source_id)
     except Exception as exc:  # noqa: BLE001
         raise _map_store_error(exc) from exc
     return {"source_id": source_id, "reembedded": True}
+
+
+# 运营分析与主题清单(/admin/kb/ops*)是知识库管理面的一部分,随本 router 一起注册
+router.include_router(kb_ops_router)
