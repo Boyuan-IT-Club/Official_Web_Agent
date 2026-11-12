@@ -150,6 +150,7 @@ def faith_db(monkeypatch) -> Settings:
     query_log.reset_table_cache()
     kb_store.reset_schema_cache()
     state.ensure_faithfulness_tables()
+    kb_store.list_faq_questions()  # 触发知识库表自举:全新的库上还没有 kb_source
     _execute("TRUNCATE kb_faithfulness_run CASCADE")
     # 上一次被中断的测试进程可能留下合成的对话与检索日志;它们落在随机的历史时间窗里,
     # 会混进别的用例的统计。测试是串行的,此刻不会有别的用例在用这些行
