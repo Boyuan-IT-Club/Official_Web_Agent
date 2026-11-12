@@ -105,7 +105,14 @@ def _section_body(
 
 def _metric_label(metric: dict[str, Any], names: dict[str, str]) -> str:
     name = names.get(metric["metric"], metric["metric"])
+    if metric.get("label"):
+        # 清单项按名次编号,给人看的是它的文字;竖线会把 Markdown 表格的列切开
+        return f"{name} · 「{_table_safe(metric['label'])}」"
     return f"{name} · {metric['key']}" if metric.get("key") else name
+
+
+def _table_safe(text: str) -> str:
+    return text.replace("|", "/")
 
 
 def _cited_names(

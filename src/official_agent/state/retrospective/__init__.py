@@ -2,15 +2,18 @@
 
 - snapshot_store:cycle_metrics_snapshot 表,只追加、长期保留
 - report_store:cycle_retrospective 表,报告的版本与发布状态(按子模块引用,不在这里转出)
-- aggregates:按周期从对话日志、检索日志、评估三表里数出原始聚合,只读
+- aggregates:按周期从对话日志、检索日志、评估三表、知识库运营的主题清单里数出
+  原始聚合,只读
 """
 
 from __future__ import annotations
 
 from official_agent.state.retrospective.aggregates import (
+    agreement_aggregates,
     conversation_aggregates,
     evaluation_usage_aggregates,
     kb_aggregates,
+    kb_topic_aggregates,
     qbank_aggregates,
     screening_aggregates,
 )
@@ -26,12 +29,14 @@ from official_agent.state.retrospective.snapshot_store import (
 
 __all__ = [
     "SnapshotRecord",
+    "agreement_aggregates",
     "content_hash",
     "conversation_aggregates",
     "ensure_snapshot_table",
     "evaluation_usage_aggregates",
     "get_snapshot",
     "kb_aggregates",
+    "kb_topic_aggregates",
     "list_snapshots",
     "qbank_aggregates",
     "reset_table_cache",

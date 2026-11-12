@@ -45,7 +45,7 @@ uv run python evals/run_evals.py --write-baseline evals/baselines.json # 落新�
 | `datasets/scoring_probes.yaml` | datasets | `scoring_probes` | LLM_* 配置;CD 部署后在生产容器里自动跑(只报告,每份只评一次) |
 | `datasets/memory_probes.yaml` | datasets | `memory_probes` | LLM_* 配置(提取闸门 + 模型,不落库) |
 | `datasets/retro_probes.yaml` | datasets | `retro_probes` | LLM_* 配置(合成快照跑复盘报告整张图,不落库) |
-| `datasets/retro_injection.yaml` | datasets | `retro_probes` | LLM_* 配置(指标键名里夹带指令,报告不被带偏) |
+| `datasets/retro_injection.yaml` | datasets | `retro_probes` | LLM_* 配置(指标键名与高频主题的主题名里夹带指令,报告不被带偏) |
 | `datasets/org_memory_probes.yaml` | datasets | `org_memory_probes` | LLM_* 配置(真实助理带组织记忆作答;候选人零泄漏、相关教训被用上;不连库) |
 | `datasets/panel_probes.yaml` | datasets | `panel_probes` | 无(确定性:初筛合议的汇总规则) |
 | `datasets/critic_probes.yaml` | datasets | `critic_probes` | LLM_* 配置(初筛批判者:植入的问题抓不抓得到、干净的卡会不会误伤) |

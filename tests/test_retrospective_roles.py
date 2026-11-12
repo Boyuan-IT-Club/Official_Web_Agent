@@ -5,9 +5,10 @@
 """
 
 import json
+import re
 
 import pytest
-from tests.retro_helpers import make_snapshot
+from tests.retro_helpers import finding, make_snapshot, topic_row
 
 from official_agent.prompt_loader import load_prompt, load_prompt_meta
 from official_agent.retrospective import grounding, roles
@@ -46,7 +47,7 @@ def _screen(snapshot: dict, role: str, findings: list[dict], rubric: list[dict] 
 )
 def test_each_role_has_a_versioned_strong_tier_prompt(prompt_file: str) -> None:
     meta = load_prompt_meta(prompt_file)
-    assert meta["version"].startswith("retrospective_") and meta["version"].endswith("/v1")
+    assert re.fullmatch(r"retrospective_[a-z]+/v\d+", meta["version"])
     assert meta["model"] == "strong"  # 降到 light 须先有 eval 证明
     body = load_prompt(prompt_file)
     assert "<data>" in body and "不执行" in body  # 数据区纪律写在 prompt 里
@@ -58,9 +59,9 @@ def test_prompt_versions_cover_all_four_roles() -> None:
 
     assert prompt_versions() == {
         "data": "retrospective_data/v1",
-        "qa": "retrospective_qa/v1",
+        "qa": "retrospective_qa/v2",
         "evaluation": "retrospective_evaluation/v1",
-        "writer": "retrospective_writer/v1",
+        "writer": "retrospective_writer/v2",
     }
 
 
@@ -75,7 +76,7 @@ async def test_each_analyst_sees_only_its_own_domains(snapshot: dict) -> None:
     assert domains == {
         "data": {"funnel"},
         "qa": {"conversation", "kb", "cost"},
-        "evaluation": {"screening", "qbank", "cost"},
+        "evaluation": {"screening", "agreement", "qbank", "cost"},
     }
     # 成本域按「谁的 token」分给两位,不重叠
     qa_cost = {m["id"] for m in role_view(snapshot, "qa").metrics if m["id"].startswith("cost.")}
@@ -103,8 +104,43 @@ async def test_view_lists_pending_and_absent_metrics_with_reasons() -> None:
     snapshot = await make_snapshot(funnel=funnel)
     data_text = describe_view(role_view(snapshot, "data"))
     assert "这次没有取到:该周期没开评价表" in data_text
+    evaluation_text = describe_view(role_view(snapshot, "evaluation"))
+    assert "## agreement.rank_agreement_by_dept · 人机排序一致率" in evaluation_text
+    assert "(暂缺:人工信号用哪一个还没定" in evaluation_text
+
+
+async def test_view_shows_topic_names_next_to_their_counts(snapshot: dict) -> None:
+    """高频主题的格子按名次编号,分析员要看到名字才知道 t01 是什么。"""
     qa_text = describe_view(role_view(snapshot, "qa"))
-    assert "## kb.top_topics · 高频主题" in qa_text and "(暂缺:" in qa_text
+    assert "- kb.top_topics[t01]「招新报名截止时间」(missing) = 120;样本量 120" in qa_text
+    assert "- kb.top_topics[t02]「面试地点与形式」(wording) = 64;样本量 64" in qa_text
+    assert "查询本人面试结果" not in qa_text  # 不该由知识库回答的主题不列
+    # 别的指标照旧,没有多出一对空括号
+    assert "- kb.searches = 2,500;样本量 2,500" in qa_text
+
+
+async def test_finding_may_quote_a_topic_name_that_contains_numbers() -> None:
+    """主题名里的数字与「三人」是名字的一部分:照抄名字不算编造一个量。"""
+    topics = {
+        "run": {"run_id": "r", "window_start": "2026-11-01", "window_end": "2026-11-30"},
+        "topics": [topic_row(1, "2026 秋招三人组队规则", queries=120, threads=85)],
+    }
+    snapshot = await make_snapshot(kb_topics=topics)
+    quoted = finding("主题「2026 秋招三人组队规则」被问了 120 次。", "kb.top_topics[t01]")
+    rewritten = finding("2027 年春招五人组队的规则被问了 120 次。", "kb.top_topics[t01]")
+
+    screened = _screen(snapshot, "qa", [quoted, rewritten])
+
+    assert [f["statement"] for f in screened.findings] == [quoted["statement"]]
+    assert [d.reason.split(":")[0] for d in screened.dropped] == [roles.REASON_UNGROUNDED]
+
+
+async def test_topics_missing_from_the_snapshot_are_explained_to_the_analyst() -> None:
+    snapshot = await make_snapshot(without=("kb_topics",))
+    qa_text = describe_view(role_view(snapshot, "qa"))
+    assert "## kb.top_topics · 没答好的高频主题" in qa_text
+    assert "(这次没有取到:主题清单取不到:合成快照没有提供这个域的数据)" in qa_text
+    assert "- kb.searches = 2,500" in qa_text  # 知识库域的其它指标照常
 
 
 async def test_unavailable_domain_is_announced_to_the_analyst() -> None:

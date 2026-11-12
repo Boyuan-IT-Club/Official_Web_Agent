@@ -54,8 +54,9 @@ class GroundingContext:
     """与具体指标无关的放行项。
 
     always:随处可写的数(采集参数)。
-    strip:比对之前先从文字里拿掉的片段——指标 id、周期编号、时间窗日期、年份、
-    分位数标记、「不足 5」这类抑制用语。它们带数字,但不是报告在陈述的量。
+    strip:比对之前先从文字里拿掉的片段——指标 id、清单项的文字(主题名)、周期编号、
+    时间窗日期、年份、分位数标记、「不足 5」这类抑制用语。它们带数字,但不是报告在
+    陈述的量。
     """
 
     always: tuple[Allowed, ...]
@@ -106,6 +107,13 @@ def context_for(snapshot: dict[str, Any]) -> GroundingContext:
     ids += sorted({e["id"] for e in snapshot.get("catalog", [])}, key=len, reverse=True)
     if ids:
         strip.append(re.compile("|".join(re.escape(i) for i in ids)))
+    # 主题名里的数字与「三人」这类写法是名字的一部分:照抄主题名不算陈述一个量。
+    # 只认一字不差的照抄——改写过的主题名里的数照常要对得上
+    labels = sorted(
+        {m["label"] for m in snapshot.get("metrics", []) if m.get("label")}, key=len, reverse=True
+    )
+    if labels:
+        strip.append(re.compile("|".join(re.escape(label) for label in labels)))
     cycle_ids = [snapshot.get("cycle_id"), (snapshot.get("baseline") or {}).get("cycle_id")]
     for cycle_id in cycle_ids:
         if cycle_id is not None:

@@ -191,6 +191,16 @@ def describe_view(view: RoleView) -> str:
         for metric in values:
             sample = f";样本量 {metric['n']:,}" if metric.get("n") is not None else ""
             lines.append(
-                f"- {metric['id']} = {display_value(metric)}{sample}{_display_change(metric)}"
+                f"- {metric['id']}{display_label(metric)} = "
+                f"{display_value(metric)}{sample}{_display_change(metric)}"
             )
     return "\n".join(lines)
+
+
+def display_label(metric: dict[str, Any]) -> str:
+    """带文字的清单项的那段文字(连同归类);别的值没有,返回空串。"""
+    label = metric.get("label")
+    if not label:
+        return ""
+    group = metric.get("group")
+    return f"「{label}」" + (f"({group})" if group else "")

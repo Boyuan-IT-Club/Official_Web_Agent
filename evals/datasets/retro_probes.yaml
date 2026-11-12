@@ -4,6 +4,8 @@
 #   cited_by:       {角色: [指标 id…]}  该分析员的发现里要有一条引用到这个指标
 #   section_status: {角色: 状态}        该节的状态
 #   forbid_text:    [片段…]             模型写的文字里不得出现
+#   forbid_in_lessons: [片段…]          候选教训与评分条款候选里不得出现(发现里照名字提到
+#                                      一个主题是正常的,被写成教训留下来才是被带偏)
 #   allow_dropped:  true               允许有发现被闸门丢掉(缺省不允许:每条发现都要带
 #                                      有效依据,报告里不能有快照之外的数字)
 # 改 prompts/retrospective/ 下任何一份、改闸门或数字落地守卫,必须跑。
@@ -69,11 +71,29 @@ fixtures:
     metered_resumes: 150
     input_tokens: 30000000
     output_tokens: 1500000
+    scoring_metered_resumes: 200
+    scoring_input_tokens: 2400000
+    scoring_output_tokens: 300000
+  # 带置信度的已决卡 141 张里,低置信 40 张、其中 9 张被驳回
+  agreement: &agreement
+    graded_decided: 141
+    low_confidence_decided: 40
+    low_confidence_rejected: 9
+  # 知识库离线分析的主题清单(形状同 state/kb_ops.list_topics 的行)
+  kb_topics: &kb_topics
+    run: { run_id: kbops-probe, window_start: "2026-11-01T00:00:00+08:00", window_end: "2026-11-30T00:00:00+08:00" }
+    topics:
+      - { rank: 1, topic: 招新报名截止时间, scope: official_knowledge, triage_status: done, query_count: 120, thread_count: 85, near_miss_count: 20 }
+      - { rank: 2, topic: 面试地点与形式, scope: official_knowledge, triage_status: done, query_count: 64, thread_count: 50, near_miss_count: 40 }
+      - { rank: 3, topic: 查询本人面试结果, scope: personal_data, triage_status: done, query_count: 55, thread_count: 41, near_miss_count: 0 }
+      - { rank: 4, topic: 各部门日常工作, scope: official_knowledge, triage_status: done, query_count: 30, thread_count: 22, near_miss_count: 3 }
   normal: &normal
     funnel: *funnel
     conversation: *conversation
     kb: *kb
+    kb_topics: *kb_topics
     screening: *screening
+    agreement: *agreement
     qbank: *qbank
     evaluation_usage: *usage
 
@@ -133,6 +153,26 @@ cases:
     expect:
       cited_by: { evaluation: ["screening.hard_zero_rate"] }
 
+  # 低置信的卡大半被驳回:置信度这个信号管用,评估分析员应当指出来
+  - id: low_confidence_cards_mostly_overturned
+    aggregates:
+      <<: *normal
+      agreement: { graded_decided: 141, low_confidence_decided: 40, low_confidence_rejected: 31 }
+    expect:
+      cited_by: { evaluation: ["agreement.low_confidence_overturn_rate"] }
+
+  # 一个主题占了没答好的提问的大头:问答分析员应当点到它
+  - id: one_topic_dominates_unanswered_questions
+    aggregates:
+      <<: *normal
+      kb_topics:
+        <<: *kb_topics
+        topics:
+          - { rank: 1, topic: 招新报名截止时间, scope: official_knowledge, triage_status: done, query_count: 610, thread_count: 380, near_miss_count: 30 }
+          - { rank: 2, topic: 面试地点与形式, scope: official_knowledge, triage_status: done, query_count: 24, thread_count: 20, near_miss_count: 15 }
+    expect:
+      cited_by: { qa: ["kb.top_topics[t01]"] }
+
   # 小格子被抑制成「不足 5」:报告只能照这个说法提,猜出来的数会被守卫删掉 → 用例失败
   - id: suppressed_cells_are_not_guessed
     aggregates:
@@ -158,6 +198,7 @@ cases:
     aggregates:
       funnel: *funnel
       screening: *screening
+      agreement: *agreement
       qbank: *qbank
       evaluation_usage: *usage
     expect:

@@ -1,4 +1,4 @@
-"""周期复盘的只读聚合:从 agent 自己的表里按周期数出原始计数,不写任何表。
+"""周期复盘的只读聚合:从 agent 自己的表里按周期数出原始计数,不写任何业务行。
 
 每个函数对应一个数据域,返回未经抑制的原始聚合(计数、合计、分位数)——只给
 retrospective.metrics 用,那里过小格子抑制后才进快照;本模块的返回值不得直接
@@ -6,6 +6,9 @@ retrospective.metrics 用,那里过小格子抑制后才进快照;本模块的�
 
 对话日志与检索日志没有周期字段,按时间窗 [start, end) 切;评估侧的表都有
 cycle_id,直接按周期取。查询失败照常抛出,由调用方决定该域是否降级。
+
+知识库运营的主题清单经 state.kb_ops 的读函数取,不直接查它的表:那几张表的结构与
+自举归它管(读函数在表还没建时会先把表建出来,这是本模块唯一可能触发的 DDL)。
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from official_agent.state import kb_ops
 from official_agent.state.pools import pooled_conn
 from official_agent.state.qbank import flatten_v2_pickable
 
@@ -23,6 +27,10 @@ _EVALUATION_CHANNEL = "evaluation"
 _EVAL_THREAD_PATTERN = "^eval:([0-9]{1,18})$"
 # 评分段用量行在 tools 列里的标记;题库段的行是 explore / grilling
 _SCORING_TOOL = "scoring"
+# 评分卡上的低置信档(初筛合议的汇总规则给出;单评委模式的卡没有置信度)
+_LOW_CONFIDENCE = "low"
+# 知识库运营只保留最近几次运行(kb_ops_run_retention,缺省 8),取这么多条足以拿全
+_KB_OPS_RUN_SCAN = 50
 
 
 def conversation_aggregates(start: datetime, end: datetime) -> dict[str, Any]:
@@ -265,27 +273,97 @@ def _pick_usage_by_group(conn: Any, cycle_id: int) -> tuple[dict[str, int], dict
 
 
 def evaluation_usage_aggregates(cycle_id: int) -> dict[str, int]:
-    """一个周期里评估任务落下的 token 用量:metered_resumes/input_tokens/output_tokens。
+    """一个周期里评估任务落下的 token 用量,题库段与评分段分开数。
 
     用量行按 thread_id(eval:<job_id>)关联回 evaluation_job 才知道属于哪个周期;
-    只算真有 token 记录的行,metered_resumes 是这些行涉及的简历数。
+    只算真有 token 记录的行。题库段是 metered_resumes/input_tokens/output_tokens,
+    评分段是带 scoring_ 前缀的同名三项;*metered_resumes 是该段有用量记录的简历数。
 
-    只算题库段:评分段的用量行(tools 里带 scoring)不在其中——两段合在一起,
-    「题库段 token」这个口径就不成立了。
+    两段按用量行 tools 里有没有 scoring 标记区分。同一份简历重评几次就有几行
+    评分段用量,都计入——花掉的 token 就是这么多。
     """
     with pooled_conn() as conn:
         row = conn.execute(
             """
-            SELECT COUNT(DISTINCT j.resume_id) AS metered_resumes,
-                   COALESCE(SUM(c.input_tokens), 0) AS input_tokens,
-                   COALESCE(SUM(c.output_tokens), 0) AS output_tokens
-            FROM agent_conversation_log c
-            JOIN evaluation_job j
-              ON j.job_id = substring(c.thread_id from %s)::bigint
-            WHERE c.channel = %s AND j.cycle_id = %s
-              AND (c.input_tokens IS NOT NULL OR c.output_tokens IS NOT NULL)
-              AND NOT jsonb_exists(c.tools, %s)
+            SELECT COUNT(DISTINCT u.resume_id) FILTER (WHERE NOT u.scoring)
+                       AS metered_resumes,
+                   COALESCE(SUM(u.input_tokens) FILTER (WHERE NOT u.scoring), 0)
+                       AS input_tokens,
+                   COALESCE(SUM(u.output_tokens) FILTER (WHERE NOT u.scoring), 0)
+                       AS output_tokens,
+                   COUNT(DISTINCT u.resume_id) FILTER (WHERE u.scoring)
+                       AS scoring_metered_resumes,
+                   COALESCE(SUM(u.input_tokens) FILTER (WHERE u.scoring), 0)
+                       AS scoring_input_tokens,
+                   COALESCE(SUM(u.output_tokens) FILTER (WHERE u.scoring), 0)
+                       AS scoring_output_tokens
+            FROM (
+                SELECT j.resume_id, c.input_tokens, c.output_tokens,
+                       COALESCE(jsonb_exists(c.tools, %s), FALSE) AS scoring
+                FROM agent_conversation_log c
+                JOIN evaluation_job j
+                  ON j.job_id = substring(c.thread_id from %s)::bigint
+                WHERE c.channel = %s AND j.cycle_id = %s
+                  AND (c.input_tokens IS NOT NULL OR c.output_tokens IS NOT NULL)
+            ) u
             """,
-            (_EVAL_THREAD_PATTERN, _EVALUATION_CHANNEL, cycle_id, _SCORING_TOOL),
+            (_SCORING_TOOL, _EVAL_THREAD_PATTERN, _EVALUATION_CHANNEL, cycle_id),
         ).fetchone()
     return {k: int(v) for k, v in (row or {}).items()}
+
+
+def agreement_aggregates(cycle_id: int) -> dict[str, int]:
+    """一个周期里带置信度的评分卡与人工决定的对照。
+
+    每份简历取**历史上最后一次**人工决定所在的那张卡(与 screening_aggregates 的
+    decisions 同口径),看那张卡上的置信度:
+    - graded_decided:卡上有置信度的已决简历数(单评委模式的卡没有,不计)
+    - low_confidence_decided / low_confidence_rejected:其中置信度为低的,以及
+      低置信里被驳回的
+    """
+    with pooled_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) FILTER (WHERE decided.confidence IS NOT NULL)
+                       AS graded_decided,
+                   COUNT(*) FILTER (WHERE decided.confidence = %s)
+                       AS low_confidence_decided,
+                   COUNT(*) FILTER (
+                       WHERE decided.confidence = %s AND decided.status = 'rejected'
+                   ) AS low_confidence_rejected
+            FROM (
+                SELECT DISTINCT ON (resume_id)
+                       resume_id, status, card->'panel'->>'confidence' AS confidence
+                FROM evaluation_scorecard
+                WHERE cycle_id = %s AND status IN ('adopted', 'rejected')
+                ORDER BY resume_id, card_version DESC
+            ) decided
+            """,
+            (_LOW_CONFIDENCE, _LOW_CONFIDENCE, cycle_id),
+        ).fetchone()
+    return {k: int(v) for k, v in (row or {}).items()}
+
+
+def kb_topic_aggregates(start: datetime, end: datetime) -> dict[str, Any] | None:
+    """与时间窗 [start, end) 有重叠的最近一次成功的知识库离线分析,及它的主题清单。
+
+    没有这样的运行返回 None。返回 run(run_id 与那次分析自己的时间窗)和 topics
+    (每个主题的原始行:模型写的主题名、归类、甄别状态、检索次数、会话数、近失数)。
+
+    离线分析按「最近若干天」取数,不按周期:它的时间窗通常只盖住周期的一段,
+    也可能伸到周期外面。主题的计数是那个时间窗里的,不是整个周期的。
+    """
+    for run in kb_ops.list_runs(limit=_KB_OPS_RUN_SCAN):  # 新的在前
+        if run["status"] != kb_ops.RUN_SUCCEEDED:
+            continue
+        if run["window_end"] <= start or run["window_start"] >= end:
+            continue
+        return {
+            "run": {
+                "run_id": run["run_id"],
+                "window_start": run["window_start"],
+                "window_end": run["window_end"],
+            },
+            "topics": kb_ops.list_topics(run["run_id"]),
+        }
+    return None

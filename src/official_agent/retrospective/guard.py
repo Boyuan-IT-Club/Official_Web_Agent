@@ -20,6 +20,11 @@ suppress() 变成 MetricValue,快照只收 MetricValue——没有绕过抑制�
 - 分布的键:键里的文字和数字一样会进快照。只放行 ASCII 标识符形状的短键
   (渠道名、工具名、题组类别、数字 id);中文键分不清是部门名还是人名或一句
   原话,必须出自调用方给的白名单。其余并入 OTHER_KEY 一格
+- 带文字的清单(主题名这类对多人行为的概括):文字没有白名单可对,换成四道条件
+  ——计数与不同来源数都不小于阈值、是一个短语(不超长、不换行)、不含个人信息、
+  不像指令。只看计数不够:一个人把同一句话问了八遍,计数够了,文字却还是这一个人
+  的话。不够格的项整项不出,不留「被抑制」的格子:清单没有固定的全集,也不发布
+  合计,少出一项推不出任何数;而留下格子就得留下文字,文字正是不该出的部分
 
 不防的:跨指标的联合推断(两个不同的分布交叉相减、两个合计相减)。指标目录
 不发布「部门 × 决定」这类交叉表的行合计,不给最要紧的那种减法留材料。
@@ -28,9 +33,11 @@ suppress() 变成 MetricValue,快照只收 MetricValue——没有绕过抑制�
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+import unicodedata
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from official_agent.security.injection_guard import scan_injection
 from official_agent.security.pii import mask_pii
 
 #: 小于这个数的计数不出现在快照里。5 是统计披露控制里常用的下限,
@@ -53,6 +60,9 @@ OTHER_KEY = "other"
 # 分布键的放行形状:ASCII 字母数字与少量连接符,至多 40 字符。渠道名、工具名、
 # 题组类别、数字 id 都在这个范围里;带空格的自由文本和任何中文都不在。
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9_.:\-]{1,40}$")
+
+#: 清单项文字的长度上限:主题名是一个短语,更长的多半是照搬了某个人的原话
+MAX_LABEL_CHARS = 40
 
 
 @dataclass(frozen=True)
@@ -107,7 +117,33 @@ class RawRatioBreakdown:
     cells: Mapping[str, tuple[int, int]]
 
 
-RawMetric = RawCount | RawRatio | RawStat | RawBreakdown | RawRatioBreakdown
+@dataclass(frozen=True)
+class RawTextItem:
+    """清单里的一项:一段概括多人行为的文字、它的计数、计数来自多少个不同的来源。
+
+    sources 是不同来源的个数(会话数、评分卡数);group 是这一项的归类。
+    """
+
+    text: str
+    count: int
+    sources: int
+    group: str | None = None
+
+
+@dataclass(frozen=True)
+class RawTextList:
+    """按计数排出的前几项,每项带一段文字;各项之间不要求互斥。
+
+    groups:放行的归类取值,不在其中的归类不带出去。limit:至多出几项。
+    """
+
+    id: str
+    items: Sequence[RawTextItem]
+    groups: frozenset[str] = frozenset()
+    limit: int = 10
+
+
+RawMetric = RawCount | RawRatio | RawStat | RawBreakdown | RawRatioBreakdown | RawTextList
 
 
 @dataclass(frozen=True)
@@ -118,6 +154,7 @@ class MetricValue:
     suppressed 为真时 value 为 None;side 说明被抑制的值落在哪一头(SIDE_LOW 展示为
     「<5」,SIDE_HIGH 展示为「比分母少不到 5」),样本本身不足时 side 为 None。
     n 是样本量(计数的 n 就是它自己,比率的 n 是分母);n 小于阈值时也不给出。
+    label 与 group 只有带文字的清单项才有:label 是那段文字,group 是它的归类。
     """
 
     id: str
@@ -128,6 +165,8 @@ class MetricValue:
     suppressed: bool = False
     side: str | None = None
     key: str | None = None
+    label: str | None = None
+    group: str | None = None
 
 
 def suppress(raw: RawMetric) -> list[MetricValue]:
@@ -140,6 +179,8 @@ def suppress(raw: RawMetric) -> list[MetricValue]:
         return [_stat_value(raw)]
     if isinstance(raw, RawBreakdown):
         return _breakdown_values(raw)
+    if isinstance(raw, RawTextList):
+        return _text_list_values(raw)
     return [
         _ratio_value(cell_id(raw.id, key), raw.id, numerator, denominator, key=key)
         for key, (numerator, denominator) in sorted(_merge_ratio_cells(raw.cells).items())
@@ -233,3 +274,46 @@ def _breakdown_values(raw: RawBreakdown) -> list[MetricValue]:
         else _count_value(cell_id(raw.id, key), raw.id, count, key=key)
         for key, count in sorted(cells.items())
     ]
+
+
+def _safe_label(text: str) -> bool:
+    """这段文字能不能进快照:是一个短语,不含个人信息,不像指令。"""
+    label = text.strip()
+    if not label or len(label) > MAX_LABEL_CHARS:
+        return False
+    # 控制字符(含换行、制表)一律不收:短语里不该有,有了多半是夹带
+    if any(unicodedata.category(ch).startswith("C") for ch in label):
+        return False
+    if mask_pii(label) != label:
+        return False
+    hit, _ = scan_injection(label)
+    return not hit
+
+
+def _text_list_values(raw: RawTextList) -> list[MetricValue]:
+    """清单 → 够格的各项,按计数从大到小编号(t01、t02……),至多 limit 项。"""
+    kept = [
+        item
+        for item in raw.items
+        if item.count >= SMALL_CELL_MIN
+        and item.sources >= SMALL_CELL_MIN
+        and _safe_label(item.text)
+    ]
+    # 稳定排序:计数相同的保持调用方给的先后,同样的输入出同样的编号
+    kept.sort(key=lambda item: -item.count)
+    values: list[MetricValue] = []
+    for index, item in enumerate(kept[: max(raw.limit, 0)], start=1):
+        key = f"t{index:02d}"
+        values.append(
+            MetricValue(
+                cell_id(raw.id, key),
+                raw.id,
+                int(item.count),
+                UNIT_COUNT,
+                int(item.count),
+                key=key,
+                label=item.text.strip(),
+                group=item.group if item.group in raw.groups else None,
+            )
+        )
+    return values

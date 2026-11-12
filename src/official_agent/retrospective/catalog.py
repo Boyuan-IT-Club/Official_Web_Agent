@@ -16,7 +16,7 @@ from official_agent.retrospective.guard import UNIT_COUNT, UNIT_MS, UNIT_RATIO, 
 
 #: 指标定义的版本。任何一个指标的口径、id 或抑制规则变了都要升;
 #: 升了之后新旧快照不再对比。
-METRICS_SCHEMA = "cycle_metrics/v1"
+METRICS_SCHEMA = "cycle_metrics/v2"
 
 DOMAIN_FUNNEL = "funnel"
 DOMAIN_CONVERSATION = "conversation"
@@ -202,11 +202,13 @@ CATALOG: tuple[MetricSpec, ...] = (
     MetricSpec(
         "kb.top_topics",
         DOMAIN_KB,
-        "高频主题",
-        "候选人提问聚成的主题及其次数。",
+        "没答好的高频主题",
+        "知识库没答上的提问聚成的主题及其检索次数,只列甄别为「该由知识库回答」的,"
+        "按次数取前十;每项带主题名(模型对多人提问的概括,不是原话)与缺口类型"
+        "(missing 库里多半没有 / wording 库里多半有、问法没对上)。主题取自与周期"
+        "时间窗有重叠的最近一次成功的知识库离线分析,次数是那次分析的时间窗内的"
+        "(见快照的 params),不是整个周期的。检索次数或会话数不足 5 的主题不列。",
         UNIT_COUNT,
-        pending_reason="主题来自知识库运营闭环的聚类(设计见 docs/proposals/kb-ops-loop.md),"
-        "尚未实现;检索日志里的问题原文不能进快照。",
     ),
     # ── 初筛:evaluation_job 与 evaluation_scorecard,按 cycle_id 取 ──
     MetricSpec(
@@ -277,7 +279,7 @@ CATALOG: tuple[MetricSpec, ...] = (
         "卡上没有志愿的归「未填志愿」,没有这样的简历时不出这一格。",
         UNIT_COUNT,
     ),
-    # ── 人机一致:目前都算不出来 ──
+    # ── 人机一致:evaluation_scorecard 上的置信度对照人工决定 ──
     MetricSpec(
         "agreement.rank_agreement_by_dept",
         DOMAIN_AGREEMENT,
@@ -291,10 +293,11 @@ CATALOG: tuple[MetricSpec, ...] = (
         "agreement.low_confidence_overturn_rate",
         DOMAIN_AGREEMENT,
         "低置信卡片改判率",
-        "模型自评置信度低的评分卡里,被人工改判的比例。",
+        "置信度为低的评分卡里,被人工驳回的比例。每份简历取历史上最后一次人工决定"
+        "所在的那张卡(与「采纳/驳回」同口径);分母是其中置信度为低的,分子是被驳回的。"
+        "采纳时改了分不算改判。单评委模式出的卡没有置信度,不计入;整个周期的已决卡"
+        "都没有置信度时这一项缺席。读的时候对照「采纳/驳回/未决」里的整体驳回情况。",
         UNIT_RATIO,
-        pending_reason="评分卡没有置信度字段;该字段由初筛合议设计稿"
-        "(docs/proposals/screening-panel.md)提出,尚未实现。",
     ),
     # ── 出题:interview_qbank 与 qbank_pick_log,按 cycle_id 取 ──
     MetricSpec(
@@ -355,9 +358,10 @@ CATALOG: tuple[MetricSpec, ...] = (
         "cost.scoring_tokens",
         DOMAIN_COST,
         "评估域 token 总量(评分段)",
-        "初筛任务评分段的输入与输出 token 之和。",
+        "初筛任务评分段的输入与输出 token 之和,一张卡由几次模型调用产出就合计几次"
+        "(评委、批判者、答辩、主席);同一份简历重评几次就计几次。样本量是有用量"
+        "记录的简历数。评分段用量落库之前跑完的任务没有记录,不在其中。",
         UNIT_TOKENS,
-        pending_reason="评分段的用量只打在日志行里,没有落库,事后数不出来。",
     ),
 )
 

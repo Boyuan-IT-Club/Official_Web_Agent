@@ -13,6 +13,29 @@ from typing import Any
 from official_agent.retrospective import metrics
 from official_agent.retrospective.compare import with_baseline
 
+
+def topic_row(
+    rank: int,
+    topic: str | None,
+    *,
+    queries: int,
+    threads: int,
+    near_miss: int = 0,
+    scope: str | None = "official_knowledge",
+    triage_status: str = "done",
+) -> dict[str, Any]:
+    """知识库离线分析的一个主题行(形状同 state.kb_ops.list_topics 的返回,只留用得到的列)。"""
+    return {
+        "rank": rank,
+        "topic": topic,
+        "scope": scope,
+        "triage_status": triage_status,
+        "query_count": queries,
+        "thread_count": threads,
+        "near_miss_count": near_miss,
+    }
+
+
 NORMAL_AGGREGATES: dict[str, Any] = {
     "funnel": {
         "totalResumes": 213,
@@ -74,6 +97,27 @@ NORMAL_AGGREGATES: dict[str, Any] = {
         "metered_resumes": 150,
         "input_tokens": 30_000_000,
         "output_tokens": 1_500_000,
+        "scoring_metered_resumes": 200,
+        "scoring_input_tokens": 2_400_000,
+        "scoring_output_tokens": 300_000,
+    },
+    "agreement": {
+        "graded_decided": 141,
+        "low_confidence_decided": 40,
+        "low_confidence_rejected": 9,
+    },
+    "kb_topics": {
+        "run": {
+            "run_id": "kbops-test",
+            "window_start": "2026-11-01T00:00:00+08:00",
+            "window_end": "2026-11-30T00:00:00+08:00",
+        },
+        "topics": [
+            topic_row(1, "招新报名截止时间", queries=120, threads=85, near_miss=20),
+            topic_row(2, "面试地点与形式", queries=64, threads=50, near_miss=40),
+            topic_row(3, "查询本人面试结果", queries=55, threads=41, scope="personal_data"),
+            topic_row(4, "各部门日常工作", queries=30, threads=22, near_miss=3),
+        ],
     },
 }
 

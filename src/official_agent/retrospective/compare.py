@@ -25,7 +25,9 @@ class SchemaMismatchError(ValueError):
 def with_baseline(current: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
     """返回 current 的副本,每个指标多出 prev / delta / delta_ratio 三项。
 
-    - prev:基线快照里同 id 指标的值;基线里没有,或那边被抑制,则为 None
+    - prev:基线快照里同 id 指标的值;基线里没有,或那边被抑制,则为 None。
+      带文字的清单项(高频主题)按名次编号,两届的「第一名」不是同一个主题,
+      只有两边文字相同才算同一项
     - delta:本期值 − prev;任一侧没有值(含被抑制)则为 None
     - delta_ratio:delta ÷ prev,保留 4 位小数;比率类指标不给(两个百分比相除
       容易读错,看 delta 的百分点差即可),prev 为 0 时也不给
@@ -37,10 +39,13 @@ def with_baseline(current: dict[str, Any], baseline: dict[str, Any]) -> dict[str
         raise SchemaMismatchError(
             f"指标定义版本不同({current.get('schema')} 对 {baseline.get('schema')}),不能对比"
         )
-    baseline_values = {m["id"]: m.get("value") for m in baseline.get("metrics", [])}
+    baseline_metrics = {m["id"]: m for m in baseline.get("metrics", [])}
     result = copy.deepcopy(current)
     for metric in result.get("metrics", []):
-        prev = baseline_values.get(metric["id"])
+        counterpart = baseline_metrics.get(metric["id"])
+        if counterpart is not None and counterpart.get("label") != metric.get("label"):
+            counterpart = None
+        prev = counterpart.get("value") if counterpart else None
         value = metric.get("value")
         delta = None if value is None or prev is None else _tidy(value - prev)
         metric["prev"] = prev

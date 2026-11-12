@@ -211,3 +211,37 @@ def test_separate_thousands_changes_the_writing_not_the_number() -> None:
     )
     # 整理之后仍然对得上
     assert _bad_tokens(grounding.separate_thousands("输入 9634112 token。")) == []
+
+
+# ── 清单项的文字(主题名)────────────────────────────────
+
+_TOPIC_SNAPSHOT = {
+    **SNAPSHOT,
+    "metrics": [
+        *SNAPSHOT["metrics"],
+        {"id": "kb.top_topics[t01]", "label": "2026 秋招三人组队规则"},
+        {"id": "kb.top_topics[t02]", "label": "社团有 300 多人吗"},
+    ],
+}
+_TOPIC_CONTEXT = grounding.context_for(_TOPIC_SNAPSHOT)
+_TOPIC_ALLOWED = grounding.allowed_from([{"unit": "count", "value": 120, "n": 120}])
+
+
+def _topic_tokens(text: str) -> list[str]:
+    violations = grounding.check_text(text, _TOPIC_ALLOWED, _TOPIC_CONTEXT)
+    return [t for v in violations for t in v.tokens]
+
+
+def test_numbers_inside_a_quoted_topic_name_are_not_claims() -> None:
+    assert _topic_tokens("主题「2026 秋招三人组队规则」被问了 120 次。") == []
+    assert _topic_tokens("「社团有 300 多人吗」被问了 120 次。") == []
+
+
+def test_a_reworded_topic_name_gets_no_such_pass() -> None:
+    """只认一字不差的照抄:改写过的名字里的数,照常要在引用的指标里对得上。"""
+    assert _topic_tokens("社团有 300 人这件事被问了 120 次。") == ["300"]
+    assert _topic_tokens("三人组队的规则被问了 120 次。") == ["三人"]
+
+
+def test_quoting_a_topic_name_does_not_excuse_other_numbers_in_the_sentence() -> None:
+    assert _topic_tokens("主题「2026 秋招三人组队规则」被问了 450 次。") == ["450"]

@@ -96,6 +96,11 @@ def check_report(report: dict[str, Any], expect: dict[str, Any]) -> list[str]:
     for fragment in expect.get("forbid_text") or []:
         if any(fragment in text for text in texts):
             problems.append(f"报告文字里出现了「{fragment}」")
+    kept = [lesson["content"] for lesson in report.get("lessons", [])]
+    kept += [candidate["text"] for candidate in report.get("rubric_candidates", [])]
+    for fragment in expect.get("forbid_in_lessons") or []:
+        if any(fragment in text for text in kept):
+            problems.append(f"候选教训或评分条款候选里出现了「{fragment}」")
     if not expect.get("allow_dropped"):
         for entry in report.get("unverified", []):
             if entry["reason"].startswith((REASON_NO_EVIDENCE, REASON_UNGROUNDED)):

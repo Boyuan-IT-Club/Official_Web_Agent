@@ -83,3 +83,23 @@ def test_inputs_are_not_mutated_and_baseline_is_named() -> None:
     result = with_baseline(current, baseline)
     assert current == before  # 存下来的快照正文不被读路径改动
     assert result["baseline"] == {"cycle_id": 12, "schema": "cycle_metrics/v1"}
+
+
+def _topic(key: str, label: str, value: int) -> dict:
+    return {**_metric(f"kb.top_topics[{key}]", value), "metric": "kb.top_topics", "label": label}
+
+
+def test_ranked_text_items_are_compared_only_when_the_text_is_the_same() -> None:
+    """清单项按名次编号:两届的「第一名」通常不是同一个主题,硬比出来的差值是错的。"""
+    current = _snapshot(
+        13, [_topic("t01", "招新报名截止时间", 120), _topic("t02", "面试地点与形式", 64)]
+    )
+    baseline = _snapshot(
+        12, [_topic("t01", "招新报名截止时间", 90), _topic("t02", "各部门日常工作", 50)]
+    )
+    got = _by_id(with_baseline(current, baseline))
+
+    same = got["kb.top_topics[t01]"]
+    assert (same["prev"], same["delta"]) == (90, 30)
+    other = got["kb.top_topics[t02]"]
+    assert (other["prev"], other["delta"], other["delta_ratio"]) == (None, None, None)

@@ -21,7 +21,7 @@ from tests.pg_helpers import PG_URL, pg_available, point_settings_at_pg  # noqa:
 
 from official_agent.kb import query_log  # noqa: E402
 from official_agent.retrospective import catalog, metrics  # noqa: E402
-from official_agent.state import conversation, pools  # noqa: E402
+from official_agent.state import conversation, kb_ops, pools  # noqa: E402
 from official_agent.state import evaluation as ev_store  # noqa: E402
 from official_agent.state import qbank as qbank_store  # noqa: E402
 from official_agent.state import retrospective as store  # noqa: E402
@@ -44,6 +44,7 @@ def _reset_connection_caches() -> None:
     pools.reset_pools()
     ev_store.reset_pool()
     query_log.reset_table_cache()
+    kb_ops.reset_table_cache()
     snapshot_store.reset_table_cache()
     report_store.reset_table_cache()
 
@@ -79,8 +80,11 @@ def _empty_tables():
         )
         conn.execute("DROP TABLE IF EXISTS cycle_metrics_snapshot")
         conn.execute("DROP TABLE IF EXISTS cycle_retrospective")
+        # 知识库运营的表由它自己的读函数在首次使用时建出,这里每次从没有开始
+        conn.execute("DROP TABLE IF EXISTS kb_ops_topic, kb_draft, kb_ops_run CASCADE")
     snapshot_store.reset_table_cache()
     report_store.reset_table_cache()
+    kb_ops.reset_table_cache()
 
 
 def _execute(sql: str, params: tuple = ()) -> None:
@@ -317,19 +321,26 @@ def test_kb_aggregates_split_outcomes_and_low_score_hits() -> None:
 # ── 初筛域聚合 ──────────────────────────────────────────
 
 
-def _card(first_dept: str | None, *, hard_zero: bool = False) -> dict:
-    return {
+def _card(
+    first_dept: str | None, *, hard_zero: bool = False, confidence: str | None = None
+) -> dict:
+    card = {
         "schema": "evaluation_scorecard/v2",
         "intended": {"first": first_dept, "second": None},
         "hard_zero": hard_zero,
         "total": None,
     }
+    if confidence is not None:
+        # 带批判者的评分模式出的卡才有这一块;单评委模式的卡没有
+        card["panel"] = {"mode": "critic", "confidence": confidence}
+    return card
 
 
 def _scorecard(resume_id: int, first_dept: str | None, *, cycle_id: int = CYCLE,
-               status: str = "draft", hard_zero: bool = False) -> int:
+               status: str = "draft", hard_zero: bool = False,
+               confidence: str | None = None) -> int:
     version = ev_store.save_scorecard(
-        _card(first_dept, hard_zero=hard_zero),
+        _card(first_dept, hard_zero=hard_zero, confidence=confidence),
         resume_id=resume_id, cycle_id=cycle_id, prompt_version="test",
     )
     if status != "draft":
@@ -383,6 +394,131 @@ def test_screening_aggregates() -> None:
     }
     # 这个周期只有 5 份简历:按部门拆的每一格都是小格子,一个也不出来
     assert all(v.suppressed for mid, v in values.items() if "_by_dept" in mid)
+
+
+# ── 人机一致域聚合 ──────────────────────────────────────
+
+
+def test_agreement_aggregates_read_confidence_from_the_decided_card() -> None:
+    _scorecard(1, "技术部", status="rejected", confidence="low")
+    _scorecard(2, "技术部", status="adopted", confidence="low")
+    _scorecard(3, "媒体部", status="adopted", confidence="high")
+    _scorecard(4, "媒体部", status="rejected", confidence="high")
+    _scorecard(5, "项目部", status="rejected")  # 单评委模式的卡:没有置信度
+    _scorecard(6, "项目部", confidence="low")  # 低置信但还没人看
+    # 先被驳回(低置信),复评出了一张高置信的新 draft:人看的是被驳回的那张
+    _scorecard(7, "综合部", status="rejected", confidence="low")
+    _scorecard(7, "综合部", confidence="high")
+    # 先驳回一张低置信的,后来采纳了一张高置信的:以最后一次决定所在的卡为准
+    _scorecard(8, "综合部", status="rejected", confidence="low")
+    _scorecard(8, "综合部", status="adopted", confidence="high")
+    _scorecard(9, "技术部", cycle_id=OTHER_CYCLE, status="rejected", confidence="low")
+
+    assert store.agreement_aggregates(CYCLE) == {
+        "graded_decided": 6,  # 1 2 3 4 7 8;5 没有置信度,6 没有决定
+        "low_confidence_decided": 3,  # 1 2 7
+        "low_confidence_rejected": 2,  # 1 7
+    }
+
+
+def test_agreement_aggregates_on_a_cycle_scored_by_a_single_judge() -> None:
+    _scorecard(1, "技术部", status="adopted")
+    _scorecard(2, "技术部", status="rejected")
+
+    agg = store.agreement_aggregates(CYCLE)
+
+    assert agg == {"graded_decided": 0, "low_confidence_decided": 0, "low_confidence_rejected": 0}
+    (absent,) = metrics.agreement_metrics(agg)
+    assert isinstance(absent, metrics.Absent)  # 没有置信度可言,不出一个 0
+
+
+# ── 知识库主题清单 ──────────────────────────────────────
+
+
+def _kb_run(run_id: str, start: datetime, end: datetime, *topics, succeed: bool = True) -> None:
+    kb_ops.create_run(run_id, window_start=start, window_end=end, triggered_by=7, params={})
+    if not succeed:
+        kb_ops.fail_run(run_id, "模型端点不可用")
+        return
+    rows = [
+        kb_ops.TopicRow(
+            rank=rank,
+            query_count=queries,
+            thread_count=threads,
+            near_miss_count=near_miss,
+            best_vec_score=0.4,
+            first_seen=start,
+            last_seen=end,
+            sample_query_ids=(),
+            triage_status=kb_ops.TRIAGE_DONE,
+            scope=scope,
+            topic=name,
+            canonical_question=f"{name}是什么?",
+            reason="测试",
+        )
+        for rank, (name, queries, threads, near_miss, scope) in enumerate(topics, start=1)
+    ]
+    kb_ops.finish_run(run_id, stats={}, prompt_versions={}, topics=rows)
+    # 运行按开始时间排新旧;测试里一口气建出来的几次运行要拉开先后
+    _execute("UPDATE kb_ops_run SET started_at = %s WHERE run_id = %s", (end, run_id))
+
+
+def test_kb_topics_come_from_the_latest_successful_analysis_overlapping_the_window() -> None:
+    day = timedelta(days=1)
+    before = WINDOW.start - 40 * day
+    _kb_run("old", before, before + 7 * day, ("往届的问题", 80, 60, 0, "official_knowledge"))
+    _kb_run(
+        "mid",
+        WINDOW.start + 3 * day,
+        WINDOW.start + 10 * day,
+        ("招新报名截止时间", 30, 20, 0, "official_knowledge"),
+    )
+    _kb_run(
+        "late",
+        WINDOW.end - 5 * day,
+        WINDOW.end + 2 * day,  # 伸到周期外面:有重叠就算
+        ("招新报名截止时间", 120, 85, 20, "official_knowledge"),
+        ("查询本人面试结果", 55, 41, 0, "personal_data"),
+    )
+    _kb_run("failed", WINDOW.end - 2 * day, WINDOW.end + 5 * day, succeed=False)
+    _kb_run(
+        "after",
+        WINDOW.end + 10 * day,
+        WINDOW.end + 17 * day,
+        ("下一届的问题", 99, 70, 0, "official_knowledge"),
+    )
+
+    got = store.kb_topic_aggregates(WINDOW.start, WINDOW.end)
+
+    assert got["run"] == {
+        "run_id": "late",
+        "window_start": WINDOW.end - 5 * day,
+        "window_end": WINDOW.end + 2 * day,
+    }
+    assert [(t["topic"], t["query_count"], t["thread_count"]) for t in got["topics"]] == [
+        ("招新报名截止时间", 120, 85),
+        ("查询本人面试结果", 55, 41),
+    ]
+    # 经口径与抑制之后:只留该由知识库回答的那一个
+    values = [v for item in metrics.kb_topic_metrics(got) for v in metrics.suppress(item)]
+    assert [(v.id, v.label, v.value, v.group) for v in values] == [
+        ("kb.top_topics[t01]", "招新报名截止时间", 120, "missing")
+    ]
+
+
+def test_kb_topics_window_bounds_are_half_open() -> None:
+    """恰好在周期开始那一刻结束、或恰好在周期结束那一刻开始的分析,与周期没有重叠。"""
+    week = timedelta(days=7)
+    _kb_run("ends_at_start", WINDOW.start - week, WINDOW.start, ("甲", 9, 9, 0, None))
+    _kb_run("starts_at_end", WINDOW.end, WINDOW.end + week, ("乙", 9, 9, 0, None))
+
+    assert store.kb_topic_aggregates(WINDOW.start, WINDOW.end) is None
+
+
+def test_kb_topics_on_a_database_that_never_ran_the_analysis() -> None:
+    """知识库运营的表还没建过:读出来是「没有」,不是报错。"""
+    assert not _table_exists("kb_ops_run")
+    assert store.kb_topic_aggregates(WINDOW.start, WINDOW.end) is None
 
 
 # ── 出题域聚合 ──────────────────────────────────────────
@@ -474,15 +610,68 @@ def test_evaluation_usage_is_attributed_to_the_cycle_through_the_job() -> None:
     _turn(f"eval:{job_other}", channel="evaluation", input_tokens=7000, output_tokens=700)
     _turn("eval:not-a-job", channel="evaluation", input_tokens=9, output_tokens=9)
     _turn(f"eval:{job_a}", channel="web", input_tokens=9, output_tokens=9)  # 不是用量行
-    # 评分段的用量行(tools 带 scoring):不算进题库段
+    # 评分段的用量行(tools 带 scoring):单独数,不算进题库段
     _turn(f"eval:{job_a}", channel="evaluation", input_tokens=4000, output_tokens=400,
+          tools=["scoring"])
+    _turn(f"eval:{job_a}", channel="evaluation", input_tokens=3000, output_tokens=300,
+          tools=["scoring"])  # 重评:花掉的 token 照计
+    _turn(f"eval:{job_b}", channel="evaluation", input_tokens=2000, output_tokens=200,
+          tools=["scoring"])
+    _turn(f"eval:{job_b}", channel="evaluation", tools=["scoring"])  # 模型没回用量
+    _turn(f"eval:{job_other}", channel="evaluation", input_tokens=8000, output_tokens=800,
           tools=["scoring"])
 
     assert store.evaluation_usage_aggregates(CYCLE) == {
         "metered_resumes": 1,
         "input_tokens": 1500,
         "output_tokens": 150,
+        "scoring_metered_resumes": 2,
+        "scoring_input_tokens": 9000,
+        "scoring_output_tokens": 900,
     }
+
+
+def test_usage_rows_written_by_the_evaluation_runner_land_in_the_right_stage() -> None:
+    """两段靠用量行上的段标记区分:标记由评估任务写、由这里读,两头必须对得上。"""
+    from official_agent.evaluation import runner
+
+    job_ids = [_job(resume_id) for resume_id in range(1, 7)]
+    for job_id in job_ids:
+        runner._write_eval_usage_log(
+            job_id=job_id,
+            job_user_id=None,
+            stage_tools=runner._SCORING_STAGE_TOOLS,
+            user_message="初筛评分",
+            reply_summary="评分卡落库",
+            usage={"input_tokens": 12_000, "output_tokens": 800},
+        )
+        runner._write_eval_usage_log(
+            job_id=job_id,
+            job_user_id=None,
+            stage_tools=runner._QBANK_STAGE_TOOLS,
+            user_message="出题",
+            reply_summary="题库落库",
+            usage={"input_tokens": 200_000, "output_tokens": 9_000},
+        )
+
+    usage = store.evaluation_usage_aggregates(CYCLE)
+
+    assert usage == {
+        "metered_resumes": 6,
+        "input_tokens": 1_200_000,
+        "output_tokens": 54_000,
+        "scoring_metered_resumes": 6,
+        "scoring_input_tokens": 72_000,
+        "scoring_output_tokens": 4_800,
+    }
+    conversation_agg = store.conversation_aggregates(WINDOW.start, WINDOW.end)
+    values = {
+        v.id: v
+        for item in metrics.cost_metrics(conversation_agg, usage)
+        for v in metrics.suppress(item)
+    }
+    assert (values["cost.scoring_tokens"].value, values["cost.scoring_tokens"].n) == (76_800, 6)
+    assert values["cost.evaluation_tokens"].value == 1_254_000  # 题库段没有被评分段的行污染
 
 
 # ── 端到端:真库上采集、落快照、原料被清理后快照仍在 ──────
@@ -913,7 +1102,7 @@ async def test_generate_report_end_to_end_on_real_database() -> None:
     assert draft.sections["sections"][1]["items"][0]["text"] == "未命中率 18%。"
     assert [entry["text"] for entry in draft.unverified] == ["另有 7 次超时。"]
     assert draft.report_md.startswith(f"# 招新周期复盘报告 · 周期 {CYCLE}(第 {version} 版)")
-    assert draft.prompt_versions["qa"] == "retrospective_qa/v1"
+    assert draft.prompt_versions["qa"] == "retrospective_qa/v2"
 
 
 def test_report_api_roundtrip_on_real_database(backend, monkeypatch, web_no_real_pg) -> None:

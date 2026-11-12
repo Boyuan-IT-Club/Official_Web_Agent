@@ -23,8 +23,10 @@ import psycopg
 
 from official_agent.config import get_settings
 from official_agent.evaluation.schema import DEPARTMENTS
+from official_agent.kb_ops.cluster import gap_hint
 from official_agent.retrospective.catalog import (
     CATALOG,
+    DOMAIN_AGREEMENT,
     DOMAIN_CONVERSATION,
     DOMAIN_COST,
     DOMAIN_FUNNEL,
@@ -50,6 +52,8 @@ from official_agent.retrospective.guard import (
     RawRatio,
     RawRatioBreakdown,
     RawStat,
+    RawTextItem,
+    RawTextList,
     suppress,
 )
 from official_agent.state import retrospective as store
@@ -77,6 +81,13 @@ _FUNNEL_OUTCOMES = frozenset({"passed", "rejected"})
 _SCREENING_OUTCOMES = frozenset({"adopted", "rejected"})
 # 后端面试结果里还没分配部门的归到这一格
 _UNASSIGNED_KEY = "unassigned"
+# 高频主题只列知识库离线分析甄别完成、且归为「该由知识库回答」的主题:其余归类
+# (查个人数据、超出范围、闲聊)的主题名离个人更近,也不是知识库要补的缺口
+_TOPIC_TRIAGE_DONE = "done"
+_TOPIC_SCOPE = "official_knowledge"
+# 主题的缺口类型(kb_ops.cluster.gap_hint 的两个取值)
+_TOPIC_GAPS = frozenset({"missing", "wording"})
+_TOP_TOPICS_LIMIT = 10
 
 
 @dataclass(frozen=True)
@@ -230,6 +241,30 @@ def kb_metrics(agg: Mapping[str, int]) -> list[RawMetric | Absent]:
     ]
 
 
+def kb_topic_metrics(agg: Mapping[str, Any] | None) -> list[RawMetric | Absent]:
+    """知识库域的高频主题。agg 是 state.retrospective.kb_topic_aggregates 的返回。
+
+    主题名是模型写的文字,能不能进快照由 guard 的清单规则把关;这里只挑范围
+    (甄别完成、该由知识库回答)并把会话数当作「不同来源数」交过去。
+    """
+    if agg is None:
+        return [
+            Absent("kb.top_topics", "与周期时间窗有重叠的知识库离线分析一次都没有成功过")
+        ]
+    items = [
+        RawTextItem(
+            text=str(topic["topic"]),
+            count=int(topic["query_count"]),
+            sources=int(topic["thread_count"]),
+            group=gap_hint(int(topic["near_miss_count"]), int(topic["query_count"])),
+        )
+        for topic in agg["topics"]
+        if topic.get("scope") == _TOPIC_SCOPE
+        and topic.get("topic")
+    ]
+    return [RawTextList("kb.top_topics", items, groups=_TOPIC_GAPS, limit=_TOP_TOPICS_LIMIT)]
+
+
 def screening_metrics(agg: Mapping[str, Any]) -> list[RawMetric | Absent]:
     """初筛域。agg 是 state.retrospective.screening_aggregates 的返回。"""
     jobs = int(agg["jobs"])
@@ -264,6 +299,25 @@ def screening_metrics(agg: Mapping[str, Any]) -> list[RawMetric | Absent]:
     ]
 
 
+def agreement_metrics(agg: Mapping[str, int]) -> list[RawMetric | Absent]:
+    """人机一致域。agg 是 state.retrospective.agreement_aggregates 的返回。"""
+    if not int(agg["graded_decided"]):
+        # 整个周期没有一张带置信度的已决卡:说「改判率是 0」或「样本不足」都不对
+        return [
+            Absent(
+                "agreement.low_confidence_overturn_rate",
+                "该周期有人工决定的评分卡都没有置信度(单评委模式出的卡),或还没有人工决定",
+            )
+        ]
+    return [
+        RawRatio(
+            "agreement.low_confidence_overturn_rate",
+            int(agg["low_confidence_rejected"]),
+            int(agg["low_confidence_decided"]),
+        )
+    ]
+
+
 def qbank_metrics(agg: Mapping[str, Any]) -> list[RawMetric | Absent]:
     """出题域。agg 是 state.retrospective.qbank_aggregates 的返回。"""
     generated = int(agg["generated"])
@@ -288,6 +342,7 @@ def cost_metrics(
     """成本域。conversation 是对话聚合,usage 是 evaluation_usage_aggregates 的返回。"""
     evaluation_tokens = int(usage["input_tokens"]) + int(usage["output_tokens"])
     resumes = int(usage["metered_resumes"])
+    scoring_tokens = int(usage["scoring_input_tokens"]) + int(usage["scoring_output_tokens"])
     return [
         RawStat(
             "cost.conversation_tokens",
@@ -300,6 +355,12 @@ def cost_metrics(
             "cost.evaluation_tokens_per_resume",
             round(evaluation_tokens / resumes) if resumes else None,
             resumes,
+            UNIT_TOKENS,
+        ),
+        RawStat(
+            "cost.scoring_tokens",
+            scoring_tokens,
+            int(usage["scoring_metered_resumes"]),
             UNIT_TOKENS,
         ),
     ]
@@ -360,9 +421,25 @@ class _Sources:
             ),
         )
 
+    async def kb_topics(self) -> dict[str, Any] | None:
+        window = await self.window()
+        return await self._once(
+            "kb_topics",
+            lambda: asyncio.to_thread(store.kb_topic_aggregates, window.start, window.end),
+        )
+
+    def loaded(self, name: str) -> Any:
+        """某个数据源这次已经取到的结果;没取过或取失败了返回 None。不触发取数。"""
+        return self._values.get(name)
+
     async def screening(self) -> dict[str, Any]:
         return await self._once(
             "screening", lambda: asyncio.to_thread(store.screening_aggregates, self.cycle_id)
+        )
+
+    async def agreement(self) -> dict[str, int]:
+        return await self._once(
+            "agreement", lambda: asyncio.to_thread(store.agreement_aggregates, self.cycle_id)
         )
 
     async def qbank(self) -> dict[str, Any]:
@@ -386,11 +463,29 @@ async def _collect_conversation(src: _Sources) -> list[RawMetric | Absent]:
 
 
 async def _collect_kb(src: _Sources) -> list[RawMetric | Absent]:
-    return kb_metrics(await src.kb())
+    produced = kb_metrics(await src.kb())
+    try:
+        topics = await src.kb_topics()
+    except _SOURCE_ERRORS as exc:
+        # 主题清单是另一个数据源(知识库运营的表):它取不到只缺这一项,
+        # 检索次数与各种比率照常
+        logger.warning(
+            "复盘指标采集:知识库主题清单取不到,该项缺席 cycle_id=%s",
+            src.cycle_id,
+            exc_info=not isinstance(exc, SourceUnavailableError),
+        )
+        produced.append(Absent("kb.top_topics", f"主题清单取不到:{_unavailable_reason(exc)}"))
+    else:
+        produced.extend(kb_topic_metrics(topics))
+    return produced
 
 
 async def _collect_screening(src: _Sources) -> list[RawMetric | Absent]:
     return screening_metrics(await src.screening())
+
+
+async def _collect_agreement(src: _Sources) -> list[RawMetric | Absent]:
+    return agreement_metrics(await src.agreement())
 
 
 async def _collect_qbank(src: _Sources) -> list[RawMetric | Absent]:
@@ -408,6 +503,7 @@ _COLLECTORS: tuple[
     (DOMAIN_CONVERSATION, _collect_conversation),
     (DOMAIN_KB, _collect_kb),
     (DOMAIN_SCREENING, _collect_screening),
+    (DOMAIN_AGREEMENT, _collect_agreement),
     (DOMAIN_QBANK, _collect_qbank),
     (DOMAIN_COST, _collect_cost),
 )
@@ -450,8 +546,15 @@ class _CannedSources(_Sources):
     async def kb(self) -> dict[str, int]:
         return self._given("kb")
 
+    async def kb_topics(self) -> dict[str, Any] | None:
+        # 记进 _values:与真实取数一样,采集结束后能从 loaded() 读到这次用的运行
+        return self._values.setdefault("kb_topics", self._given("kb_topics"))
+
     async def screening(self) -> dict[str, Any]:
         return self._given("screening")
+
+    async def agreement(self) -> dict[str, int]:
+        return self._given("agreement")
 
     async def qbank(self) -> dict[str, Any]:
         return self._given("qbank")
@@ -497,8 +600,9 @@ async def snapshot_from_aggregates(
 ) -> dict[str, Any]:
     """用现成的原始聚合拼一份快照正文,不碰后端与数据库(eval 与测试造合成快照用)。
 
-    aggregates 的键是 funnel / conversation / kb / screening / qbank /
-    evaluation_usage,值的形状与对应的取数函数返回一致;没给的域标 unavailable。
+    aggregates 的键是 funnel / conversation / kb / kb_topics / screening / agreement /
+    qbank / evaluation_usage,值的形状与对应的取数函数返回一致;没给的域标
+    unavailable(kb_topics 没给只缺高频主题一项)。
     """
     return await _collect(
         _CannedSources(cycle_id, aggregates, window=window, kb_min_score=kb_min_score)
@@ -564,12 +668,37 @@ async def _collect(src: _Sources) -> dict[str, Any]:
             else None
         ),
         "small_cell_min": SMALL_CELL_MIN,
-        "params": {"kb_min_score": kb_min_score},
+        "params": {"kb_min_score": kb_min_score, **_topic_run_params(src.loaded("kb_topics"))},
         "domains": domains,
         "catalog": catalog_payload(),
-        "metrics": [asdict(v) for v in sorted(values, key=lambda v: v.id)],
+        "metrics": [_value_payload(v) for v in sorted(values, key=lambda v: v.id)],
         "absent": [asdict(a) for a in sorted(absent, key=lambda a: a.id)],
     }
+
+
+def _topic_run_params(topics: Mapping[str, Any] | None) -> dict[str, str]:
+    """高频主题取自哪一次知识库离线分析、那次分析的时间窗——主题的次数是这个窗口里的。"""
+    if not topics:
+        return {}
+    run = topics["run"]
+    return {
+        "kb_topics_run_id": str(run["run_id"]),
+        "kb_topics_window_start": _iso(run["window_start"]),
+        "kb_topics_window_end": _iso(run["window_end"]),
+    }
+
+
+def _iso(moment: Any) -> str:
+    return moment.isoformat() if isinstance(moment, datetime) else str(moment)
+
+
+def _value_payload(value: MetricValue) -> dict[str, Any]:
+    """一个值落进快照的形态。label / group 只有带文字的清单项才出这两个键。"""
+    payload = asdict(value)
+    for optional in ("label", "group"):
+        if payload[optional] is None:
+            del payload[optional]
+    return payload
 
 
 def _require_listed(metric_id: str, domain: str) -> None:

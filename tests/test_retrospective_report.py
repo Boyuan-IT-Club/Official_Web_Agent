@@ -4,7 +4,7 @@
 """
 
 import pytest
-from tests.retro_helpers import ScriptedModel, finding, item, make_snapshot
+from tests.retro_helpers import ScriptedModel, finding, item, make_snapshot, topic_row
 
 from official_agent.retrospective import graph, reports
 from official_agent.retrospective.render import render_markdown
@@ -63,6 +63,37 @@ async def test_markdown_has_sections_citations_and_code_rendered_tables() -> Non
     assert "未命中率 18%。\n" in markdown
     assert "- [sections.qa[0]] 还有 7 次超时。 —— 数字在引用的指标里对不上:7" in markdown
     assert markdown.count("7 次超时") == 1
+
+
+async def test_markdown_names_topics_by_their_text_not_their_rank() -> None:
+    snapshot = await make_snapshot()
+    script = {
+        **SCRIPT,
+        "qa": {"findings": [finding("「招新报名截止时间」被问了 120 次。", "kb.top_topics[t01]")]},
+        "writer": {
+            **SCRIPT["writer"],
+            "sections": [
+                {"role": "qa", "items": [item("「招新报名截止时间」被问了 120 次。",
+                                              "kb.top_topics[t01]")]},
+            ],
+        },
+    }
+    markdown = render_markdown(await _report(snapshot, script), snapshot, version=1)
+
+    assert "| 没答好的高频主题 · 「招新报名截止时间」 | 120 | 120 |" in markdown
+    assert "依据:没答好的高频主题 · 「招新报名截止时间」" in markdown
+    assert "t01" not in markdown
+
+
+async def test_markdown_table_survives_a_pipe_in_a_topic_name() -> None:
+    topics = {
+        "run": {"run_id": "r", "window_start": "2026-11-01", "window_end": "2026-11-30"},
+        "topics": [topic_row(1, "报名|面试 时间", queries=120, threads=85)],
+    }
+    snapshot = await make_snapshot(kb_topics=topics)
+    markdown = render_markdown(await _report(snapshot), snapshot, version=1)
+
+    assert "| 没答好的高频主题 · 「报名/面试 时间」 | 120 | 120 |" in markdown
 
 
 async def test_markdown_shows_baseline_columns_when_compared() -> None:
@@ -143,7 +174,7 @@ async def test_generate_saves_draft_with_versions_and_usage(monkeypatch) -> None
     assert saved["sections"]["prior_lessons"] == [] and store.prior_asked_for == [12]
     assert saved["report_md"].startswith("# 招新周期复盘报告 · 周期 12(第 3 版)")
     assert [entry["text"] for entry in saved["unverified"]] == ["还有 7 次超时。"]
-    assert saved["prompt_versions"]["writer"] == "retrospective_writer/v1"
+    assert saved["prompt_versions"]["writer"] == "retrospective_writer/v2"
     assert saved["prompt_versions"]["metrics_schema"] == snapshot["schema"]
     assert saved["prompt_versions"]["model"]  # 用的是哪个模型,随报告留底
     assert saved["usage"]["input_tokens"] > 0
