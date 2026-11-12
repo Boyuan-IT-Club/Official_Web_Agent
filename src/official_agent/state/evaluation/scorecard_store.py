@@ -134,6 +134,22 @@ def cycle_scoring_mode(cycle_id: int) -> str | None:
     return row["mode"] or "single"
 
 
+def cycle_calibration_set(cycle_id: int) -> int | None:
+    """本周期冻结的校准案例集水位;周期里还没有卡 → None。
+
+    与评分模式同理,以最早落库的那张卡为准:它记了水位就沿用,没记(单评委模式的卡,
+    或校准案例启用之前出的卡)就是 0——本周期不用校准案例。
+    """
+    _ensure_bootstrapped()
+    with _connection._conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE((card->'panel'->'calibration'->>'set')::int, 0) AS watermark "
+            "FROM evaluation_scorecard WHERE cycle_id = %s ORDER BY id LIMIT 1",
+            (cycle_id,),
+        ).fetchone()
+    return int(row["watermark"]) if row else None
+
+
 def latest_scorecard(resume_id: int, cycle_id: int) -> dict[str, Any] | None:
     """最新一版的完整卡;无则 None。"""
     _ensure_bootstrapped()

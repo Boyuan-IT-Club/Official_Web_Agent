@@ -115,6 +115,15 @@ class Settings(BaseSettings):
     # 不在 HOT_KEYS:切换模式是周期之间的事,不做热生效。
     evaluation_scoring_mode: Literal["single", "critic", "panel"] = "critic"
 
+    # 初筛校准案例(往届判例,见 evaluation/calibration.py),两个开关都**缺省关闭**:
+    #   enabled         = 评分时给评委看判例。只对 critic / panel 模式、且「还没有评分卡的
+    #                     周期」生效:周期开跑时把当时的案例集定为本周期的标尺,中途不变。
+    #                     需要 EMBED_* 已配置;案例库是空的时候开了也没有效果。
+    #   harvest_enabled = 允许从已结束的周期收割人机一致的卡作为案例。要有至少一个完整
+    #                     周期的人工采纳数据才有意义。
+    evaluation_calibration_enabled: bool = False
+    evaluation_calibration_harvest_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

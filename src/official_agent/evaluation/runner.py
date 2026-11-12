@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from official_agent.config import get_effective_settings, get_settings
+from official_agent.evaluation import calibration
 from official_agent.evaluation.applicant import ApplicantProfile, parse_intended_departments
 from official_agent.evaluation.github_client import normalize_github_login
 from official_agent.evaluation.graph import _prompt_version, run_evaluation
@@ -283,6 +284,22 @@ async def _scoring_mode_for(cycle_id: int) -> str:
     return pinned or get_settings().evaluation_scoring_mode
 
 
+async def _calibration_set_for(cycle_id: int, mode: str) -> int:
+    """本周期冻结的校准案例集水位;0 = 本周期不用校准案例。
+
+    与评分模式同理按周期固定:周期里已有评分卡就沿用第一张卡记的水位(没记即不用);
+    还没有卡时,开关开着才把当前的案例集定为本周期的标尺。单评委模式不用校准案例。
+    """
+    if mode == "single":
+        return 0
+    pinned = await asyncio.to_thread(evaluation.cycle_calibration_set, cycle_id)
+    if pinned is not None:
+        return pinned
+    if not get_settings().evaluation_calibration_enabled:
+        return 0
+    return await asyncio.to_thread(evaluation.calibration_store.current_watermark)
+
+
 def _panel_facts(card: dict[str, Any] | None) -> dict[str, Any]:
     """卡上的合议结论里值得进日志与审计的几项。只有模式、档位和布尔量,不含简历文本。"""
     panel = (card or {}).get("panel") or {}
@@ -290,13 +307,14 @@ def _panel_facts(card: dict[str, Any] | None) -> dict[str, Any]:
         "scoring_mode": panel.get("mode", "single"),
         "confidence": panel.get("confidence"),
         "injection_detected": (panel.get("injection") or {}).get("detected"),
+        "calibration_set": (panel.get("calibration") or {}).get("set"),
     }
 
 
 async def _do_scoring(
     job: dict[str, Any], resume_id: int, cycle_id: int, job_id: int
 ) -> tuple[dict, int, list, str]:
-    """评分段:取数 → 归属硬断言 → 脱敏 → 定评分模式 → 评分子图 → 落卡。
+    """评分段:取数 → 归属硬断言 → 脱敏 → 定评分模式与校准案例 → 评分子图 → 落卡。
 
     返回 (卡, 卡版本, 脱敏后字段, 年级)——字段与年级是出题段的输入,
     两个模型入口共用同一份脱敏后材料(出口契约)。
@@ -315,23 +333,35 @@ async def _do_scoring(
     # 出口契约:评分与出题两个模型入口共用这份脱敏后字段
     fields = _mask_fields_for_model(fields, resume_id=resume_id)
     scoring_usage: dict[str, int | None] = {}
+    scoring_fields = [
+        {
+            "field_key": f.field_key,
+            "title": f.title,
+            "value": f.value,
+            "placeholder": f.placeholder,
+            "required": f.required,
+        }
+        for f in fields
+    ]
+    mode = await _scoring_mode_for(cycle_id)
+    watermark = await _calibration_set_for(cycle_id, mode)
+    # 取判例用的是脱敏后的字段:送去算向量的文本与进评分模型的是同一份
+    anchors = (
+        await calibration.retrieve_for_resume(
+            scoring_fields, resume_id=resume_id, cycle_id=cycle_id, watermark=watermark
+        )
+        if watermark
+        else None
+    )
     card = await run_evaluation(
-        [
-            {
-                "field_key": f.field_key,
-                "title": f.title,
-                "value": f.value,
-                "placeholder": f.placeholder,
-                "required": f.required,
-            }
-            for f in fields
-        ],
+        scoring_fields,
         resume_id=resume_id,
         cycle_id=cycle_id,
         profile=profile,
         usage_out=scoring_usage,
         correlation_id=eval_job_trace_id(job_id),
-        mode=await _scoring_mode_for(cycle_id),
+        mode=mode,
+        anchors=anchors,
     )
     version = await asyncio.to_thread(
         evaluation.save_scorecard,

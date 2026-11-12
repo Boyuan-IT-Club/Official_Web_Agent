@@ -54,10 +54,14 @@ def shared_prefix(material: str) -> str:
     return load_prompt(PREAMBLE_FILE) + "\n\n---\n\n" + material + "\n\n---\n\n"
 
 
-def judge_prompt(checklist: str, material: str, scoring_prompt: str) -> str:
+def judge_prompt(
+    checklist: str, material: str, scoring_prompt: str, anchors_section: str = ""
+) -> str:
     """只判一张清单的评委的完整 prompt:公共前缀 + 角色说明 + 这张清单的判定标准。
 
     判定标准(以及认真程度评委要用的态度定义)截自评分 prompt,见 panel.criteria。
+    anchors_section 是这张清单上的往届判例(anchors.render_anchors 的输出),有就追加在
+    最后——它因简历而异,放在公共前缀之后不影响前缀缓存。
     """
     if checklist == EFFORT_CHECKLIST:
         standards = (
@@ -72,6 +76,7 @@ def judge_prompt(checklist: str, material: str, scoring_prompt: str) -> str:
         + standards
         + "\n\n判定项(顺序不可变):"
         + " / ".join(checklist_item_names(checklist))
+        + (f"\n\n{anchors_section}" if anchors_section else "")
     )
 
 
@@ -148,9 +153,10 @@ async def judge_checklist(
     material: str,
     scoring_prompt: str,
     sources: list[str],
+    anchors_section: str = "",
     config: dict | None = None,
 ) -> dict[str, Any]:
-    """让一位评委判它负责的那张清单。
+    """让一位评委判它负责的那张清单。anchors_section 见 judge_prompt。
 
     Returns:
         {"checklist", "items"(按清单顺序), "attitude"(仅认真程度评委,其余 None),
@@ -172,7 +178,7 @@ async def judge_checklist(
 
     (items, attitude), usage = await invoke_with_retry(
         model,
-        judge_prompt(checklist, material, scoring_prompt),
+        judge_prompt(checklist, material, scoring_prompt, anchors_section),
         parse=_parse,
         build_corrective=_judge_corrective(checklist),
         fail_message=f"{checklist}评委两次输出均不合规",

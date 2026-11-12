@@ -6,6 +6,8 @@
 - critic.py:批判者——检测提示注入,质疑引文撑不住的判定;只举手,不改判
 - aggregate.py:汇总规则(纯函数)——分歧、作废项、置信度都由代码派生
 - chair.py:主席——汇总之后写整体理由,只看最终判定,不看简历
+- anchors.py:校准案例(往届判例)的规则——入库筛查、按周期冻结与隔离、检索选择、进 prompt
+- harvest.py:从往届评分卡收割校准案例的规则——人机一致怎么算、哪些判定能成为案例
 
 图的装配在 evaluation/graph.py(按评分模式选图);设计与取舍见
 docs/proposals/screening-panel.md。

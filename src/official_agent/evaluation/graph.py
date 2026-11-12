@@ -41,6 +41,7 @@ from official_agent.evaluation.llm_common import (
     prompt_version,
 )
 from official_agent.evaluation.material import resume_material, resume_sources
+from official_agent.evaluation.panel import anchors as panel_anchors
 from official_agent.evaluation.panel import chair as panel_chair
 from official_agent.evaluation.panel import critic as panel_critic
 from official_agent.evaluation.panel import judges as panel_judges
@@ -112,6 +113,8 @@ class EvaluationState(TypedDict, total=False):
     error: str | None
     llm_usage: dict[str, int | None]  # 本张卡全部模型调用的 token 用量合计(job 观测面)
     mode: str  # 评分模式,SCORING_MODES 之一
+    # 这份简历能用的校准案例(往届判例);None = 本周期不用。由调用方取好传进来
+    anchors: panel_anchors.Anchors | None
     # 以下只在带批判者的模式(critic / panel)里出现
     judgement: Judgement | None  # 评委的判定(panel 模式下由各位评委的结果拼成)
     judge_retries: int  # critic 模式:评委输出不合规而回灌重试的次数
@@ -254,6 +257,7 @@ async def finalize_hard(state: EvaluationState) -> dict:
         # 周期的评分模式取自它的第一张卡:绝对卡的卡也得写明模式,否则一个新周期的
         # 头一份简历恰好是空白卷时,整个周期会被认成单评委模式
         card["panel"] = {"mode": _mode_of(state), **unreviewed_panel()}
+        _record_calibration(card, state, status="skipped")
     return {"card": card, "error": None, "llm_usage": {}}
 
 
@@ -333,17 +337,49 @@ def _corrective(ve: ValueError) -> str:
 
 
 def _scoring_prompt(state: EvaluationState) -> str:
-    """评委的完整 prompt:评分规则 + 简历材料 + 两张清单的判定项名。
+    """评委的完整 prompt:评分规则 + 简历材料 + 两张清单的判定项名(+ 往届判例)。
 
     答辩在它后面追加内容,所以必须是纯函数:同一份简历两次排出的文本逐字节相同。
+    单评委模式不带判例。
     """
+    anchors = "" if _mode_of(state) == "single" else _anchors_section(state, CHECKLISTS)
     return (
         load_prompt(PROMPT_FILE)
         + "\n\n---\n\n"
         + resume_material(state["fields"], _profile_of(state))
         + "\n\n"
         + _checklist_prompt()
+        + (f"\n\n{anchors}" if anchors else "")
     )
+
+
+def _anchors_section(state: EvaluationState, checklists: tuple[str, ...]) -> str:
+    """负责 checklists 这几张清单的评委要看的往届判例段;没有可用判例为空串。"""
+    return panel_anchors.render_anchors(state.get("anchors"), checklists)
+
+
+def _record_calibration(
+    card: dict[str, Any], state: EvaluationState, *, status: str | None = None
+) -> None:
+    """把校准案例的使用情况记到卡上(本周期不用校准案例时什么都不记)。
+
+    记的是本周期冻结的案例集水位、这次检索的结果、实际放进 prompt 的案例号。周期的
+    水位以它的第一张卡为准,所以每张卡都要记,包括没调模型的绝对卡(status 由调用方
+    指定为 skipped)。
+    """
+    anchors = state.get("anchors")
+    if not anchors:
+        return
+    used = [] if status else panel_anchors.used_case_ids(anchors)
+    card["panel"]["calibration"] = {
+        "set": anchors["set"],
+        "status": status or anchors["status"],
+        "used": used,
+    }
+    if used:
+        card["versions"].setdefault("prompts", {})["anchors"] = prompt_version(
+            panel_anchors.PROMPT_FILE
+        )
 
 
 async def _judge(
@@ -554,6 +590,7 @@ def _reviewed_card(
         prompts["rebuttal"] = prompt_version(panel_judges.REBUTTAL_PROMPT_FILE)
     card["versions"]["prompts"] = prompts
     card["panel"] = {"mode": _mode_of(state), **settlement.panel, "judges": judges, **panel_extra}
+    _record_calibration(card, state)
     return card
 
 
@@ -585,7 +622,7 @@ def route_to_panel_judges(state: EvaluationState) -> str | list[Send]:
     """绝对卡走硬 0 出卡;其余向每张清单的评委各发一路,各自独立上下文、互不参考。"""
     if state.get("hard_zero"):
         return "finalize_hard"
-    shared = {key: state[key] for key in ("resume_id", "fields", "profile")}
+    shared = {key: state.get(key) for key in ("resume_id", "fields", "profile", "anchors")}
     return [Send("panel_judge", {**shared, "checklist": checklist}) for checklist in CHECKLISTS]
 
 
@@ -600,6 +637,7 @@ async def panel_judge(state: EvaluationState, config: RunnableConfig | None = No
             material=resume_material(state["fields"], _profile_of(state)),
             scoring_prompt=load_prompt(PROMPT_FILE),
             sources=resume_sources(state["fields"]),
+            anchors_section=_anchors_section(state, (checklist,)),
             config=config,
         )
     except Exception as exc:  # noqa: BLE001 — 失败记进结果,由汇合节点落 error 态
@@ -649,7 +687,9 @@ async def panel_rebuttal(state: EvaluationState, config: RunnableConfig | None =
         model = build_model(get_effective_settings(), temperature=SCORING_TEMPERATURE)
         return await panel_judges.rebut(
             model,
-            base_prompt=panel_judges.judge_prompt(checklist, material, scoring_prompt),
+            base_prompt=panel_judges.judge_prompt(
+                checklist, material, scoring_prompt, _anchors_section(state, (checklist,))
+            ),
             judgement=state["judgement"],
             challenges=challenges,
             sources=resume_sources(state["fields"]),
@@ -833,6 +873,7 @@ async def run_evaluation(
     usage_out: dict[str, int | None] | None = None,
     correlation_id: str | None = None,
     mode: str = "single",
+    anchors: panel_anchors.Anchors | None = None,
 ) -> dict:
     """便捷入口:跑完整子图,返回卡 dict;LLM 失败抛 RuntimeError(job 落失败)。
 
@@ -841,7 +882,9 @@ async def run_evaluation(
     挂 Langfuse callbacks 并以 metadata.correlation_id 关联 trace(评测线
     trace 面此前未接线,配置了也不产生 trace)。
     mode 是评分模式(SCORING_MODES):本函数不替调用方决定用哪种——一个周期只能用
-    一种,由 runner 按周期固定后传进来。"""
+    一种,由 runner 按周期固定后传进来。
+    anchors 是这份简历能用的校准案例(往届判例);取案例要读库、算向量,由调用方
+    做好传进来,本图不碰 IO。None = 不用;单评委模式即使传了也不用。"""
     from official_agent.observability import langfuse_callbacks
 
     graph = build_evaluation_subgraph(mode)
@@ -859,6 +902,7 @@ async def run_evaluation(
             "profile": _profile_dict(profile or ApplicantProfile()),
             "weights": weights or {},
             "mode": mode,
+            "anchors": None if mode == "single" else anchors,
         },
         config=config,
     )

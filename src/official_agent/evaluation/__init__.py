@@ -9,6 +9,7 @@
 - panel/:初筛合议——拆开的评委、批判者、评委答辩、纯函数汇总(分歧只产出置信度,
   不产出分数)、主席
 - grounding.py:落地校验(引文是否在原文里);material.py:简历材料进 prompt 的统一排布
+- calibration.py:校准案例(往届判例)的取用、种子判例录入、往届一致卡收割
 - prompts/evaluation/scoring.md:打分 prompt(ADR-0004:唯一权威是文件);
   prompts/evaluation/panel/:批判者与答辩的 prompt
 

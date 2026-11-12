@@ -32,6 +32,7 @@ def _claim_always_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
 def _cycle_has_no_cards_yet(monkeypatch: pytest.MonkeyPatch) -> None:
     """定评分模式要查本周期的第一张卡(真库);缺省视为周期里还没有卡,取配置。"""
     monkeypatch.setattr(ev_runner.evaluation, "cycle_scoring_mode", lambda cycle_id: None)
+    monkeypatch.setattr(ev_runner.evaluation, "cycle_calibration_set", lambda cycle_id: None)
 
 # ── store 层(mock 连接) ────────────────────────────────
 
@@ -999,6 +1000,101 @@ async def test_pii_is_masked_before_every_split_judge_and_the_chair(monkeypatch)
                 assert leak not in prompt, f"{role} 的 prompt 泄漏:{leak}"
     assert "138****5678" in model.calls["技术部"][0]
     assert saved["card"]["panel"]["mode"] == "panel"
+
+
+# ── 校准案例:两个开关缺省关闭;水位按周期冻结 ──
+
+
+def test_calibration_switches_are_off_by_default() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.evaluation_calibration_enabled is False
+    assert settings.evaluation_calibration_harvest_enabled is False
+
+
+@pytest.mark.parametrize(
+    ("mode", "first_card_set", "enabled", "expected"),
+    [
+        ("critic", None, False, 0),  # 新周期、开关关着:不用校准案例
+        ("critic", None, True, 57),  # 新周期、开关开着:把当前的案例集定为本周期的标尺
+        ("panel", None, True, 57),
+        ("critic", 12, True, 12),  # 周期已经冻结在 12:之后新加的案例不影响它
+        ("critic", 12, False, 12),  # 开关中途关掉也不改变已经开跑的周期
+        ("critic", 0, True, 0),  # 周期开跑时没用校准案例:中途打开开关也不用
+        ("single", None, True, 0),  # 单评委模式不用校准案例
+    ],
+)
+async def test_calibration_set_is_frozen_per_cycle(
+    monkeypatch, mode, first_card_set, enabled, expected
+) -> None:
+    settings = Settings(_env_file=None, evaluation_calibration_enabled=enabled)
+    monkeypatch.setattr(ev_runner, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        ev_runner.evaluation, "cycle_calibration_set", lambda _cycle: first_card_set
+    )
+    monkeypatch.setattr(ev_runner.evaluation.calibration_store, "current_watermark", lambda: 57)
+
+    assert await ev_runner._calibration_set_for(2026, mode) == expected
+
+
+async def test_default_settings_never_touch_the_case_store_or_the_embedder(monkeypatch) -> None:
+    """开关缺省关着:评分路径既不读案例库,也不调嵌入服务,评分入口收不到判例。"""
+    seen: dict = {}
+
+    async def _fetch(user_id, cycle_id):
+        return 99, _fields(), ApplicantProfile()
+
+    async def _run_evaluation(fields, *, anchors, **_kw):
+        seen["anchors"] = anchors
+        return {"total": None, "hard_zero": False}
+
+    def _forbidden(*_a, **_k):
+        raise AssertionError("校准案例关着的时候不该走到这里")
+
+    monkeypatch.setattr(ev_runner, "get_settings", lambda: Settings(_env_file=None))
+    monkeypatch.setattr(ev_runner, "fetch_scoring_fields", _fetch)
+    monkeypatch.setattr(ev_runner, "run_evaluation", _run_evaluation)
+    monkeypatch.setattr(ev_runner.evaluation, "save_scorecard", lambda *a, **k: 1)
+    monkeypatch.setattr(ev_runner.evaluation.calibration_store, "current_watermark", _forbidden)
+    monkeypatch.setattr(ev_runner.calibration, "retrieve_for_resume", _forbidden)
+
+    await ev_runner._do_scoring({"user_id": 42}, 99, 2026, 1)
+
+    assert seen["anchors"] is None
+
+
+async def test_enabled_calibration_retrieves_from_masked_fields_and_passes_cases_on(
+    monkeypatch,
+) -> None:
+    """送去取判例(算向量)的文本与进评分模型的是同一份脱敏后的字段。"""
+    seen: dict = {}
+
+    async def _fetch(user_id, cycle_id):
+        return 99, [
+            FieldText(field_key="intro", title="自我介绍", value="写过小程序,电话 13812345678")
+        ], ApplicantProfile()
+
+    async def _retrieve(fields, *, resume_id, cycle_id, watermark):
+        seen["retrieve"] = (fields[0]["value"], resume_id, cycle_id, watermark)
+        return {"set": watermark, "status": "ok", "by_item": {}}
+
+    async def _run_evaluation(fields, *, anchors, mode, **_kw):
+        seen["anchors"], seen["mode"] = anchors, mode
+        return {"total": None, "hard_zero": False}
+
+    settings = Settings(_env_file=None, evaluation_calibration_enabled=True)
+    monkeypatch.setattr(ev_runner, "get_settings", lambda: settings)
+    monkeypatch.setattr(ev_runner, "fetch_scoring_fields", _fetch)
+    monkeypatch.setattr(ev_runner, "run_evaluation", _run_evaluation)
+    monkeypatch.setattr(ev_runner.evaluation, "save_scorecard", lambda *a, **k: 1)
+    monkeypatch.setattr(ev_runner.evaluation.calibration_store, "current_watermark", lambda: 57)
+    monkeypatch.setattr(ev_runner.calibration, "retrieve_for_resume", _retrieve)
+
+    await ev_runner._do_scoring({"user_id": 42}, 99, 2026, 1)
+
+    assert seen["retrieve"] == ("写过小程序,电话 138****5678", 99, 2026, 57)
+    assert seen["anchors"] == {"set": 57, "status": "ok", "by_item": {}}
+    assert seen["mode"] == "critic"
 
 
 async def test_generated_audit_records_mode_confidence_and_prompt_versions(monkeypatch) -> None:
