@@ -238,6 +238,37 @@ async def test_slow_analyst_times_out_instead_of_hanging_the_report(
     assert _sections(report)["data"]["status"] == graph.SECTION_OK
 
 
+async def test_waiting_for_the_model_gate_does_not_count_as_a_timeout(
+    snapshot, monkeypatch
+) -> None:
+    """初筛批量把模型并发闸占满时,复盘的调用排队再久也不该被判超时。"""
+    import weakref
+
+    from official_agent.config import get_settings
+    from official_agent.evaluation import llm_common
+
+    monkeypatch.setattr(get_settings(), "evaluation_model_concurrency", 1)
+    monkeypatch.setattr(llm_common, "_model_gates", weakref.WeakKeyDictionary())
+    monkeypatch.setattr(graph, "MODEL_CALL_TIMEOUT_SECONDS", 0.05)
+    holding = asyncio.Event()
+
+    async def _hold_the_gate() -> None:
+        async with llm_common.model_gate():
+            holding.set()
+            await asyncio.sleep(0.3)  # 远超单次调用的上限
+
+    holder = asyncio.create_task(_hold_the_gate())
+    await holding.wait()
+
+    report = await graph.run_retrospective(
+        snapshot, model=ScriptedModel({**ANALYSTS, "writer": WRITER})
+    )
+    await holder
+
+    assert {s["status"] for s in report["sections"]} == {graph.SECTION_OK}
+    assert report["writer_status"] == graph.WRITER_OK
+
+
 async def test_failed_writer_degrades_to_the_analysts_findings(snapshot) -> None:
     model = ScriptedModel({**ANALYSTS, "writer": RuntimeError("provider 500")})
 

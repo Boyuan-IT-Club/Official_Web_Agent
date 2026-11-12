@@ -44,7 +44,8 @@ logger = logging.getLogger(__name__)
 
 # 解读要稳定可复现:同一份快照重跑,发现不该大变。与评分同一个低温档
 _TEMPERATURE = 0.1
-# 单次模型调用(含校验回灌的重试)的墙钟上限;超时按该角色失败处理
+# 一次模型调用的墙钟上限;超时按该角色失败处理。只管调用本身:调用之前要先排队过
+# 模型并发闸(在 invoke_with_retry 里),初筛批量在跑时可能排很久,排队不算超时
 MODEL_CALL_TIMEOUT_SECONDS = 180
 # 撰稿人至多写两轮:第一稿,以及数字对不上时的一次回炉
 _MAX_WRITER_ROUNDS = 2
@@ -110,6 +111,18 @@ def _feedback(violations: list[tuple[str, grounding.Violation]]) -> str:
     )
 
 
+class _TimedModel:
+    """给每一次模型调用套上墙钟上限的薄壳;上限从调用真正发出时起算。"""
+
+    def __init__(self, model: Any) -> None:
+        self._model = model
+
+    async def ainvoke(self, messages: list, **kwargs: Any) -> Any:
+        return await asyncio.wait_for(
+            self._model.ainvoke(messages, **kwargs), timeout=MODEL_CALL_TIMEOUT_SECONDS
+        )
+
+
 def _ordered(analyses: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """固定成角色顺序,同样的输入出同样的报告——不依赖图框架归并并行分支的次序。"""
     by_role = {a["role"]: a for a in analyses}
@@ -118,6 +131,7 @@ def _ordered(analyses: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def build_graph(model: Any) -> Any:
     """装配并编译图。model 由调用方给(测试注入假模型),节点以闭包持有。"""
+    model = _TimedModel(model)
 
     async def analyze(payload: dict[str, Any]) -> dict[str, Any]:
         snapshot, role = payload["snapshot"], payload["role"]
@@ -126,15 +140,12 @@ def build_graph(model: Any) -> Any:
             return {"analyses": [{"role": role, "status": ANALYSIS_NO_DATA, "findings": []}]}
         prompt = roles.build_analyst_prompt(view)
         try:
-            output, usage = await asyncio.wait_for(
-                invoke_with_retry(
-                    model,
-                    prompt,
-                    parse=roles.parse_analyst,
-                    build_corrective=lambda exc: roles.corrective(exc, _ANALYST_FIELDS),
-                    fail_message=f"{role} 分析员两次输出均不合规",
-                ),
-                timeout=MODEL_CALL_TIMEOUT_SECONDS,
+            output, usage = await invoke_with_retry(
+                model,
+                prompt,
+                parse=roles.parse_analyst,
+                build_corrective=lambda exc: roles.corrective(exc, _ANALYST_FIELDS),
+                fail_message=f"{role} 分析员两次输出均不合规",
             )
         except Exception as exc:  # noqa: BLE001 — 模型侧的失败形态不可枚举(供应商异常、超时、不合规)
             # 降级而不是整份失败:这一节只列指标,其余两节照常。装配与闸门在
@@ -171,17 +182,14 @@ def build_graph(model: Any) -> Any:
             return {"draft": WriterDraft(), "writer_rounds": rounds}
         prompt = roles.build_writer_prompt(state["snapshot"], analyses) + state.get("feedback", "")
         try:
-            output, usage = await asyncio.wait_for(
-                invoke_with_retry(
-                    model,
-                    prompt,
-                    parse=roles.parse_writer,
-                    build_corrective=lambda exc: roles.corrective(exc, _WRITER_FIELDS),
-                    fail_message="撰稿人输出不合规",
-                    # 回炉那一轮不再给形状重试的机会:第一稿已经是合规的,退路在手
-                    attempts=2 if rounds == 1 else 1,
-                ),
-                timeout=MODEL_CALL_TIMEOUT_SECONDS,
+            output, usage = await invoke_with_retry(
+                model,
+                prompt,
+                parse=roles.parse_writer,
+                build_corrective=lambda exc: roles.corrective(exc, _WRITER_FIELDS),
+                fail_message="撰稿人输出不合规",
+                # 回炉那一轮不再给形状重试的机会:第一稿已经是合规的,退路在手
+                attempts=2 if rounds == 1 else 1,
             )
         except Exception:  # noqa: BLE001 — 同 analyze:模型侧失败形态不可枚举
             if rounds == 1:
