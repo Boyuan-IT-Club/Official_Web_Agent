@@ -88,7 +88,7 @@ src/official_agent/
 │   ├── config_admin.py     #   /admin/config:低敏热改 + 高敏掩码 + base_url 白名单
 │   ├── kb_admin.py         #   /admin/kb*:知识条目 CRUD/入库重嵌
 │   ├── evaluation_admin.py #   /admin/evaluation*:触发/队列/维卡/采纳/驳回/题库
-│   └── retrospective_admin.py # /admin/retrospective/snapshot*:触发指标快照采集/读取/对比基线
+│   └── retrospective_admin.py # /admin/retrospective/*:指标快照采集与读取;报告生成/审阅/发布
 ├── graphs/                 # 编排层:LangGraph 图
 │   ├── assistant/          #   A:build_assistant_agent(create_agent ReAct)+ 会话压缩
 │   ├── identity.py         #   JWT → ResolvedIdentity(权限码/角色/属主)
@@ -117,6 +117,7 @@ src/official_agent/
 │   ├── audit.py            #   agent_audit_log:审计(五字段,ADR-0006)
 │   ├── config_store.py     #   agent_config:热配置(DB 覆盖 env)
 │   └── retrospective/      #   包:snapshot_store(cycle_metrics_snapshot,只追加)/ aggregates(各域只读聚合)
+│                           #       / report_store(cycle_retrospective:报告版本与发布状态机)
 ├── tools/                  # 基础设施:后端 REST 的语义化封装
 │   ├── client.py           #   BackendClient + 异常层级(AuthError/UnavailableError/BackendError)
 │   ├── readonly.py         #   只读工具(按意图命名,60 秒按来问者缓存)
@@ -129,6 +130,9 @@ src/official_agent/
 ├── memory/                 # 长期记忆:store(agent_memory 表) / extract(后台提取+闸门) / recall(注入 system 末尾)
 ├── retrospective/          # 周期复盘:catalog(指标目录:id/名字/口径) / metrics(各域口径函数+collect_metrics)
 │                           #   / guard(小格子抑制) / compare(跨周期差值,跨指标定义版本拒绝)
+│                           #   / views(分析员的指标视图) / roles(四个角色的输出结构与闸门)
+│                           #   / grounding(数字落地守卫) / graph(扇出→撰稿→守卫回炉→成稿)
+│                           #   / render(Markdown 渲染) / reports(后台生成任务)
 ├── security/               # 横切:pii(脱敏)/ injection_guard(数据区+扫描)/ fabrication_guard
 ├── prompts/                # prompt 唯一权威(一图一节点一文件 + frontmatter,ADR-0004)
 ├── evals/                  # eval 集 + 统一 runner(python -m evals / evals/run_evals.py)
@@ -328,6 +332,7 @@ flowchart TD
 | `kb_source` / `kb_faq` / `kb_doc` / `kb_chunks` | 知识库来源/内容/向量 | 禁跨 embedding 模型混排;`kb_source.cycle_id` 非空的条目只在该招新周期开放时进检索 |
 | `kb_query_log` | 对话里每次知识库检索一行(脱敏后的问题/结局/门槛前最高分/命中条目/生效周期) | fail-open 写入;按 `thread_id` 随会话删除;`trace_id` 关联对话日志 |
 | `cycle_metrics_snapshot` | 每个招新周期的指标快照(过了小格子抑制的聚合数 + 当时的指标目录) | UNIQUE(cycle,version),只追加;没有 `thread_id`,不随会话删除或保留期清理 |
+| `cycle_retrospective` | 周期复盘报告(结构化正文/Markdown/被守卫删掉的句子/prompt 版本) | UNIQUE(cycle,version);状态机 CHECK;部分唯一索引:每周期至多一份已发布、一份在生成 |
 
 ## 9. 横切机制
 
@@ -385,8 +390,35 @@ flowchart TD
   这一届就没有基线。快照表不挂在任何清理路径上,存储模块也不提供删除或改写。
 - **失败语义**:单个数据源不可用只让用到它的域缺席并在快照里标注(只给类别与异常类名);
   口径函数里的程序错误不算「数据源不可用」,照常抛出。
-- 设计与取舍见 `docs/proposals/cycle-retrospective.md`;其后的分析员、撰稿人、报告与组织记忆
-  还是设计稿,没有实现。
+- 设计与取舍见 `docs/proposals/cycle-retrospective.md`。
+
+报告生成接在快照之后(`POST /admin/retrospective/run`,后台任务):
+
+```mermaid
+flowchart TD
+    RUN["POST …/run(evaluation:run)"] --> SNAP2["采一次快照(可附基线差值)"]
+    SNAP2 --> RES["report_store.start_report<br/>占一个版本:generating"]
+    RES -->|Send ×3| AN["analyze:三位分析员并行<br/>各自只拿到自己域的指标视图"]
+    AN --> SCR["roles.screen_analysis<br/>依据 / 数字 / 文字三道闸门,逐条丢弃"]
+    SCR --> WR["write:撰稿人<br/>只看发现与指标"]
+    WR --> GRD{"ground:数字落地守卫"}
+    GRD -->|有对不上的数,且没回炉过| WR
+    GRD --> ASM["assemble:删掉对不上的句子<br/>记入 unverified"]
+    ASM --> MD["render:标题/依据/指标表由代码生成"]
+    MD --> DRAFT["finish_report:draft"]
+    AN -.分析员失败.-> DEG1["该节只列指标"]
+    WR -.撰稿人失败.-> DEG2["各节直接列发现,标「未汇总」"]
+    DRAFT --> PUB["POST …/publish:先审计,再 published<br/>旧的已发布版 → superseded"]
+```
+
+- **模型只解读**:四个模型角色(prompt 在 `prompts/retrospective/`),交回来的每一条都要带指标 id、
+  数字要在引用的指标里对得上、文字不含个人信息与指令样文本;不合格的逐条丢弃并留痕。
+- **数字落地守卫**(`retrospective/grounding.py`)比对的是「这句话引用的指标」而不是整份快照;
+  模糊量词与中文数字的人数一律按对不上处理。
+- **任何一步失败都不让整份报告失败**:分析员失败 → 该节只列指标;撰稿人失败 → 直接列发现;
+  生成任务本身出错 → 该版本 `failed`,不影响已有版本。
+- **草稿只给有执行权的人看**;只有查看权的人只看得到已发布的版本。
+- 组织记忆(勾选教训、召回、到期)还是设计稿,没有实现。
 
 ## 文档地图
 

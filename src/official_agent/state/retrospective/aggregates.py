@@ -21,6 +21,8 @@ _EVALUATION_CHANNEL = "evaluation"
 
 # 评估用量行的 thread_id 形如 eval:<job_id>;位数上限防超长数字串转 bigint 溢出
 _EVAL_THREAD_PATTERN = "^eval:([0-9]{1,18})$"
+# 评分段用量行在 tools 列里的标记;题库段的行是 explore / grilling
+_SCORING_TOOL = "scoring"
 
 
 def conversation_aggregates(start: datetime, end: datetime) -> dict[str, Any]:
@@ -267,6 +269,9 @@ def evaluation_usage_aggregates(cycle_id: int) -> dict[str, int]:
 
     用量行按 thread_id(eval:<job_id>)关联回 evaluation_job 才知道属于哪个周期;
     只算真有 token 记录的行,metered_resumes 是这些行涉及的简历数。
+
+    只算题库段:评分段的用量行(tools 里带 scoring)不在其中——两段合在一起,
+    「题库段 token」这个口径就不成立了。
     """
     with pooled_conn() as conn:
         row = conn.execute(
@@ -279,7 +284,8 @@ def evaluation_usage_aggregates(cycle_id: int) -> dict[str, int]:
               ON j.job_id = substring(c.thread_id from %s)::bigint
             WHERE c.channel = %s AND j.cycle_id = %s
               AND (c.input_tokens IS NOT NULL OR c.output_tokens IS NOT NULL)
+              AND NOT jsonb_exists(c.tools, %s)
             """,
-            (_EVAL_THREAD_PATTERN, _EVALUATION_CHANNEL, cycle_id),
+            (_EVAL_THREAD_PATTERN, _EVALUATION_CHANNEL, cycle_id, _SCORING_TOOL),
         ).fetchone()
     return {k: int(v) for k, v in (row or {}).items()}

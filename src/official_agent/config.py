@@ -95,6 +95,11 @@ class Settings(BaseSettings):
     memory_recall_limit: int = 3
     memory_ttl_days: int = 180
 
+    # 周期复盘报告的生成(三位分析员 + 撰稿人,见 retrospective/graph.py)。默认关闭:
+    # 四份 prompt 要先在真实模型上跑过 evals 的 retro_probes 与 retro_injection 才能打开。
+    # 关着时指标快照的采集与读取照常可用,已有的报告也照常可读可发布
+    retrospective_report_enabled: bool = False
+
     # 初筛 job 后台领取循环的间隔(秒);0 = 关闭(只靠提交时派发 + 重启恢复)
     evaluation_claim_interval_seconds: int = 30
 

@@ -102,6 +102,10 @@ class CycleWindowError(ValueError):
     """周期在,但起止日期缺失或不成区间;消息是面向管理面的受控文案。"""
 
 
+class SourceUnavailableError(RuntimeError):
+    """某个数据源这次没有数据;消息是写进快照的受控文案。"""
+
+
 @dataclass(frozen=True)
 class CycleWindow:
     """周期的时间窗,半开区间 [start, end)。"""
@@ -408,13 +412,63 @@ _COLLECTORS: tuple[
     (DOMAIN_COST, _collect_cost),
 )
 
+class _CannedSources(_Sources):
+    """拿现成的原始聚合充当数据源,不碰后端与数据库。
+
+    eval 与测试用它造合成快照:口径、抑制、快照结构都走真实代码,只有取数被替换。
+    没给的域按数据源不可用处理。
+    """
+
+    def __init__(
+        self,
+        cycle_id: int,
+        aggregates: Mapping[str, Any],
+        *,
+        window: CycleWindow | None,
+        kb_min_score: float,
+    ) -> None:
+        super().__init__(cycle_id, kb_min_score=kb_min_score)
+        self._aggregates = aggregates
+        self._window = window
+
+    def _given(self, name: str) -> Any:
+        if name not in self._aggregates:
+            raise SourceUnavailableError("合成快照没有提供这个域的数据")
+        return self._aggregates[name]
+
+    async def window(self) -> CycleWindow:
+        if self._window is None:
+            raise SourceUnavailableError("合成快照没有给周期时间窗")
+        return self._window
+
+    async def funnel(self) -> dict[str, Any]:
+        return self._given("funnel")
+
+    async def conversation(self) -> dict[str, Any]:
+        return self._given("conversation")
+
+    async def kb(self) -> dict[str, int]:
+        return self._given("kb")
+
+    async def screening(self) -> dict[str, Any]:
+        return self._given("screening")
+
+    async def qbank(self) -> dict[str, Any]:
+        return self._given("qbank")
+
+    async def evaluation_usage(self) -> dict[str, int]:
+        return self._given("evaluation_usage")
+
+
 # 数据源不可用的几种形态。只认这些:口径函数里的程序错误不该被当成「数据源
 # 不可用」吞掉,要照常抛出去。
-_SOURCE_ERRORS = (BackendError, psycopg.Error, CycleWindowError)
+_SOURCE_ERRORS = (BackendError, psycopg.Error, CycleWindowError, SourceUnavailableError)
 
 
 def _unavailable_reason(exc: Exception) -> str:
     """数据源失败 → 写进快照的原因。只给类别与异常类名,异常原文留在日志里。"""
+    if isinstance(exc, SourceUnavailableError):
+        return str(exc)
     if isinstance(exc, CycleWindowError):
         return f"周期时间窗取不到:{exc}"
     if isinstance(exc, BackendError):
@@ -431,8 +485,29 @@ async def collect_metrics(cycle_id: int) -> dict[str, Any]:
     Raises:
         CycleNotFoundError: 后端查不到这个周期。
     """
-    kb_min_score = float(get_settings().kb_min_score)
-    src = _Sources(cycle_id, kb_min_score=kb_min_score)
+    return await _collect(_Sources(cycle_id, kb_min_score=float(get_settings().kb_min_score)))
+
+
+async def snapshot_from_aggregates(
+    cycle_id: int,
+    aggregates: Mapping[str, Any],
+    *,
+    window: CycleWindow | None = None,
+    kb_min_score: float = 0.45,
+) -> dict[str, Any]:
+    """用现成的原始聚合拼一份快照正文,不碰后端与数据库(eval 与测试造合成快照用)。
+
+    aggregates 的键是 funnel / conversation / kb / screening / qbank /
+    evaluation_usage,值的形状与对应的取数函数返回一致;没给的域标 unavailable。
+    """
+    return await _collect(
+        _CannedSources(cycle_id, aggregates, window=window, kb_min_score=kb_min_score)
+    )
+
+
+async def _collect(src: _Sources) -> dict[str, Any]:
+    """逐域取数、过口径与抑制,拼成快照正文。"""
+    cycle_id, kb_min_score = src.cycle_id, src.kb_min_score
     # 先取时间窗:周期不存在在这里就抛出去,不会走到任何一个域
     try:
         window: CycleWindow | None = await src.window()
@@ -452,7 +527,8 @@ async def collect_metrics(cycle_id: int) -> dict[str, Any]:
                 "复盘指标采集:数据源不可用,该域缺席 cycle_id=%s domain=%s",
                 cycle_id,
                 domain,
-                exc_info=True,
+                # 合成快照故意不给某个域是预期内的,不需要堆栈
+                exc_info=not isinstance(exc, SourceUnavailableError),
             )
             domains[domain] = {"status": STATUS_UNAVAILABLE, "reason": _unavailable_reason(exc)}
             continue

@@ -1,6 +1,7 @@
-"""周期复盘的状态面(包):指标快照表 + 跨表只读聚合。
+"""周期复盘的状态面(包):指标快照表、报告表、跨表只读聚合。
 
 - snapshot_store:cycle_metrics_snapshot 表,只追加、长期保留
+- report_store:cycle_retrospective 表,报告的版本与发布状态(按子模块引用,不在这里转出)
 - aggregates:按周期从对话日志、检索日志、评估三表里数出原始聚合,只读
 """
 

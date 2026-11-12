@@ -394,3 +394,409 @@ def test_read_store_failure_is_a_stable_500(client: TestClient, monkeypatch, sto
     for url in (SNAPSHOT, SNAPSHOTS):
         resp = client.get(url, params={"cycle_id": 12}, headers=_AUTH)
         assert (resp.status_code, resp.json()["detail"]) == (500, "查询指标快照失败,请稍后重试")
+
+
+# ── 报告接口 ────────────────────────────────────────────
+
+RUN = "/api/agent/admin/retrospective/run"
+REPORT = "/api/agent/admin/retrospective/report"
+REPORTS = "/api/agent/admin/retrospective/reports"
+PUBLISH = "/api/agent/admin/retrospective/publish"
+
+
+def _report(version: int = 1, status: str = "draft", **over):
+    from official_agent.state.retrospective.report_store import ReportRecord
+
+    fields = {
+        "cycle_id": 12,
+        "version": version,
+        "status": status,
+        "metrics_schema": catalog.METRICS_SCHEMA,
+        "snapshot_version": 1,
+        "baseline_cycle_id": None,
+        "baseline_snapshot_version": None,
+        "sections": {"writer_status": "ok", "lessons": []},
+        "report_md": "# 报告正文",
+        "unverified": [],
+        "prompt_versions": {"writer": "retrospective_writer/v1"},
+        "usage": {"input_tokens": 400, "output_tokens": 40},
+        "error": None,
+        "created_by": 3,
+        "created_at": datetime(2026, 11, 20, 8, 0, tzinfo=UTC),
+        "finished_at": datetime(2026, 11, 20, 8, 3, tzinfo=UTC),
+        "published_by": None,
+        "published_at": None,
+    }
+    fields.update(over)
+    return ReportRecord(**fields)
+
+
+class _Reports:
+    """替换报告表、后台生成与审计;记录调用次序。"""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.records: list = []
+        self.events: list[tuple] = []
+        self.start_error: Exception | None = None
+        self.audit_error: Exception | None = None
+        self.publish_error: Exception | None = None
+        target = "official_agent.web.retrospective_admin"
+        monkeypatch.setattr(f"{target}.report_store.start_report", self.start)
+        monkeypatch.setattr(f"{target}.report_store.get_report", self.get)
+        monkeypatch.setattr(f"{target}.report_store.list_reports", self.list)
+        monkeypatch.setattr(f"{target}.report_store.publish_report", self.publish)
+        monkeypatch.setattr(f"{target}.reports.spawn_generation", self.spawn)
+        monkeypatch.setattr(f"{target}.audit.write_audit", self.audit)
+
+    def named(self, name: str) -> list[dict]:
+        return [payload for event, payload in self.events if event == name]
+
+    def start(self, **kwargs) -> int:
+        if self.start_error:
+            raise self.start_error
+        self.events.append(("start", kwargs))
+        return 5
+
+    def spawn(self, **kwargs) -> None:
+        self.events.append(("spawn", kwargs))
+
+    def audit(self, **kwargs) -> None:
+        if self.audit_error:
+            raise self.audit_error
+        self.events.append(("audit", kwargs))
+
+    def get(self, cycle_id, *, version=None, published_only=False):
+        self.events.append(("get", {"version": version, "published_only": published_only}))
+        matches = [
+            r
+            for r in self.records
+            if r.cycle_id == cycle_id
+            and (version is None or r.version == version)
+            and (not published_only or r.status == "published")
+        ]
+        return max(matches, key=lambda r: r.version) if matches else None
+
+    def list(self, cycle_id, *, published_only=False):
+        self.events.append(("list", {"published_only": published_only}))
+        return [
+            {"cycle_id": r.cycle_id, "version": r.version, "status": r.status}
+            for r in sorted(self.records, key=lambda r: -r.version)
+            if r.cycle_id == cycle_id and (not published_only or r.status == "published")
+        ]
+
+    def publish(self, cycle_id, version, *, published_by):
+        if self.publish_error:
+            raise self.publish_error
+        self.events.append(("publish", {"version": version, "published_by": published_by}))
+        return _report(
+            version,
+            "published",
+            published_by=published_by,
+            published_at=datetime(2026, 11, 21, tzinfo=UTC),
+        )
+
+
+@pytest.fixture
+def report_api(monkeypatch: pytest.MonkeyPatch) -> _Reports:
+    from official_agent.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "retrospective_report_enabled", True)
+    return _Reports(monkeypatch)
+
+
+def test_report_generation_is_off_by_default() -> None:
+    """四份 prompt 还没在真实模型上验证过:上线不等于启用。"""
+    from official_agent.config import Settings
+
+    assert Settings(_env_file=None).retrospective_report_enabled is False
+
+
+def test_run_does_nothing_while_generation_is_switched_off(
+    client: TestClient, monkeypatch, report_api, store, collected
+) -> None:
+    from official_agent.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "retrospective_report_enabled", False)
+    _login(monkeypatch, ["evaluation:run"])
+
+    resp = client.post(RUN, json={"cycle_id": 12}, headers=_AUTH)
+
+    assert resp.status_code == 503
+    assert "RETROSPECTIVE_REPORT_ENABLED" in resp.json()["detail"]
+    assert collected == [] and store.saved == [] and report_api.events == []  # 连快照都不采
+
+
+def test_existing_reports_stay_readable_and_publishable_while_switched_off(
+    client: TestClient, monkeypatch, report_api
+) -> None:
+    from official_agent.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "retrospective_report_enabled", False)
+    report_api.records.append(_report(2, "draft"))
+    _login(monkeypatch, ["evaluation:run"])
+    assert client.get(REPORT, params={"cycle_id": 12}, headers=_AUTH).status_code == 200
+    published = client.post(PUBLISH, json={"cycle_id": 12, "version": 2}, headers=_AUTH)
+    assert published.status_code == 200
+
+
+def test_report_endpoints_require_a_token(client: TestClient, report_api, store, collected) -> None:
+    assert client.post(RUN, json={"cycle_id": 12}).status_code == 401
+    assert client.post(PUBLISH, json={"cycle_id": 12, "version": 1}).status_code == 401
+    assert client.get(REPORT, params={"cycle_id": 12}).status_code == 401
+    assert client.get(REPORTS, params={"cycle_id": 12}).status_code == 401
+    assert report_api.events == [] and collected == []
+
+
+@pytest.mark.parametrize("codes", [["resume:audit"], ["agent:monitor", "kb:manage"], []])
+def test_generating_and_publishing_need_the_run_permission(
+    client: TestClient, monkeypatch, report_api, store, collected, codes: list[str]
+) -> None:
+    report_api.records.append(_report())
+    _login(monkeypatch, codes)
+    run = client.post(RUN, json={"cycle_id": 12}, headers=_AUTH)
+    publish = client.post(PUBLISH, json={"cycle_id": 12, "version": 1}, headers=_AUTH)
+    assert (run.status_code, publish.status_code) == (403, 403)
+    assert report_api.events == [] and collected == []  # 被拒的请求什么都没触发
+
+
+@pytest.mark.parametrize("codes", [["agent:monitor", "kb:manage"], ["candidate:read:own"], []])
+def test_reading_reports_needs_a_review_permission(
+    client: TestClient, monkeypatch, report_api, codes: list[str]
+) -> None:
+    report_api.records.append(_report(status="published"))
+    _login(monkeypatch, codes)
+    for url in (REPORT, REPORTS):
+        resp = client.get(url, params={"cycle_id": 12}, headers=_AUTH)
+        assert resp.status_code == 403, url
+        assert "报告正文" not in resp.text
+    assert report_api.events == []
+
+
+def test_run_takes_a_snapshot_reserves_a_version_and_generates_in_background(
+    client: TestClient, monkeypatch, report_api, store, collected
+) -> None:
+    _login(monkeypatch, ["evaluation:run"], user_id=42)
+
+    resp = client.post(RUN, json={"cycle_id": 12}, headers=_AUTH)
+
+    assert resp.status_code == 202
+    assert resp.json() == {
+        "cycle_id": 12,
+        "version": 5,
+        "status": "generating",
+        "snapshot_version": 1,
+        "baseline_cycle_id": None,
+    }
+    assert collected == [12] and store.saved[0]["taken_by"] == 42  # 先采一次快照
+    assert report_api.named("start") == [
+        {
+            "cycle_id": 12,
+            "metrics_schema": catalog.METRICS_SCHEMA,
+            "snapshot_version": 1,
+            "baseline_cycle_id": None,
+            "baseline_snapshot_version": None,
+            "created_by": 42,
+        }
+    ]
+    (spawned,) = report_api.named("spawn")
+    assert (spawned["cycle_id"], spawned["version"]) == (12, 5)
+    assert spawned["snapshot"] == _body(12)  # 交给分析员的就是刚存下的那份快照
+    assert [event for event, _ in report_api.events] == ["start", "spawn"]
+
+
+def test_run_against_a_baseline_hands_the_analysts_precomputed_changes(
+    client: TestClient, monkeypatch, report_api, store, collected
+) -> None:
+    store.records.append(_record(cycle_id=11, version=4, metrics=_body(11, resumes=200)))
+    _login(monkeypatch, ["evaluation:run"])
+
+    resp = client.post(RUN, json={"cycle_id": 12, "baseline_cycle_id": 11}, headers=_AUTH)
+
+    assert resp.status_code == 202 and resp.json()["baseline_cycle_id"] == 11
+    started = report_api.named("start")[0]
+    assert (started["baseline_cycle_id"], started["baseline_snapshot_version"]) == (11, 4)
+    metric = report_api.named("spawn")[0]["snapshot"]["metrics"][0]
+    assert (metric["value"], metric["prev"], metric["delta"]) == (213, 200, 13)
+
+
+@pytest.mark.parametrize(
+    ("baseline", "status"),
+    [(5, 404), (12, 400), (11, 409)],  # 没有快照 / 就是本周期 / 只有别的指标定义版本
+)
+def test_run_with_an_unusable_baseline_starts_nothing(
+    client: TestClient, monkeypatch, report_api, store, collected, baseline: int, status: int
+) -> None:
+    store.records.append(_record(cycle_id=11, metrics=_body(11, schema="cycle_metrics/v0")))
+    _login(monkeypatch, ["evaluation:run"])
+    resp = client.post(RUN, json={"cycle_id": 12, "baseline_cycle_id": baseline}, headers=_AUTH)
+    assert resp.status_code == status
+    assert report_api.events == []
+
+
+def test_run_while_another_report_is_generating_is_409(
+    client: TestClient, monkeypatch, report_api, store, collected
+) -> None:
+    from official_agent.state.retrospective.report_store import ReportInProgressError
+
+    report_api.start_error = ReportInProgressError("周期 12 已有一份报告正在生成")
+    _login(monkeypatch, ["evaluation:run"])
+    resp = client.post(RUN, json={"cycle_id": 12}, headers=_AUTH)
+    assert (resp.status_code, resp.json()["detail"]) == (409, "周期 12 已有一份报告正在生成")
+    assert report_api.named("spawn") == []
+
+
+def test_run_for_an_unknown_cycle_is_404_and_reserves_nothing(
+    client: TestClient, monkeypatch, report_api, store
+) -> None:
+    async def _collect(cycle_id: int) -> dict:
+        raise metrics.CycleNotFoundError(cycle_id)
+
+    monkeypatch.setattr(metrics, "collect_metrics", _collect)
+    _login(monkeypatch, ["evaluation:run"])
+    assert client.post(RUN, json={"cycle_id": 999}, headers=_AUTH).status_code == 404
+    assert report_api.events == []
+
+
+def test_run_reservation_failure_is_a_stable_500(
+    client: TestClient, monkeypatch, report_api, store, collected
+) -> None:
+    report_api.start_error = RuntimeError("deadlock detected at 10.0.0.5")
+    _login(monkeypatch, ["evaluation:run"])
+    resp = client.post(RUN, json={"cycle_id": 12}, headers=_AUTH)
+    assert (resp.status_code, resp.json()["detail"]) == (500, "创建报告失败,请稍后重试")
+    assert report_api.named("spawn") == []
+
+
+def test_reviewer_with_run_permission_reads_drafts(
+    client: TestClient, monkeypatch, report_api
+) -> None:
+    report_api.records += [_report(1, "published"), _report(2, "draft", report_md="# 草稿")]
+    _login(monkeypatch, ["evaluation:run"])
+
+    latest = client.get(REPORT, params={"cycle_id": 12}, headers=_AUTH)
+    pinned = client.get(REPORT, params={"cycle_id": 12, "version": 1}, headers=_AUTH)
+    listed = client.get(REPORTS, params={"cycle_id": 12}, headers=_AUTH)
+
+    body = latest.json()
+    assert (body["version"], body["status"], body["report_md"]) == (2, "draft", "# 草稿")
+    assert set(body) >= {
+        "cycle_id", "version", "status", "metrics_schema", "snapshot_version",
+        "baseline_cycle_id", "sections", "report_md", "unverified", "prompt_versions",
+        "usage", "error", "created_by", "created_at", "finished_at", "published_by",
+        "published_at",
+    }
+    assert pinned.json()["status"] == "published"
+    assert [i["version"] for i in listed.json()["items"]] == [2, 1]
+    assert all(p["published_only"] is False for _, p in report_api.events)
+
+
+def test_reader_without_run_permission_sees_only_published_reports(
+    client: TestClient, monkeypatch, report_api
+) -> None:
+    """草稿是没人审过的模型产出:只有查看权的人,连它存在与否都看不到。"""
+    report_api.records += [_report(1, "published"), _report(2, "draft", report_md="# 草稿")]
+    _login(monkeypatch, ["resume:audit"])
+
+    latest = client.get(REPORT, params={"cycle_id": 12}, headers=_AUTH)
+    draft = client.get(REPORT, params={"cycle_id": 12, "version": 2}, headers=_AUTH)
+    listed = client.get(REPORTS, params={"cycle_id": 12}, headers=_AUTH)
+
+    assert (latest.status_code, latest.json()["version"]) == (200, 1)
+    assert (draft.status_code, draft.json()["detail"]) == (404, "该周期还没有已发布的报告")
+    assert "草稿" not in draft.text
+    assert [i["version"] for i in listed.json()["items"]] == [1]
+    assert all(p["published_only"] is True for _, p in report_api.events)
+
+
+def test_report_not_found_messages(client: TestClient, monkeypatch, report_api) -> None:
+    report_api.records.append(_report(1))
+    _login(monkeypatch, ["evaluation:run"])
+    none_yet = client.get(REPORT, params={"cycle_id": 77}, headers=_AUTH)
+    no_version = client.get(REPORT, params={"cycle_id": 12, "version": 9}, headers=_AUTH)
+    assert (none_yet.status_code, none_yet.json()["detail"]) == (404, "该周期还没有报告")
+    assert (no_version.status_code, no_version.json()["detail"]) == (404, "指定版本的报告不存在")
+
+
+def test_publish_writes_the_audit_record_before_changing_anything(
+    client: TestClient, monkeypatch, report_api
+) -> None:
+    report_api.records.append(_report(2, "draft"))
+    _login(monkeypatch, ["evaluation:run"], user_id=42)
+
+    resp = client.post(PUBLISH, json={"cycle_id": 12, "version": 2}, headers=_AUTH)
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "published" and resp.json()["published_by"] == 42
+    assert [event for event, _ in report_api.events] == ["get", "audit", "publish"]
+    (record,) = report_api.named("audit")
+    assert record["action"] == {"op": "publish_retrospective", "cycle_id": 12, "version": 2}
+    assert record["acting_user_id"] == 42 and record["decision"] == "u42:publish"
+    assert record["channel"] == "retrospective" and record["thread_id"].startswith("retro:12:")
+    assert report_api.named("publish") == [{"version": 2, "published_by": 42}]
+
+
+def test_publish_is_refused_when_the_audit_record_cannot_be_written(
+    client: TestClient, monkeypatch, report_api
+) -> None:
+    report_api.records.append(_report(2, "draft"))
+    report_api.audit_error = RuntimeError("pg down")
+    _login(monkeypatch, ["evaluation:run"])
+
+    resp = client.post(PUBLISH, json={"cycle_id": 12, "version": 2}, headers=_AUTH)
+
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "审计服务不可用,报告未发布,请稍后重试"
+    assert report_api.named("publish") == []  # 没有审计就不发布
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [("generating", 409), ("failed", 409), ("published", 409), ("superseded", 409)],
+)
+def test_publish_of_a_non_draft_is_409_without_side_effects(
+    client: TestClient, monkeypatch, report_api, status: str, expected: int
+) -> None:
+    report_api.records.append(_report(2, status))
+    _login(monkeypatch, ["evaluation:run"])
+    resp = client.post(PUBLISH, json={"cycle_id": 12, "version": 2}, headers=_AUTH)
+    assert resp.status_code == expected and status in resp.json()["detail"]
+    assert report_api.named("audit") == [] and report_api.named("publish") == []
+
+
+def test_publish_of_a_missing_version_is_404_without_side_effects(
+    client: TestClient, monkeypatch, report_api
+) -> None:
+    _login(monkeypatch, ["evaluation:run"])
+    resp = client.post(PUBLISH, json={"cycle_id": 12, "version": 9}, headers=_AUTH)
+    assert (resp.status_code, resp.json()["detail"]) == (404, "指定版本的报告不存在")
+    assert report_api.named("audit") == [] and report_api.named("publish") == []
+
+
+def test_publish_losing_a_race_is_409(client: TestClient, monkeypatch, report_api) -> None:
+    """验版本时还是草稿,真去发布时已被别人发布。"""
+    from official_agent.state.retrospective.report_store import ReportNotPublishableError
+
+    report_api.records.append(_report(2, "draft"))
+    report_api.publish_error = ReportNotPublishableError("published")
+    _login(monkeypatch, ["evaluation:run"])
+    resp = client.post(PUBLISH, json={"cycle_id": 12, "version": 2}, headers=_AUTH)
+    assert resp.status_code == 409 and "published" in resp.json()["detail"]
+
+
+def test_publish_store_failure_is_a_stable_500(
+    client: TestClient, monkeypatch, report_api
+) -> None:
+    report_api.records.append(_report(2, "draft"))
+    report_api.publish_error = RuntimeError("could not serialize access at 10.0.0.5")
+    _login(monkeypatch, ["evaluation:run"])
+    resp = client.post(PUBLISH, json={"cycle_id": 12, "version": 2}, headers=_AUTH)
+    assert (resp.status_code, resp.json()["detail"]) == (500, "发布报告失败,请稍后重试")
+
+
+@pytest.mark.parametrize("bad", [{}, {"cycle_id": 12}, {"cycle_id": 12, "version": 0}])
+def test_publish_validates_its_body(
+    client: TestClient, monkeypatch, report_api, bad: dict
+) -> None:
+    _login(monkeypatch, ["evaluation:run"])
+    assert client.post(PUBLISH, json=bad, headers=_AUTH).status_code == 422
+    assert report_api.events == []

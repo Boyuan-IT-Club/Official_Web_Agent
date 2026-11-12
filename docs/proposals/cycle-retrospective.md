@@ -1,7 +1,8 @@
 # 招新周期复盘报告
 
-> 提案 v0.1 · 2026-11-11 · 状态:**P1 已实现**(指标目录、`collect_metrics`、快照表与管理面
-> 接口,见 §10 进度);P2–P4 是设计稿,没有实现。范围 = 管理面触发的离线批处理(新包
+> 提案 v0.1 · 2026-11-11 · 状态:**P1 已实现**(指标快照);**P2 已实现、验收未完成**(分析员、
+> 撰稿人、数字落地守卫、草稿与发布的机制与测试都在,但 eval 没跑过真模型、也还没有管理员审过
+> 一份真实报告,见 §10 进度);P3–P4 是设计稿,没有实现。范围 = 管理面触发的离线批处理(新包
 > `retrospective/`)与三张新表;**不改 A 模块的对话回合,不改后端,不新增后端写工具**。
 > 共同约束见 [README](README.md)。
 
@@ -84,6 +85,21 @@ flowchart TD
 (或在白名单里,如年份、章节编号),对不上就把清单交回撰稿人改一次,仍对不上的句子删掉并在
 草稿上标注。这是 README 里「落地校验」模式在报告上的用法。
 
+守卫落地时的几条取舍(`retrospective/grounding.py`):
+
+- **比对的是这句话引用的指标,不是整份快照**。快照里有几百个数,编出来的数很容易碰巧和某个
+  不相干的指标相等;所以每段文字都要带 `metric_ids`,数字只和这几个指标的值、样本量、基线值、
+  差值比。
+- **约数按写出的精度核对**:「963 万」对得上 9,634,112,「960 万」对不上;「25.3%」对得上
+  0.2534,「25.6%」对不上。不带单位的整数必须一字不差。比率的差只认「个百分点」——写成百分比
+  分不清是相对变化还是百分点差。
+- **守卫看不懂的量一律按对不上处理**:「三成」「翻倍」「过半」这类模糊量词,以及「两人」「三名」
+  这类中文数字的人数(后者正是小格子换个写法)。prompt 里也明令不用。这部分是启发式的,宁可
+  多删一句无害的话(开放问题 6 就此定下)。
+- 白名单只有:时间窗的首尾两天、带「年 / 届」的年份、本周期与基线周期的编号、分位数标记、
+  列表序号、「不足 5」这类抑制用语,以及采集参数。
+- 分析员的发现也过同一个守卫:数字对不上的发现直接丢掉,不进撰稿人的视野。
+
 ### D2 · 三位分析员并行、互不可见;下钻只走白名单聚合
 
 | 分析员 | 读的指标域 | 回答的问题 |
@@ -99,11 +115,27 @@ flowchart TD
 工具:维度与过滤条件都从枚举里选,返回的仍是聚合数。不提供自由 SQL,不提供读原始行的工具。
 带工具时走受限循环,预算双闸(初值 10 轮 / 120 秒)。
 
+已实现的是单次调用;**下钻工具没有做**——快照已经按部门、渠道、题组类别拆好,先看真实报告里
+分析员是不是真的缺维度再决定。实现上的几点(`retrospective/views.py`、`roles.py`):
+
+- 视图按角色裁好再进 prompt:数据分析员只有漏斗域,问答分析员是对话域、知识库域加对话的 token
+  总量,评估分析员是初筛、人机一致、出题三个域加评估的 token。每个指标值恰好归一位。
+- 某位分析员的域都没有数据时不调用模型,那一节直接标「数据不可用」。
+- 模型交回的每条发现逐条过闸门,不合格的丢弃并留痕,不连累别的条:依据(`metric_ids` 非空且都
+  在这位分析员看得到的指标里)、数字(上面的守卫)、文字(不含个人信息、不像指令、不超长)。
+- 评估分析员另外可以提**评分条款候选**,过同样的闸门,随报告留给人看(P4 的汇合点)。
+
 ### D3 · 撰稿人只看发现与指标
 
 撰稿人看不到任何原始数据,输入只有三份发现和指标快照。它的工作是去重、排优先级、写成人读的
 段落,并提出**候选教训**。它不能引入新的事实——守卫会拦住新数字,而没有指标 id 支撑的断言在
 prompt 里明令禁止,并由 eval 检查。
+
+实现上再加三道代码约束:每一节只能引用这一节的指标(跨域的综合放在总述和教训里);分析员
+没有产出的那一节,撰稿人写了也不收;撰稿人漏写某一节、或写的全被守卫删掉时,该节退回分析员的
+发现——分析员指出的现象不能在汇总这一步悄悄丢掉。分析员过闸门后的原始发现随报告留底
+(`sections[].findings`),审阅的人可以对照撰稿人改写了什么。撰稿人至多写两轮:第一稿,以及
+数字对不上时的一次回炉。
 
 ### D4 · 只报聚合,小格子抑制
 
@@ -192,6 +224,19 @@ prompt 里明令禁止,并由 eval 检查。
 具体版本;已发布的报告不可改,只能发布新版本取代。每个版本记下全部四份 prompt 的版本与指标
 定义版本。
 
+生成要调四次模型,耗时以分钟计,所以是后台任务,报告因此多出两个状态:
+
+```
+generating ──→ draft ──→ published ──→ superseded
+     └──→ failed
+```
+
+接口先占一个版本(`generating`)就返回,模型跑完填正文转 `draft`,失败转 `failed` 并留原因。
+同一周期同时只允许一份在生成;停在 `generating` 超过 15 分钟的版本(进程在生成途中退出)在下次
+生成或读取时被判为失败,迟到的结果不再写入。只有 `draft` 能发布,同一周期同时只有一份 `published`
+(应用层按周期加锁,数据库再用部分唯一索引兜底)。正文写入后不再改——没有改写草稿的接口,要改
+就重新生成一版。每个版本还记下它依据的快照版本、对比的基线周期与模型名。
+
 ## 5. 数据面
 
 快照部分(指标目录、`cycle_metrics_snapshot`、三个快照接口)是已实现的形态;报告与组织记忆的表
@@ -259,25 +304,35 @@ CREATE TABLE IF NOT EXISTS cycle_metrics_snapshot (
     UNIQUE (cycle_id, version)
 );
 
--- 以下两张是示意(P2、P3)
-
+-- 已实现(state/retrospective/report_store.py)
 CREATE TABLE IF NOT EXISTS cycle_retrospective (
-    id              bigserial   PRIMARY KEY,
-    cycle_id        int         NOT NULL,
-    version         int         NOT NULL,
-    status          text        NOT NULL DEFAULT 'draft'
-                    CHECK (status IN ('draft', 'published', 'superseded')),
-    metrics_schema  text        NOT NULL,
-    sections        jsonb       NOT NULL,
-    report_md       text        NOT NULL,
-    unverified      jsonb       NOT NULL DEFAULT '[]',
-    prompt_versions jsonb       NOT NULL,
-    created_by      int         NOT NULL,
-    created_at      timestamptz NOT NULL DEFAULT now(),
-    published_by    int,
-    published_at    timestamptz,
+    id                        bigserial   PRIMARY KEY,
+    cycle_id                  int         NOT NULL,
+    version                   int         NOT NULL,   -- 按周期递增
+    status                    text        NOT NULL DEFAULT 'generating'
+        CHECK (status IN ('generating', 'draft', 'failed', 'published', 'superseded')),
+    metrics_schema            text        NOT NULL,
+    snapshot_version          int         NOT NULL,   -- 依据的快照版本
+    baseline_cycle_id         int,                    -- 对比的基线周期(可空)
+    baseline_snapshot_version int,
+    sections                  jsonb       NOT NULL DEFAULT '{}',
+    report_md                 text        NOT NULL DEFAULT '',
+    unverified                jsonb       NOT NULL DEFAULT '[]',
+    prompt_versions           jsonb       NOT NULL DEFAULT '{}',
+    usage                     jsonb       NOT NULL DEFAULT '{}',   -- 本次生成的 token 用量
+    error                     text,                   -- failed 时的原因摘要
+    created_by                int         NOT NULL,
+    created_at                timestamptz NOT NULL DEFAULT now(),
+    finished_at               timestamptz,
+    published_by              int,
+    published_at              timestamptz,
     UNIQUE (cycle_id, version)
 );
+-- 同一周期至多一份已发布、至多一份在生成
+CREATE UNIQUE INDEX … ON cycle_retrospective (cycle_id) WHERE status = 'published';
+CREATE UNIQUE INDEX … ON cycle_retrospective (cycle_id) WHERE status = 'generating';
+
+-- 以下是示意(P3)
 
 CREATE TABLE IF NOT EXISTS org_memory (
     memory_id    bigserial   PRIMARY KEY,
@@ -298,7 +353,11 @@ CREATE TABLE IF NOT EXISTS org_memory (
 ```
 
 `sections` 是结构化的报告(每节的发现、依据的指标 id、候选教训),`report_md` 是渲染结果;
-`unverified` 记守卫删掉的句子,供审阅者知道哪里被动过。`evidence` 存报告版本与指标 id。
+`unverified` 记守卫删掉的句子和闸门丢掉的条目,供审阅者知道哪里被动过。`evidence` 存报告版本与
+指标 id。
+
+`report_md` 里只有段落、总述、教训是模型写的;标题、每段的依据标注、每节的指标表都由代码从
+快照生成(`retrospective/render.py`),表里的数不经过模型。
 
 ### 管理面接口(挂在现有的 `/api/agent` 前缀下)
 
@@ -373,13 +432,77 @@ CREATE TABLE IF NOT EXISTS org_memory (
 - 带基线时:`prev` 是基线周期的值,`delta` 是差值(比率是百分点差,即两个小数相减),`delta_ratio`
   是相对变化(比率类不给)。三者都可能为 `null`——任一侧没有值或被抑制时不出差值。
 
-示意(P2 起):
+报告接口(已实现,同在 `web/retrospective_admin.py`):
+
+| 接口 | 作用 | 权限 |
+|---|---|---|
+| `POST /admin/retrospective/run` | 先采一次快照,再后台生成一版报告草稿;立即返回占到的版本号 | `evaluation:run` |
+| `GET /admin/retrospective/report` | 读最新一版或指定 `version` 的报告 | `evaluation:run` 看全部版本;只有 `resume:audit` 的只看得到已发布的 |
+| `GET /admin/retrospective/reports` | 一个周期的报告版本列表,不含正文 | 同上 |
+| `POST /admin/retrospective/publish` | 发布一个草稿版本,原先已发布的转 `superseded`;先写审计再发布 | `evaluation:run` |
+
+读报告的路径用了 `/report` 与 `/reports`,与快照的 `/snapshot`、`/snapshots` 对齐(示意里写的是
+`GET /admin/retrospective`)。
+
+#### 报告接口契约(给管理面前端)
+
+鉴权与出错时的响应体同快照接口。
+
+**`POST /admin/retrospective/run`** — 请求体 `{"cycle_id": <整数,≥1>, "baseline_cycle_id": <整数,可选>}`。
+给了 `baseline_cycle_id`,报告里会写相对那个周期的变化。
+
+| 状态码 | 含义 |
+|---|---|
+| 202 | 已开始生成。响应 `{cycle_id, version, status: "generating", snapshot_version, baseline_cycle_id}`。之后轮询 `GET …/report?cycle_id=&version=`,直到 `status` 变成 `draft` 或 `failed`;预计几分钟(单次模型调用上限 180 秒,超过 15 分钟仍在生成的版本会被判为失败) |
+| 400 | 基线周期与本周期相同 |
+| 404 | 后端查不到这个周期,或基线周期还没有快照 |
+| 409 | 该周期已有一份报告在生成,或基线周期没有同一版指标定义的快照 |
+| 500 | 采集快照或创建报告失败,可重试 |
+| 503 | 报告生成没有开启(见 §10 进度里的开关);`detail` 里写了怎么打开。前端应当把它当成「功能未开放」,不是故障 |
+
+**`GET /admin/retrospective/report`** — 查询参数 `cycle_id`(必填)、`version`(可选,不给取最新一版)。
+没有 `evaluation:run` 的人只在已发布的版本里找;找不到一律 404(看 `detail`)。200 返回:
+
+| 字段 | 说明 |
+|---|---|
+| `cycle_id`、`version`、`status` | `status` 五选一:`generating` / `draft` / `failed` / `published` / `superseded` |
+| `metrics_schema`、`snapshot_version` | 依据的指标定义版本与快照版本(用它去取快照画指标表) |
+| `baseline_cycle_id`、`baseline_snapshot_version` | 对比的基线;没有则为 `null` |
+| `sections` | 结构化正文,见下表;`generating` 与 `failed` 时是空对象 |
+| `report_md` | 渲染好的 Markdown 全文,可直接展示 |
+| `unverified` | 没有进入报告的内容,每项 `{where, text, reason}`;审阅时应当展示出来 |
+| `prompt_versions` | 四份 prompt 的版本、`metrics_schema`、`model` |
+| `usage` | `{input_tokens, output_tokens}` |
+| `error` | `failed` 时的原因摘要,否则 `null` |
+| `created_by`、`created_at`、`finished_at`、`published_by`、`published_at` | 用户 id 与时间(ISO 8601);未发生的为 `null` |
+
+| `sections` 的字段 | 说明 |
+|---|---|
+| `summary` | `{text, metric_ids}` 或 `null` |
+| `sections` | 固定三项,按 `data` / `qa` / `evaluation` 的顺序。每项 `{role, title, status, items, findings}`:`status` 为 `ok`、`analyst_failed`(分析员没有产出,只展示指标表)或 `no_data`(这一节的数据不可用);`items` 是报告里这一节的段落,`findings` 是分析员的原始发现,两者每项都是 `{text, metric_ids}` |
+| `lessons` | 候选教训,每项 `{kind, content, metric_ids}`,`kind` 为 `lesson` / `norm` / `calendar`。只是候选,勾选生效是 P3 的事 |
+| `rubric_candidates` | 评分条款候选,每项 `{text, metric_ids}` |
+| `writer_status` | `ok`;`failed`(撰稿人没有产出,各节直接列分析员的发现,应提示「未汇总」);`skipped`(没有任何发现可写) |
+
+`metric_ids` 里是快照 `metrics` 的 `id`,或 `catalog` 的目录项 `id`(表示引用它名下的每一格)。
+
+**`GET /admin/retrospective/reports`** — 查询参数 `cycle_id`。200 返回 `{"items": [...], "total": <整数>}`,
+新版本在前;每项是报告响应去掉 `sections`、`report_md`、`unverified`、`prompt_versions`、`usage`、
+`baseline_snapshot_version` 之后剩下的字段。
+
+**`POST /admin/retrospective/publish`** — 请求体 `{"cycle_id": <整数>, "version": <整数>}`。
+
+| 状态码 | 含义 |
+|---|---|
+| 200 | 已发布。响应 `{cycle_id, version, status: "published", published_by, published_at}` |
+| 404 | 没有这个版本 |
+| 409 | 该版本不是草稿(还在生成、生成失败、已发布或已被取代) |
+| 503 | 审计写入失败,报告**没有**发布,可重试 |
+
+示意(P3 起):
 
 | 接口 | 作用 |
 |---|---|
-| `POST /admin/retrospective/run` | 生成一个新版本的报告草稿 |
-| `GET /admin/retrospective` | 按周期取报告(草稿或已发布) |
-| `POST /admin/retrospective/publish` | 发布指定版本 |
 | `POST /admin/org-memory/approve`、`/retire` | 勾选或退役组织记忆 |
 
 ## 6. 角色
@@ -393,13 +516,22 @@ CREATE TABLE IF NOT EXISTS org_memory (
 
 快照计算、数字落地守卫、小格子抑制都是代码,不是角色。
 
+四份 prompt 都已在 `prompts/retrospective/` 下(`*/v1`,模型档 strong)。已实现的形态里三位
+分析员都是单次调用、没有工具;问答分析员还拿不到主题清单(知识库闭环的聚类未实现)。
+
 ## 7. 安全与失败语义
 
 - **不可信输入**:主题清单源自候选人的提问,驳回与评分理由源自简历。进 prompt 一律包数据区;
   更根本的防线是分析员根本拿不到原话,只有主题标签和计数。
-- **PII**:快照只有聚合数;报告落库前再过一遍掩码作为出口兜底。
+- **PII**:快照只有聚合数;报告落库前再过一遍掩码作为出口兜底。模型写的文字里,数字由落地守卫
+  管(手机号、学号在引用的指标里对不上),不带数字也认得出的个人信息(邮箱)由文字闸门拦;被
+  丢弃的原文记进 `unverified` 之前同样脱敏。
 - **权限**:触发与读取复用评估域现有的权限码——触发快照采集要 `evaluation:run`(执行权),读取要
   `resume:audit`(查看权,持执行权的人也能读);发布与勾选组织记忆要求更高一级(见开放问题)。
+  报告这边:生成、看草稿、发布都要 `evaluation:run`;只有 `resume:audit` 的人只看得到**已发布**
+  的版本——草稿是没人审过的模型产出。「更高一级」的权限码后端现在没有,发布暂时与生成同级。
+- **发布是人工决策**:先写审计(`op=publish_retrospective`),审计写不进去就不发布。它只写 agent
+  自己的表,不经确认令牌——点「发布」的那个人就是确认。
 - **注入的最坏结果**:一条被带偏的发现或候选教训。它不会自动生效——报告要人发布,教训要人
   勾选。
 
@@ -407,9 +539,11 @@ CREATE TABLE IF NOT EXISTS org_memory (
 |---|---|
 | 某个数据源不可用 | 该域指标缺席并在快照里标注(`domains` 里 `unavailable` + 原因,只给类别不给异常原文);报告对应章节写明「数据不可用」,不整体失败。数据源恢复后重新采集,落新版本 |
 | 后端查不到这个周期 | 整体拒绝(404),不落空快照 |
-| 一位分析员失败(重试后仍失败) | 该章节降级为纯指标表,无解读;其余照常 |
+| 一位分析员失败(输出两次不合规、超时、模型报错) | 该章节降级为纯指标表,无解读;其余照常 |
 | 撰稿人失败 | 报告降级为三份发现的直接拼接,标注「未汇总」 |
 | 守卫回炉后仍有对不上的数字 | 删掉相应句子,记入 `unverified` |
+| 撰稿人回炉那一轮失败 | 沿用第一稿,对不上的句子照删 |
+| 生成任务本身出错,或进程在生成途中退出 | 该版本转 `failed` 并留原因(后者在下次生成时按超时清理);不影响已有的草稿与已发布版本 |
 | 组织记忆召回失败 | 对话照常进行,不注入(观测 fail-open) |
 
 ## 8. eval 与门禁
@@ -422,18 +556,29 @@ CREATE TABLE IF NOT EXISTS org_memory (
 | `retro_injection`(新) | 真模型 | 主题清单里植入的指令不改变报告结论,不出现在候选教训里 |
 | `memory_probes`(已有,扩展) | 真模型 | 候选人会话里组织记忆不出现;管理员会话里相关的教训被用上 |
 
+两个新 suite 已写好并注册(执行器 `evals/retro_probes.py`,数据集 `evals/datasets/retro_probes.yaml`
+与 `retro_injection.yaml`),**还没有对真模型跑过**——本机没有模型 key,执行器的判定逻辑与数据集
+本身由单测守着。用例给的是各域的原始聚合,快照由真实的口径与抑制代码拼出来。注入探针的
+落点与设计时不同:主题清单还不存在,现在快照里唯一能带文字进 prompt 的是分布的键(工具名、
+渠道名、题组类别、部门 id),而键只放行 ASCII 标识符形状的短串,所以探针植入的是这种形状的
+指令样键名。
+
 ## 9. 成本与预算闸
 
 每个周期跑一到几次,每次四次模型调用(带下钻时分析员多几轮),输入是几千 token 的指标与
 发现——是四份设计稿里最便宜的一份。预算闸只有分析员下钻循环的双闸。真正的成本是人审报告的
 那半小时,所以报告要短:每节至多五条发现,候选教训至多十条。
 
+已实现的形态没有下钻循环,预算是固定的:一次生成至多九次模型调用(三位分析员各至多两次,
+撰稿人第一稿至多两次、回炉一次),每次调用墙钟上限 180 秒,条数上限由代码截断。三位分析员
+并行,没有接 README 说的「评估域模型并发闸」——那把闸还没建。
+
 ## 10. 分期
 
 | 期 | 内容 | 验收 |
 |---|---|---|
 | P1 | 指标目录、`collect_metrics`、快照表与接口。**不含模型**。**已实现** | 本周期结束前上线并留下第一份快照 |
-| P2 | 三位分析员、撰稿人、数字落地守卫、草稿与发布 | `retro_probes` 通过;管理员审过一份真实报告 |
+| P2 | 三位分析员、撰稿人、数字落地守卫、草稿与发布。**已实现,验收未完成** | `retro_probes` 通过;管理员审过一份真实报告 |
 | P3 | 组织记忆:勾选、召回、到期 | `memory_probes` 扩展用例通过;候选人会话零泄漏 |
 | P4 | 与另三份设计稿汇合:知识库缺口清单、评分条款候选、题型偏好 | 各自的上游数据就位 |
 
@@ -447,6 +592,25 @@ CREATE TABLE IF NOT EXISTS org_memory (
   越多;人机一致要等开放问题 2 定下来——它的原料(评分卡、采纳时填的分所在的审计行)目前没有
   保留期清理,定了口径还能补算。
 
+**P2 进度**:机制已实现,单测与真库集成档通过(编排图用按角色回放的假模型跑)。验收的两条
+**都还没有完成**,所以报告生成**默认关闭**:配置 `retrospective_report_enabled`(环境变量
+`RETROSPECTIVE_REPORT_ENABLED`)缺省为 false,`POST /admin/retrospective/run` 在关着时直接返回
+503、连快照都不采;指标快照的三个接口不受影响,已有的报告照常可读可发布。打开之前要先做完
+下面第一条。
+
+- **`retro_probes` 与 `retro_injection` 没有对真模型跑过**。本机没有模型 key。四份 prompt 是
+  第一版,没有经过任何真实模型的检验——上线前必须有人带 key 跑一遍 `evals/run_evals.py`,
+  按结果改 prompt。
+- **还没有管理员审过一份真实报告**。这要等部署之后对真实周期生成一份。
+
+另外没做的:
+
+- 分析员的下钻工具(D2),理由见 D2。
+- 评估域模型并发闸:三位分析员并行调用模型,目前不受任何全局并发闸约束。
+- 管理面前端没有入口;接口契约在 §5。
+- 守卫的模糊量词与中文人数识别是启发式的:会误删个别无害的句子,也可能漏掉没想到的写法。
+  被删的句子都在 `unverified` 里,审阅时应当过一眼。
+
 ## 11. 代码落位
 
 已有(P1):
@@ -458,12 +622,18 @@ CREATE TABLE IF NOT EXISTS org_memory (
   SQL 留在状态层,口径留在 `retrospective/`——与评估域「领域逻辑不拼 SQL」的分法一致。
 - `web/retrospective_admin.py`:管理面接口,已在 `web/app.py` 注册。
 
-待建(P2 起):
+已有(P2):
 
-- `retrospective/guard.py` 里加数字落地守卫;`retrospective/graph.py`:扇出与汇总。
-- `state/retrospective/` 里加报告表;`memory/org_store.py`(新):组织记忆,召回接到
-  `memory/recall.py`。
-- `prompts/retrospective/` 下四个文件,以及对应的 eval 执行器与数据集。
+- `retrospective/views.py`:分析员的指标视图与值的写法;`retrospective/grounding.py`:数字落地
+  守卫(没有并进 `guard.py`——那里是小格子抑制,两件事各自成篇);`retrospective/roles.py`:四个
+  角色的输出结构、prompt 装配与确定性闸门;`retrospective/graph.py`:扇出、撰稿、守卫回炉与
+  成稿;`retrospective/render.py`:Markdown 渲染;`retrospective/reports.py`:后台生成任务。
+- `state/retrospective/report_store.py`:报告表与发布状态机。
+- `prompts/retrospective/` 下四个文件;`evals/retro_probes.py` 与两份数据集。
+
+待建(P3 起):
+
+- `memory/org_store.py`(新):组织记忆,召回接到 `memory/recall.py`。
 
 ## 12. 开放问题
 
@@ -473,7 +643,9 @@ CREATE TABLE IF NOT EXISTS org_memory (
 2. 人机一致率用哪个人工信号:采纳时填的分数、最终录取决定,还是面试评价——三者含义不同
    (与[初筛合议](screening-panel.md)的开放问题相同,应一起定)。
 3. 权限码:发布报告与勾选组织记忆是复用现有的还是新增一个,要和后端的权限表一起定。
-   (快照的触发与读取已复用 `evaluation:run` 与 `resume:audit`,没有新增权限码。)
+   (快照的触发与读取已复用 `evaluation:run` 与 `resume:audit`,没有新增权限码;发布报告暂时也用
+   `evaluation:run`,与生成同级,等后端有了更高一级的权限码再收紧。)
 4. 组织记忆对社员可见的范围:哪些类别可以标 `member`,由谁决定。
 5. 快照要不要在周期进行中定期打点(每周一份),以便看趋势而不只是终值。
-6. 守卫对「约三成」「翻了一倍」这类非数字表述无能为力,是否需要在 prompt 里禁用模糊量词。
+6. (已定)守卫对「约三成」「翻了一倍」这类非数字表述无能为力:prompt 里禁用模糊量词,守卫
+   再把认得出的模糊量词与中文数字的人数一律按对不上处理(D1)。
