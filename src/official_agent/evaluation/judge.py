@@ -13,7 +13,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 from official_agent.evaluation.graph import _extract_json
-from official_agent.evaluation.llm_common import content_text, prompt_version
+from official_agent.evaluation.llm_common import content_text, gated_ainvoke, prompt_version
 from official_agent.evaluation.schema import JudgeReport
 from official_agent.prompt_loader import load_prompt
 
@@ -37,7 +37,7 @@ async def judge_qbank(
         + "\n\n题组 JSON:\n"
         + json.dumps(group_payload, ensure_ascii=False)
     )
-    resp = await model.ainvoke([HumanMessage(content=prompt_text)])
+    resp = await gated_ainvoke(model, [HumanMessage(content=prompt_text)])
     report = JudgeReport.model_validate_json(_extract_json(content_text(resp)))
     out = report.model_dump()
     out["prompt_version"] = judge_prompt_version()

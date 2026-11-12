@@ -10,6 +10,11 @@ from __future__ import annotations
 import re
 from typing import Literal
 
+#: 对抗前提黑名单(「你自述了X…但仓库却是Y…请解释矛盾」式)。出题后的结构校验
+#: 与审题的确定性预检共用这一份。
+#: 注意:「自述」单独出现是合法锚定(简历锚定横切),不在黑名单
+ADVERSARIAL_WORDS = ("矛盾", "撒谎", "撒了谎", "夸大", "打脸", "为什么没做到")
+
 # 项目维字段键的语义匹配(周期配置驱动,键名不稳定,按 label/键名猜)
 _PROJECT_HINTS = ("project", "项目")
 # 仓库 URL:github.com/owner/repo。左断言防 "mygithub.com" 伪站;

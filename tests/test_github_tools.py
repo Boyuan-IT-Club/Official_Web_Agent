@@ -4,13 +4,17 @@
 这里只测新增的 read_file / normalize 面。
 """
 
+import asyncio
 import base64
+import weakref
 from urllib.parse import unquote
 
+import httpx
 import pytest
 import respx
 from httpx import Response
 
+from official_agent.evaluation import github_client as gh
 from official_agent.evaluation.github_client import (
     GitHubClient,
     GitHubUnavailable,
@@ -404,3 +408,78 @@ async def test_path_segments_are_escaped() -> None:
     )
     await _client().commit_detail("o", "r", "x/../y")
     assert sha_route.called
+
+
+# ── 请求并发闸 ───────────────────────────────────────────
+
+
+@pytest.fixture
+def fresh_request_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """每个用例一把新闸:闸按事件循环缓存,不重置就可能沿用别的用例建的那把。"""
+    monkeypatch.setattr(gh, "_request_gates", weakref.WeakKeyDictionary())
+
+
+def _count_in_flight(
+    monkeypatch: pytest.MonkeyPatch, *, error: Exception | None = None
+) -> dict[str, int]:
+    """替掉 httpx 的 GET:记下同时在途的请求数峰值;每个请求让出几次事件循环。"""
+    stats = {"calls": 0, "in_flight": 0, "peak": 0}
+
+    async def _fake_get(self, url, **kwargs):
+        stats["calls"] += 1
+        stats["in_flight"] += 1
+        stats["peak"] = max(stats["peak"], stats["in_flight"])
+        try:
+            for _ in range(3):
+                await asyncio.sleep(0)
+            if error is not None:
+                raise error
+            return Response(200, json={"default_branch": "main"})
+        finally:
+            stats["in_flight"] -= 1
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", _fake_get)
+    return stats
+
+
+async def test_request_gate_caps_in_flight_requests_across_clients(
+    monkeypatch: pytest.MonkeyPatch, fresh_request_gate: None
+) -> None:
+    """闸在所有 client 之间共用:各条证据线各建各的 client,在途请求总数仍封顶。
+
+    JSON 端点与 README(另一条取数路径)都算在同一把闸里。
+    """
+    stats = _count_in_flight(monkeypatch)
+    clients = [GitHubClient(base_url=base, token="tok") for _ in range(12)]
+    assert len(clients) > 2 * gh.MAX_CONCURRENT_REQUESTS  # 请求数足以把闸顶满好几轮
+
+    await asyncio.gather(
+        *(
+            client.repo("o", "r") if i % 2 else client.readme("o", "r")
+            for i, client in enumerate(clients)
+        )
+    )
+
+    assert stats["calls"] == len(clients)
+    assert stats["peak"] == gh.MAX_CONCURRENT_REQUESTS
+
+
+async def test_request_gate_is_released_when_requests_fail(
+    monkeypatch: pytest.MonkeyPatch, fresh_request_gate: None
+) -> None:
+    """请求失败也要把闸还回去:否则几次网络错误之后,后面的请求全都排不上。"""
+    monkeypatch.setattr(gh, "MAX_CONCURRENT_REQUESTS", 2)
+    failing = _count_in_flight(monkeypatch, error=httpx.ConnectError("连接被重置"))
+
+    outcomes = await asyncio.gather(
+        *(_client().repo("o", "r") for _ in range(5)), return_exceptions=True
+    )
+
+    assert all(isinstance(outcome, GitHubUnavailable) for outcome in outcomes)
+    assert failing["peak"] == 2
+
+    healthy = _count_in_flight(monkeypatch)
+    await asyncio.wait_for(
+        asyncio.gather(*(_client().repo("o", "r") for _ in range(4))), timeout=5
+    )
+    assert healthy["peak"] == 2  # 两个名额都还在

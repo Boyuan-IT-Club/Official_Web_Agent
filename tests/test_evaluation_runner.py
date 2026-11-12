@@ -833,3 +833,53 @@ async def test_claim_once_respects_capacity_and_excludes_own(monkeypatch) -> Non
     seen.clear()
     assert await ev_runner._claim_once(runner) is False
     assert seen == {}  # 满载时不去领
+
+
+@pytest.mark.asyncio
+async def test_qbank_stage_annotates_before_saving_and_indexes_after(monkeypatch) -> None:
+    """相似度标注要进落库的信封;题目索引用的是落库之后才有的题库版本。"""
+    import types
+
+    order: list[str] = []
+    saved: dict = {}
+    indexed: dict = {}
+
+    async def _bundle(fields, **kw):
+        return {"schema_name": "evaluation_qbank/v2", "groups": [], "prompt_version": "t"}
+
+    async def _annotate(envelope, *, resume_id, cycle_id):
+        order.append("annotate")
+        envelope["similarity"] = {"embed_model": "m", "items": []}
+        return "pending-vectors"
+
+    def _save(**kw):
+        order.append("save")
+        saved.update(kw)
+        return 5
+
+    async def _persist(pending, envelope, *, resume_id, cycle_id, qbank_version):
+        order.append("persist")
+        indexed.update(pending=pending, qbank_version=qbank_version)
+
+    async def _fetch_github(user_id):
+        return "someuser"
+
+    monkeypatch.setattr("official_agent.evaluation.bundle.run_bundle", _bundle)
+    monkeypatch.setattr("official_agent.evaluation.question_similarity.annotate", _annotate)
+    monkeypatch.setattr("official_agent.evaluation.question_similarity.persist", _persist)
+    monkeypatch.setattr("official_agent.state.qbank.save_qbank", _save)
+    monkeypatch.setattr(ev_runner, "fetch_candidate_github", _fetch_github)
+    monkeypatch.setattr(
+        ev_runner, "get_effective_settings", lambda: types.SimpleNamespace(github_token="")
+    )
+    monkeypatch.setattr(ev_runner, "_write_eval_usage_log", lambda **k: None)
+    monkeypatch.setattr(ev_runner.asyncio, "to_thread", _fake_to_thread([]))
+
+    outcome = await ev_runner._do_qbank(
+        {"user_id": 42}, [], "", resume_id=99, cycle_id=2026, job_id=1
+    )
+
+    assert order == ["annotate", "save", "persist"]
+    assert saved["envelope"]["similarity"] == {"embed_model": "m", "items": []}
+    assert indexed == {"pending": "pending-vectors", "qbank_version": 5}
+    assert outcome == ("succeeded", None, 5)

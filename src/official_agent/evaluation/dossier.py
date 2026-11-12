@@ -28,6 +28,7 @@ class Dossier:
     slots: dict[str, str] = field(default_factory=lambda: {k: "" for k in SLOT_NAMES})
     attribution: str = ""  # 归属级别+证据(ADR-0008),出题/展示用
     turns_used: int = 0  # 实际轮数(LLM+工具累计)
+    seconds_used: float = 0.0  # 探索自己花的墙钟(不含排队等模型并发闸)
     degraded: bool = False  # 预算触顶=用已有材料出题,不判失败
     degrade_reason: str = ""
     input_tokens: int | None = None

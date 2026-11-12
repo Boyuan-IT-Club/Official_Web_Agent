@@ -29,7 +29,11 @@ from langchain_core.messages import HumanMessage
 
 from official_agent.config import get_effective_settings
 from official_agent.evaluation.graph import _extract_json
-from official_agent.evaluation.llm_common import TEMPERATURE_GENERATION, content_text
+from official_agent.evaluation.llm_common import (
+    TEMPERATURE_GENERATION,
+    content_text,
+    gated_ainvoke,
+)
 from official_agent.graphs.assistant import build_model
 from official_agent.prompt_loader import load_prompt
 from official_agent.security.injection_guard import wrap_data_zone
@@ -405,8 +409,9 @@ async def extract_tech_stack(resume_text: str) -> list[TechStackItem]:
 
     settings = get_effective_settings()
     model = build_model(settings, temperature=TEMPERATURE)
-    response = await model.ainvoke(
-        [HumanMessage(content=load_prompt(PROMPT_FILE) + "\n\n---\n\n" + _build_material(text))]
+    response = await gated_ainvoke(
+        model,
+        [HumanMessage(content=load_prompt(PROMPT_FILE) + "\n\n---\n\n" + _build_material(text))],
     )
     try:
         payload = json.loads(_extract_json(_content_text(response)))

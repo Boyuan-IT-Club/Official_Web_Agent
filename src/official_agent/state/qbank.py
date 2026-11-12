@@ -230,6 +230,40 @@ def list_picks(resume_id: int, cycle_id: int) -> list[dict[str, Any]]:
     return result
 
 
+def question_key(
+    role: str,
+    *,
+    chain_index: int = 0,
+    layer_index: int = 0,
+    reserve_index: int = 0,
+    question_index: int = 0,
+) -> str:
+    """一道题在它所在题组里的编号:审题意见与相似度标注靠它对回题目。
+
+    组内定位只有四种形状,与可挑题视图(flatten_v2_pickable)的 role 与索引
+    字段一一对应。它不含题文,所以同一份信封里是稳定的;跨版本的稳定引用用
+    ref_id。
+    """
+    if role == "entry":
+        return "entry"
+    if role == "chain":
+        return f"chain:{chain_index}:{layer_index}"
+    if role == "reserve":
+        return f"reserve:{reserve_index}"
+    return f"question:{question_index}"
+
+
+def entry_key(entry: dict[str, Any]) -> str:
+    """可挑题视图里的一条 → 它在组内的编号。"""
+    return question_key(
+        str(entry.get("role", "")),
+        chain_index=int(entry.get("chain_index", 0)),
+        layer_index=int(entry.get("layer_index", 0)),
+        reserve_index=int(entry.get("reserve_index", 0)),
+        question_index=int(entry.get("question_index", 0)),
+    )
+
+
 def _ref_id(
     ref: dict[str, Any],
     resume_id: int,
@@ -266,7 +300,10 @@ def flatten_v2_pickable(
     每题带定位引用 question_ref(group_kind/role/category/chain_index/
     layer_index/question),record_pick 原样落 qbank_pick_log。
     传入 resume_id/cycle_id/qbank_version 时每题附加稳定 ref_id,
-    pick 时服务端据此权威绑定(见 resolve_picks),杜绝按题文反查串源。"""
+    pick 时服务端据此权威绑定(见 resolve_picks),杜绝按题文反查串源。
+
+    信封里有审题意见或相似度标注的题,在这里并到题上(键 review / similarity);
+    没有标注的题不带这两个键,形状与没有这两项功能时完全一样。"""
     out: list[dict[str, Any]] = []
 
     def _ref(**kw: Any) -> dict[str, Any]:
@@ -339,7 +376,48 @@ def flatten_v2_pickable(
                     question=q.get("question", ""),
                 )
             )
+    _attach_annotations(out, envelope)
     return out
+
+
+def _attach_annotations(entries: list[dict[str, Any]], envelope: dict[str, Any]) -> None:
+    """把信封里挂在题组旁边的标注并到可挑题条目上(就地修改 entries)。
+
+    - review:{verdict, reasons},来自该题所在证据线的审题结果;
+    - similarity:{duplicate_of_ref_id, generic_resumes},来自信封顶层的相似度
+      标注;duplicate_of_ref_id 指向本包里问同一件事、证据更强的那道题。
+    标注在信封里按「组下标 + 组内编号」定位,不进题目对象,所以要在这里对回去。
+    """
+    groups = envelope.get("groups") or []
+    reviews: dict[tuple[int, str], dict[str, Any]] = {}
+    for group_index, group in enumerate(groups):
+        line_review = (group.get("qbank_v2") or {}).get("review") or group.get("review") or {}
+        for item in line_review.get("items") or []:
+            reviews[(group_index, str(item.get("key", "")))] = {
+                "verdict": item.get("verdict"),
+                "reasons": list(item.get("reasons") or []),
+            }
+    similar = {
+        (int(item.get("group_index", -1)), str(item.get("key", ""))): item
+        for item in (envelope.get("similarity") or {}).get("items") or []
+    }
+    if not reviews and not similar:
+        return
+    ref_ids = {(int(e["group_index"]), entry_key(e)): e["ref_id"] for e in entries}
+    for entry in entries:
+        locator = (int(entry["group_index"]), entry_key(entry))
+        if locator in reviews:
+            entry["review"] = reviews[locator]
+        flagged = similar.get(locator)
+        if flagged is None:
+            continue
+        stronger = flagged.get("duplicate_of") or {}
+        entry["similarity"] = {
+            "duplicate_of_ref_id": ref_ids.get(
+                (int(stronger.get("group_index", -1)), str(stronger.get("key", "")))
+            ),
+            "generic_resumes": int(flagged.get("generic_resumes") or 0),
+        }
 
 
 def resolve_picks(

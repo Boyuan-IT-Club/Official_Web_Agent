@@ -4,7 +4,8 @@ LLM(model_strong)决定调八工具之一 → 观察 → 观察**确定性映射
 dossier 槽位(agent 决定填多满,槽位归属不必 LLM 再判一次)。
 预算四闸:①每仓 80 轮(LLM+工具累计)②墙钟 300s ③单工具结果截断
 (client 层已做)④dossier ≤40K(dossier.add 把关)。任一触顶即停,
-用已有材料出题并标 degraded(不判失败)。
+用已有材料出题并标 degraded(不判失败)。墙钟只算探索自己花的时间:
+排队等评估域模型并发闸的那一段不计入,否则别的 job 一忙,这条线的档案就变薄。
 
 prompt cache 纪律:system(技能文本)跨候选字节稳定——不嵌时间戳/
 仓主名/随机数;候选人材料只进 user 消息且追加不改写;步数计数放 user
@@ -15,21 +16,49 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from official_agent.evaluation.dossier import SLOT_NAMES, Dossier
 from official_agent.evaluation.github_client import GitHubClient, GitHubUnavailable
-from official_agent.evaluation.llm_common import TEMPERATURE_GENERATION
+from official_agent.evaluation.llm_common import TEMPERATURE_GENERATION, model_gate
 from official_agent.security.injection_guard import guard_tool_result, wrap_data_zone
 from official_agent.state.conversation import usage_from_response
 
-#: 预算闸
+#: 预算闸的缺省值,也是一次探索能拿到的**最大**预算:调用方只能往小里给
 MAX_TURNS = 80
 MAX_WALL_SECONDS = 300
-# 降级文案引用同一常量:改墙钟上限后文案不会撒谎
-_WALL_CLOCK_TEXT = f"墙钟 {MAX_WALL_SECONDS}s 触顶"
+
+
+@dataclass(frozen=True)
+class ExploreBudget:
+    """一次探索的预算:轮数(LLM + 工具累计)与墙钟两道闸。
+
+    数值由调用方的代码定(evaluation/plan.py 按档位映射),不来自模型,更不来自
+    候选人;超过 MAX_TURNS / MAX_WALL_SECONDS 的部分不生效。
+    """
+
+    max_turns: int
+    max_wall_seconds: int
+
+    def clamped(self) -> ExploreBudget:
+        """收进 [0, 缺省上限]:预算只能省,不能加。"""
+        return ExploreBudget(
+            max_turns=max(0, min(self.max_turns, MAX_TURNS)),
+            max_wall_seconds=max(0, min(self.max_wall_seconds, MAX_WALL_SECONDS)),
+        )
+
+
+def default_budget() -> ExploreBudget:
+    """缺省预算(在调用时读模块常量,所以改常量即时生效)。"""
+    return ExploreBudget(max_turns=MAX_TURNS, max_wall_seconds=MAX_WALL_SECONDS)
+
+
+def _wall_clock_text(budget: ExploreBudget) -> str:
+    # 降级文案引用实际生效的上限:换了预算,文案不会撒谎
+    return f"墙钟 {budget.max_wall_seconds}s 触顶"
 
 #: 工具观察 → dossier 槽位(确定性映射;同观察逐槽全写,不做短路)
 _S = {name: name for name in SLOT_NAMES}  # 槽名单源(与 schema.CATEGORY 同步)
@@ -136,6 +165,7 @@ async def _run_tool_calls(
     *,
     start: float,
     turn: int,
+    budget: ExploreBudget,
 ) -> tuple[list[str], int]:
     """执行一批工具调用:硬闸逐次判定,写 dossier 并回 ToolMessage。
 
@@ -145,15 +175,15 @@ async def _run_tool_calls(
     written_slots: list[str] = []
     for tc in tool_calls:
         # 硬闸:轮数 = LLM+工具调用累计,逐次判定(一批并行
-        # 工具调用不得突破 80 上限);墙钟同样覆盖工具执行
-        if turn >= MAX_TURNS:
+        # 工具调用不得突破轮数上限);墙钟同样覆盖工具执行
+        if turn >= budget.max_turns:
             dossier.degraded = True
-            dossier.degrade_reason = dossier.degrade_reason or f"轮数 {MAX_TURNS} 触顶"
+            dossier.degrade_reason = dossier.degrade_reason or f"轮数 {budget.max_turns} 触顶"
             break
-        remaining = MAX_WALL_SECONDS - (time.monotonic() - start)
+        remaining = budget.max_wall_seconds - (time.monotonic() - start)
         if remaining <= 0:
             dossier.degraded = True
-            dossier.degrade_reason = dossier.degrade_reason or _WALL_CLOCK_TEXT
+            dossier.degrade_reason = dossier.degrade_reason or _wall_clock_text(budget)
             break
         turn += 1
         tool_name = tc.get("name") or ""
@@ -170,7 +200,7 @@ async def _run_tool_calls(
                 observation = _observation_text(tool_name, payload)
             except TimeoutError:
                 dossier.degraded = True
-                dossier.degrade_reason = dossier.degrade_reason or _WALL_CLOCK_TEXT
+                dossier.degrade_reason = dossier.degrade_reason or _wall_clock_text(budget)
                 break
             except GitHubUnavailable as exc:
                 observation = f"工具不可用(降级信号): {exc}"
@@ -205,11 +235,17 @@ async def explore_repo(
     client: GitHubClient,
     model: Any,
     dossier: Dossier | None = None,
+    budget: ExploreBudget | None = None,
+    focus: tuple[str, ...] = (),
 ) -> Dossier:
     """跑一个仓的受限探索,返回 dossier(唯一产出)。
 
     GitHub 不可达不作失败:返回空 dossier(degraded=True),出题段降级
-    guided。模型异常同理——探索段异常不炸 bundle。"""
+    guided。模型异常同理——探索段异常不炸 bundle。
+    budget 缺省即 MAX_TURNS / MAX_WALL_SECONDS,给了也只能更小。focus 是希望
+    优先取材的类别(取自十类槽位名,由调用方保证):只作为提示写进首条 user 消息。
+    """
+    budget = (budget or default_budget()).clamped()
     dossier = dossier or Dossier(attribution=attribution)
     tools = build_explore_tools(client, owner, name)
     tools_by_name = {t.name: t for t in tools}
@@ -235,6 +271,8 @@ async def explore_repo(
                 if login
                 else ""
             )
+            # 侧重提示进 user 消息而不进 system:system 文本要跨候选人字节稳定
+            + (f"\n本次探索优先为这些类别取材:{'、'.join(focus)}。" if focus else "")
             + "\n请开始探索:调工具收集十类取材材料,材料自认充分即停止调工具并简短总结。"
         ),
     ]
@@ -246,11 +284,11 @@ async def explore_repo(
     cache_miss = 0
     turn = 0
     try:
-        while turn < MAX_TURNS:
+        while turn < budget.max_turns:
             elapsed = time.monotonic() - start
-            if elapsed >= MAX_WALL_SECONDS:
+            if elapsed >= budget.max_wall_seconds:
                 dossier.degraded = True
-                dossier.degrade_reason = dossier.degrade_reason or _WALL_CLOCK_TEXT
+                dossier.degrade_reason = dossier.degrade_reason or _wall_clock_text(budget)
                 break
             if dossier.degraded:  # dossier 40K 已触顶(add 里标记)
                 break
@@ -258,12 +296,17 @@ async def explore_repo(
             # 步数计数放 user 消息尾部,追加不改写
             messages.append(
                 HumanMessage(
-                    f"[探索步 {turn}/{MAX_TURNS},已用 {int(elapsed)}s,"
+                    f"[探索步 {turn}/{budget.max_turns},已用 {int(elapsed)}s,"
                     f"dossier {dossier.total_chars} 字符]"
                 )
             )
-            remaining = MAX_WALL_SECONDS - (time.monotonic() - start)
-            response = await asyncio.wait_for(model.ainvoke(messages), timeout=max(remaining, 1.0))
+            queued_at = time.monotonic()
+            async with model_gate():
+                start += time.monotonic() - queued_at  # 排队不占探索的墙钟预算
+                remaining = budget.max_wall_seconds - (time.monotonic() - start)
+                response = await asyncio.wait_for(
+                    model.ainvoke(messages), timeout=max(remaining, 1.0)
+                )
             messages.append(response)
             usage = usage_from_response(response) or {}
             input_tokens += usage.get("input_tokens") or 0
@@ -274,7 +317,7 @@ async def explore_repo(
             if not tool_calls:
                 break  # 材料自认充分,正常终止
             written_slots, turn = await _run_tool_calls(
-                tool_calls, tools_by_name, messages, dossier, start=start, turn=turn
+                tool_calls, tools_by_name, messages, dossier, start=start, turn=turn, budget=budget
             )
             # 轮尾单条 user 消息承载观察回执+步数计数(追加不改写)
             receipt = (
@@ -284,13 +327,13 @@ async def explore_repo(
             )
             messages.append(
                 HumanMessage(
-                    f"[{receipt};探索步 {turn}/{MAX_TURNS},"
+                    f"[{receipt};探索步 {turn}/{budget.max_turns},"
                     f"已用 {int(elapsed)}s,dossier {dossier.total_chars} 字符]"
                 )
             )
         else:
             dossier.degraded = True
-            dossier.degrade_reason = dossier.degrade_reason or f"轮数 {MAX_TURNS} 触顶"
+            dossier.degrade_reason = dossier.degrade_reason or f"轮数 {budget.max_turns} 触顶"
     except GitHubUnavailable as exc:
         dossier.degraded = True
         dossier.degrade_reason = dossier.degrade_reason or f"GitHub 不可达: {exc}"
@@ -299,6 +342,7 @@ async def explore_repo(
         dossier.degrade_reason = dossier.degrade_reason or f"探索异常: {type(exc).__name__}"
 
     dossier.turns_used = turn
+    dossier.seconds_used = round(time.monotonic() - start, 1)
     dossier.input_tokens = input_tokens or None
     dossier.output_tokens = output_tokens or None
     dossier.cache_hit_tokens = cache_hit or None
@@ -322,6 +366,8 @@ async def run_explore(
     login: str = "",
     github_base: str = "https://api.github.com",
     github_token: str = "",
+    budget: ExploreBudget | None = None,
+    focus: tuple[str, ...] = (),
 ) -> Dossier:
     """便捷入口:自建 client 与 model_strong(与 run_investigation 同构)。"""
     from official_agent.config import get_effective_settings
@@ -338,6 +384,8 @@ async def run_explore(
         login=login,
         client=client,
         model=model,
+        budget=budget,
+        focus=focus,
     )
 
 
