@@ -6,28 +6,33 @@
   (实测:思考模式代理拒 json_schema 与强制 tool_choice)
 - 模型逐项判定两张清单(四部门匹配 + 认真程度),分数由代码派生;
   等级不在这里算——等级是候选池内的相对位置,读取时由 grading 计算
-- 两种评分模式(SCORING_MODES),一个招新周期只用一种:
+- 三种评分模式(SCORING_MODES),一个招新周期只用一种:
   single = 评委判完直接组卡;
   critic = 评委判完交批判者复核(检测提示注入、质疑引文撑不住的判定),被质疑的
-  条目由评委答辩一次,再由纯代码汇总出最终判定与置信度(evaluation/panel/)
+  条目由评委答辩一次,再由纯代码汇总出最终判定与置信度(evaluation/panel/);
+  panel = 在 critic 的基础上把评委拆开:四位部门评委各判一张部门清单、一位认真
+  程度评委判认真程度清单并给态度,并行、各自独立上下文;整体理由改由主席在汇总
+  之后写
 - 输出是**卡 dict**,落库由调用方(state/evaluation,runner 接线)负责;本图纯计算
-  无 DB IO。single 模式出 evaluation_scorecard/v2;critic 模式出 v3,多一个
+  无 DB IO。single 模式出 evaluation_scorecard/v2;critic 与 panel 模式出 v3,多一个
   panel 块(模式、置信度、注入片段、分歧)
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections import Counter
-from typing import Any, TypedDict
+import operator
+from typing import Annotated, Any, TypedDict
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
+from langgraph.types import Send
 
 from official_agent.config import get_effective_settings
 from official_agent.evaluation.applicant import ApplicantProfile
 from official_agent.evaluation.grading import interview_hints, transfer_hint
-from official_agent.evaluation.grounding import evidence_in
+from official_agent.evaluation.grounding import evidence_in, quote_violation
 from official_agent.evaluation.llm_common import (
     TEMPERATURE_SCORING,
     add_usage,
@@ -36,13 +41,22 @@ from official_agent.evaluation.llm_common import (
     prompt_version,
 )
 from official_agent.evaluation.material import resume_material, resume_sources
+from official_agent.evaluation.panel import chair as panel_chair
 from official_agent.evaluation.panel import critic as panel_critic
 from official_agent.evaluation.panel import judges as panel_judges
-from official_agent.evaluation.panel.aggregate import settle, unreviewed_panel
+from official_agent.evaluation.panel.aggregate import (
+    Settlement,
+    annotate_summary,
+    settle,
+    unreviewed_panel,
+)
+from official_agent.evaluation.panel.criteria import criteria_from
 from official_agent.evaluation.panel.shapes import Critique, ItemKey, Judgement, iter_items
 from official_agent.evaluation.schema import (
+    CHECKLISTS,
     DEPARTMENTS,
     DEPT_MATCH_ITEMS,
+    EFFORT_CHECKLIST,
     EFFORT_ITEMS,
     ItemVerdict,
     ScorecardOutput,
@@ -51,6 +65,7 @@ from official_agent.evaluation.schema import (
 from official_agent.evaluation.scoring import (
     FieldText,
     attitude_contract_violation,
+    checklist_names_violation,
     checklist_score,
     detect_hard_zero,
     effort_ceiling,
@@ -69,7 +84,7 @@ SCORING_TEMPERATURE = TEMPERATURE_SCORING
 
 #: 评分模式。等级是候选池内的相对排名,同一个池里混着两种模式判出来的卡不可比,
 #: 所以一个周期只用一种(由调用方按周期固定,见 runner)。
-SCORING_MODES: tuple[str, ...] = ("single", "critic")
+SCORING_MODES: tuple[str, ...] = ("single", "critic", "panel")
 
 #: 单评委在卡上 panel.judges 里的键:它一个人判全部清单
 _SOLE_JUDGE = "全部清单"
@@ -97,11 +112,16 @@ class EvaluationState(TypedDict, total=False):
     error: str | None
     llm_usage: dict[str, int | None]  # 本张卡全部模型调用的 token 用量合计(job 观测面)
     mode: str  # 评分模式,SCORING_MODES 之一
-    # 以下只在带批判者的模式里出现
-    judgement: Judgement | None  # 评委的判定
-    judge_retries: int  # 评委输出不合规而回灌重试的次数
+    # 以下只在带批判者的模式(critic / panel)里出现
+    judgement: Judgement | None  # 评委的判定(panel 模式下由各位评委的结果拼成)
+    judge_retries: int  # critic 模式:评委输出不合规而回灌重试的次数
     critique: Critique | None  # 批判者的质疑;None = 批判者不可用
     rebuttal_verdicts: dict[ItemKey, dict[str, Any]] | None  # 答辩的重判;None = 没有或失败
+    # 以下只在 panel 模式里出现
+    checklist: str  # 评委节点的入参:这一路评委负责的清单
+    # 各位评委的结果。五路并行写入,所以用累加而不是覆盖
+    judge_results: Annotated[list[dict[str, Any]], operator.add]
+    settlement: Settlement  # 汇总结果,等主席写完整体理由再组卡
 
 
 def _mode_of(state: EvaluationState) -> str:
@@ -251,18 +271,10 @@ def _checklist_prompt() -> str:
 
 
 def _check_names(label: str, got: list[str], expected: tuple[str, ...]) -> None:
-    """判定项集合必须与清单一致:漏项会冤判,多项会虚增。
-
-    用 Counter 差而非 set 差,重复项才报得出来。
-    """
-    if sorted(got) == sorted(expected):
-        return
-    missing = sorted(set(expected) - set(got))
-    unknown = sorted(set(got) - set(expected))
-    dupes = sorted(k for k, n in Counter(got).items() if n > 1)
-    raise ValueError(
-        f"{label}判定项不符:缺 {missing},多 {unknown}" + (f",重复 {dupes}" if dupes else "")
-    )
+    """判定项集合必须与清单一致:漏项会冤判,多项会虚增。"""
+    violation = checklist_names_violation(label, got, expected)
+    if violation:
+        raise ValueError(violation)
 
 
 def _validate_scorecard(content: str, sources: list[str]) -> ScorecardOutput:
@@ -281,10 +293,11 @@ def _validate_scorecard(content: str, sources: list[str]) -> ScorecardOutput:
         (m.dept, it) for m in result.match for it in m.items
     ] + [("认真程度", it) for it in result.effort]
     for label, it in verdicts:
-        if it.met and not it.quote.strip():
-            raise ValueError(f"达成项缺原文引文({label}·{it.item})")
-        if it.quote.strip() and not _evidence_in(it.quote, joined):
-            raise ValueError(f"引文非原文({label}·{it.item}):{it.quote[:40]!r}")
+        violation = quote_violation(
+            f"{label}·{it.item}", met=it.met, quote=it.quote, source=joined
+        )
+        if violation:
+            raise ValueError(violation)
 
     # 态度与判定的契约,违例同样回灌重试
     violation = attitude_contract_violation(
@@ -445,7 +458,7 @@ async def critic(state: EvaluationState, config: RunnableConfig | None = None) -
         critique, usage = await panel_critic.review(
             model,
             material=resume_material(state["fields"], _profile_of(state)),
-            criteria=panel_critic.criteria_from(load_prompt(PROMPT_FILE)),
+            criteria=criteria_from(load_prompt(PROMPT_FILE)),
             judgement=state["judgement"],
             sources=resume_sources(state["fields"]),
             config=config,
@@ -487,6 +500,7 @@ async def rebuttal(state: EvaluationState, config: RunnableConfig | None = None)
             judgement=state["judgement"],
             challenges=state["critique"]["challenges"],
             sources=resume_sources(state["fields"]),
+            attitude_scope=CHECKLISTS,  # 单评委判全部清单,态度也是它判的
             config=config,
         )
     except Exception as exc:  # noqa: BLE001 — 答辩缺席记为分歧,不判整份失败
@@ -500,42 +514,226 @@ async def rebuttal(state: EvaluationState, config: RunnableConfig | None = None)
     return {"rebuttal_verdicts": verdicts, "llm_usage": add_usage(state.get("llm_usage"), usage)}
 
 
-async def aggregate(state: EvaluationState) -> dict:
-    """汇总节点:把判定、质疑与答辩收成最终的卡。规则全在 panel.aggregate.settle,不调模型。"""
-    critique = state.get("critique")
-    settlement = settle(
+def _settlement_of(state: EvaluationState) -> Settlement:
+    """把判定、质疑与答辩收成汇总结果。规则全在 panel.aggregate.settle,不调模型。"""
+    return settle(
         state["judgement"],
-        critique=critique,
+        critique=state.get("critique"),
         rebuttal=state.get("rebuttal_verdicts"),
         first_dept=_profile_of(state).first_dept,
     )
+
+
+def _reviewed_card(
+    state: EvaluationState,
+    settlement: Settlement,
+    *,
+    summary: str,
+    judges: dict[str, dict[str, Any]],
+    prompts: dict[str, str],
+    **panel_extra: Any,
+) -> dict[str, Any]:
+    """经过合议的卡:汇总结果 + 整体理由 + 合议记录。
+
+    prompts 是这张卡用到的全部 prompt 版本,随卡落库。批判者的版本在这里统一加;
+    答辩没发生就不记答辩的版本。
+    """
     card = _build_card(
         state,
         match=settlement.match,
         effort_items=settlement.effort,
-        summary=settlement.summary,
+        summary=summary,
         attitude=settlement.attitude,
         hard_zero=settlement.hard_zero,
         hard_zero_reasons=settlement.hard_zero_reasons,
         schema=PANEL_CARD_SCHEMA_VERSION,
     )
-    # 这张卡用到的全部 prompt 版本随卡落库;答辩没发生就不记答辩的版本
-    prompts = {"scoring": _prompt_version(), "critic": prompt_version(panel_critic.PROMPT_FILE)}
+    prompts = {**prompts, "critic": prompt_version(panel_critic.PROMPT_FILE)}
+    critique = state.get("critique")
     if critique and critique["challenges"]:
-        prompts["rebuttal"] = prompt_version(panel_judges.PROMPT_FILE)
+        prompts["rebuttal"] = prompt_version(panel_judges.REBUTTAL_PROMPT_FILE)
     card["versions"]["prompts"] = prompts
-    card["panel"] = {
-        "mode": _mode_of(state),
-        **settlement.panel,
-        "judges": {
-            _SOLE_JUDGE: {
-                "prompt_version": _prompt_version(),
-                "retries": state.get("judge_retries", 0),
-                "revised": len(settlement.panel["revised"]),
-            }
-        },
+    card["panel"] = {"mode": _mode_of(state), **settlement.panel, "judges": judges, **panel_extra}
+    return card
+
+
+async def aggregate(state: EvaluationState) -> dict:
+    """critic 模式的汇总节点:汇总后直接组卡,整体理由沿用评委写的那段。"""
+    settlement = _settlement_of(state)
+    summary = annotate_summary(
+        state["judgement"]["summary"], settlement.panel, written_before_settlement=True
+    )
+    sole_judge = {
+        "prompt_version": _prompt_version(),
+        "retries": state.get("judge_retries", 0),
+        "revised": len(settlement.panel["revised"]),
     }
+    card = _reviewed_card(
+        state,
+        settlement,
+        summary=summary,
+        judges={_SOLE_JUDGE: sole_judge},
+        prompts={"scoring": _prompt_version()},
+    )
     return {"card": card}
+
+
+# ── panel 模式:一位评委只判一张清单 ──
+
+
+def route_to_panel_judges(state: EvaluationState) -> str | list[Send]:
+    """绝对卡走硬 0 出卡;其余向每张清单的评委各发一路,各自独立上下文、互不参考。"""
+    if state.get("hard_zero"):
+        return "finalize_hard"
+    shared = {key: state[key] for key in ("resume_id", "fields", "profile")}
+    return [Send("panel_judge", {**shared, "checklist": checklist}) for checklist in CHECKLISTS]
+
+
+async def panel_judge(state: EvaluationState, config: RunnableConfig | None = None) -> dict:
+    """一位评委判它负责的那张清单。失败不抛,记在结果里,由 collect_judges 统一判整份失败。"""
+    checklist = state["checklist"]
+    try:
+        model = build_model(get_effective_settings(), temperature=SCORING_TEMPERATURE)
+        result = await panel_judges.judge_checklist(
+            model,
+            checklist=checklist,
+            material=resume_material(state["fields"], _profile_of(state)),
+            scoring_prompt=load_prompt(PROMPT_FILE),
+            sources=resume_sources(state["fields"]),
+            config=config,
+        )
+    except Exception as exc:  # noqa: BLE001 — 失败记进结果,由汇合节点落 error 态
+        failure = {"checklist": checklist, "error": f"{type(exc).__name__}: {exc}"}
+        return {"judge_results": [failure]}
+    return {"judge_results": [result]}
+
+
+async def collect_judges(state: EvaluationState) -> dict:
+    """把各位评委的结果拼成一份完整判定。
+
+    任何一位评委缺席或失败 → 整份失败:缺一张清单的卡在等级池里不可比。态度结论
+    取自认真程度评委;整体理由留空,等主席在汇总之后写。
+    """
+    results = {r["checklist"]: r for r in state.get("judge_results") or []}
+    failed = [
+        f"{c}({results[c]['error'] if c in results else '没有结果'})"
+        for c in CHECKLISTS
+        if c not in results or results[c].get("error")
+    ]
+    if failed:
+        return {"judgement": None, "error": "评委未完成:" + ";".join(failed)}
+    usage: dict[str, int | None] = {}
+    for checklist in CHECKLISTS:
+        usage = add_usage(usage, results[checklist]["usage"])
+    judgement = Judgement(
+        match=[{"dept": dept, "items": results[dept]["items"]} for dept in DEPARTMENTS],
+        effort=results[EFFORT_CHECKLIST]["items"],
+        summary="",
+        attitude=results[EFFORT_CHECKLIST]["attitude"],
+    )
+    return {"judgement": judgement, "error": None, "llm_usage": usage}
+
+
+async def panel_rebuttal(state: EvaluationState, config: RunnableConfig | None = None) -> dict:
+    """panel 模式的答辩节点:质疑按清单分给各自的评委,被质疑的评委各重判自己的那几项。
+
+    哪位评委答辩失败,它的条目就没有重判,由汇总记为分歧;其余评委的重判照用。
+    """
+    by_checklist: dict[str, list[dict[str, str]]] = {}
+    for challenge in state["critique"]["challenges"]:
+        by_checklist.setdefault(challenge["checklist"], []).append(challenge)
+    material = resume_material(state["fields"], _profile_of(state))
+    scoring_prompt = load_prompt(PROMPT_FILE)
+
+    async def _one(checklist: str, challenges: list[dict[str, str]]) -> Any:
+        model = build_model(get_effective_settings(), temperature=SCORING_TEMPERATURE)
+        return await panel_judges.rebut(
+            model,
+            base_prompt=panel_judges.judge_prompt(checklist, material, scoring_prompt),
+            judgement=state["judgement"],
+            challenges=challenges,
+            sources=resume_sources(state["fields"]),
+            # 只有认真程度评委判过态度;部门评委看不到态度,不核对态度契约
+            attitude_scope=(EFFORT_CHECKLIST,) if checklist == EFFORT_CHECKLIST else (),
+            config=config,
+        )
+
+    outcomes = await asyncio.gather(
+        *(_one(checklist, challenges) for checklist, challenges in by_checklist.items()),
+        return_exceptions=True,
+    )
+    verdicts: dict[ItemKey, dict[str, Any]] = {}
+    usage = state.get("llm_usage")
+    for checklist, outcome in zip(by_checklist, outcomes, strict=True):
+        if isinstance(outcome, BaseException):
+            logging.getLogger(__name__).warning(
+                "eval_rebuttal_failed resume_id=%s checklist=%s error_class=%s",
+                state.get("resume_id"),
+                checklist,
+                type(outcome).__name__,
+            )
+            continue
+        revised, used = outcome
+        verdicts.update(revised)
+        usage = add_usage(usage, used)
+    return {"rebuttal_verdicts": verdicts, "llm_usage": usage}
+
+
+async def panel_aggregate(state: EvaluationState) -> dict:
+    """panel 模式的汇总节点:只算出汇总结果;卡等主席写完整体理由再组。"""
+    return {"settlement": _settlement_of(state)}
+
+
+async def chair(state: EvaluationState, config: RunnableConfig | None = None) -> dict:
+    """主席节点:看着最终判定写整体理由,然后组卡。
+
+    整体理由不参与任何派生,所以主席失败不影响卡:换成确定性模板拼的一段,
+    并在卡上记 chair=fallback。
+    """
+    settlement = state["settlement"]
+    profile = _profile_of(state)
+    usage = None
+    prompts = {
+        "scoring": _prompt_version(),  # 各位评委的判定标准截自评分 prompt
+        "preamble": prompt_version(panel_judges.PREAMBLE_FILE),
+        "dept": prompt_version(panel_judges.DEPT_PROMPT_FILE),
+        "effort": prompt_version(panel_judges.EFFORT_PROMPT_FILE),
+    }
+    try:
+        model = build_model(get_effective_settings(), temperature=SCORING_TEMPERATURE)
+        summary, usage = await panel_chair.write_summary(
+            model, profile=profile, settlement=settlement, config=config
+        )
+        chair_status = "ok"
+        prompts["chair"] = prompt_version(panel_chair.PROMPT_FILE)
+    except Exception as exc:  # noqa: BLE001 — 整体理由不参与派生,失败用模板顶上
+        logging.getLogger(__name__).warning(
+            "eval_chair_fallback resume_id=%s error_class=%s",
+            state.get("resume_id"),
+            type(exc).__name__,
+            exc_info=True,
+        )
+        summary = panel_chair.fallback_summary(profile, settlement)
+        chair_status = "fallback"
+    retries = {r["checklist"]: r["retries"] for r in state.get("judge_results") or []}
+    revised = [entry["checklist"] for entry in settlement.panel["revised"]]
+    judges = {
+        checklist: {
+            "prompt_version": prompt_version(panel_judges.prompt_file_for(checklist)),
+            "retries": retries.get(checklist, 0),
+            "revised": revised.count(checklist),
+        }
+        for checklist in CHECKLISTS
+    }
+    card = _reviewed_card(
+        state,
+        settlement,
+        summary=annotate_summary(summary, settlement.panel, written_before_settlement=False),
+        judges=judges,
+        prompts=prompts,
+        chair=chair_status,
+    )
+    return {"card": card, "llm_usage": add_usage(state.get("llm_usage"), usage)}
 
 
 async def finalize(state: EvaluationState) -> dict:
@@ -561,6 +759,9 @@ def build_evaluation_subgraph(mode: str = "single") -> Any:
     single:precheck →(绝对卡? finalize_hard : llm_score)→ finalize
     critic:precheck →(绝对卡? finalize_hard : judge)→ critic →(有质疑? rebuttal)
             → aggregate → finalize;judge 失败直接到 finalize(整份失败)
+    panel: precheck →(绝对卡? finalize_hard : 五路 panel_judge)→ collect_judges
+            → critic →(有质疑? panel_rebuttal)→ panel_aggregate → chair → finalize;
+            任一评委失败直接到 finalize(整份失败)
 
     Raises:
         ValueError: mode 不在 SCORING_MODES 里。
@@ -582,7 +783,7 @@ def build_evaluation_subgraph(mode: str = "single") -> Any:
             "precheck", route_after_precheck, {"hard_zero": "finalize_hard", "score": "llm_score"}
         )
         g.add_edge("llm_score", "finalize")
-    else:
+    elif mode == "critic":
         g.add_node("judge", judge)
         g.add_node("critic", critic)
         g.add_node("rebuttal", rebuttal)
@@ -598,6 +799,26 @@ def build_evaluation_subgraph(mode: str = "single") -> Any:
         )
         g.add_edge("rebuttal", "aggregate")
         g.add_edge("aggregate", "finalize")
+    else:
+        g.add_node("panel_judge", panel_judge)
+        g.add_node("collect_judges", collect_judges)
+        g.add_node("critic", critic)
+        g.add_node("panel_rebuttal", panel_rebuttal)
+        g.add_node("panel_aggregate", panel_aggregate)
+        g.add_node("chair", chair)
+        g.add_conditional_edges(
+            "precheck", route_to_panel_judges, ["finalize_hard", "panel_judge"]
+        )
+        g.add_edge("panel_judge", "collect_judges")
+        g.add_conditional_edges(
+            "collect_judges", route_after_judge, {"failed": "finalize", "review": "critic"}
+        )
+        g.add_conditional_edges(
+            "critic", route_after_critic, {"rebut": "panel_rebuttal", "settle": "panel_aggregate"}
+        )
+        g.add_edge("panel_rebuttal", "panel_aggregate")
+        g.add_edge("panel_aggregate", "chair")
+        g.add_edge("chair", "finalize")
     _compiled[mode] = g.compile()
     return _compiled[mode]
 

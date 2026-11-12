@@ -95,7 +95,7 @@ async def test_clean_card_passes_review_with_the_same_scores_as_single_mode() ->
 
     card = await _score(model)
 
-    assert [len(v) for v in model.calls.values()] == [1, 1, 0]  # 没有质疑就没有答辩
+    assert model.call_counts("judge", "critic", "rebuttal") == [1, 1, 0]  # 没有质疑就没有答辩
     assert card["schema"] == "evaluation_scorecard/v3"
     assert card["panel"]["mode"] == "critic"
     assert card["panel"]["confidence"] == "high"
@@ -155,7 +155,7 @@ async def test_challenged_item_goes_back_to_the_judge_who_may_revise_it() -> Non
 
     card = await _score(model)
 
-    assert [len(v) for v in model.calls.values()] == [1, 1, 1]
+    assert model.call_counts("judge", "critic", "rebuttal") == [1, 1, 1]
     assert _met(card) == {TECH_BASE}
     assert card["panel"]["revised"] == [{"checklist": "技术部", "item": "探索内驱力"}]
     assert card["panel"]["disputes"] == []
@@ -257,4 +257,4 @@ async def test_usage_adds_up_across_every_call_on_the_card() -> None:
 
 async def test_unknown_mode_is_rejected() -> None:
     with pytest.raises(ValueError, match="未知评分模式"):
-        ev.build_evaluation_subgraph("panel")
+        ev.build_evaluation_subgraph("debate")

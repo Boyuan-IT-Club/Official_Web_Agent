@@ -16,7 +16,7 @@ from tests.panel_helpers import (
 
 from official_agent.evaluation.applicant import ApplicantProfile
 from official_agent.evaluation.material import resume_material, resume_sources
-from official_agent.evaluation.panel import critic
+from official_agent.evaluation.panel import criteria, critic
 from official_agent.evaluation.schema import (
     DEPT_MATCH_ITEMS,
     EFFORT_ITEMS,
@@ -45,17 +45,17 @@ def _output(**fields) -> CriticOutput:
 
 def test_criteria_come_from_the_scoring_prompt_and_cover_every_item() -> None:
     """批判者与评委按同一套标准看引文:标准直接截自评分 prompt,一项都不能少。"""
-    criteria = critic.criteria_from(load_prompt("evaluation/scoring.md"))
+    standards = criteria.criteria_from(load_prompt("evaluation/scoring.md"))
 
     names = [n for items in DEPT_MATCH_ITEMS.values() for n in item_names(items)]
     for name in names + list(item_names(EFFORT_ITEMS)):
-        assert f"| {name} |" in criteria
-    assert "输出格式" not in criteria  # 评委的输出格式不该混进批判者的 prompt
+        assert f"| {name} |" in standards
+    assert "输出格式" not in standards  # 评委的输出格式不该混进批判者的 prompt
 
 
 def test_criteria_fail_loudly_when_scoring_prompt_is_restructured() -> None:
     with pytest.raises(ValueError, match="找不到清单小节"):
-        critic.criteria_from("## 新的小节\n没有清单")
+        criteria.criteria_from("## 新的小节\n没有清单")
 
 
 def test_prompt_wraps_resume_and_judge_verdicts_as_data() -> None:

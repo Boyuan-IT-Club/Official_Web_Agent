@@ -33,22 +33,6 @@ MAX_CHALLENGES = 6
 #: (一个技术名词、一个常用词)会把正常引文误伤成注入。
 MIN_INJECTION_SPAN_CHARS = 8
 
-_CRITERIA_START = "## 一、部门匹配清单"
-_CRITERIA_END = "## 判定纪律"
-
-
-def criteria_from(scoring_prompt: str) -> str:
-    """从评分 prompt 里截出两张清单的判定标准(各判定项的达成条件与不给分情形)。
-
-    批判者要判断「引文撑不撑得住这一项」,必须和评委按同一套标准看,所以不另写一份,
-    按小节标题从评分 prompt 里截。标题改了名这里直接报错,而不是给批判者一份空标准。
-    """
-    start, end = scoring_prompt.find(_CRITERIA_START), scoring_prompt.find(_CRITERIA_END)
-    if start == -1 or end <= start:
-        raise ValueError("评分 prompt 里找不到清单小节,无法给批判者提供判定标准")
-    return scoring_prompt[start:end].strip()
-
-
 def build_prompt(material: str, criteria: str, judgement: Judgement) -> str:
     """批判者的完整 prompt:角色与纪律 + 判定标准 + 简历材料 + 评委的判定。
 

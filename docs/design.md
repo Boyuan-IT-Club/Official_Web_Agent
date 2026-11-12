@@ -77,7 +77,7 @@ C:管理端面试页(规划)      ─┘        │
 |---|---|---|
 | `web/` | 接口层 | FastAPI 路由与入口横切:`routes`(chat SSE + 会话路由)、`config_admin`(配置管理面)、`kb_admin`(知识库管理面)、`evaluation_admin`(初筛管理面)、`auth`(鉴权依赖)、`session_store`(会话注册表,纯状态)、`agent_factory`(配置热生效)、`telemetry`(对话观测落账)、`app`(装配 + 生命周期 + trace 中间件) |
 | `graphs/` | 编排层 | `assistant/`(A:ReAct 单循环 + 会话压缩)、`evaluation/`+`investigate_graph`(B 的编排面)、`copilot/`(C,规划)、`identity`(JWT→身份)、`router`(统一路由图,未接入) |
-| `evaluation/` | 评估域 | 流水线领域逻辑:`runner`(job 执行)、`bundle`(出题证据线)、`explore`+`investigate_graph`(仓探索/出题)、`graph`(评分子图)、`panel`(初筛合议:批判者/答辩/汇总)、`grounding`(落地校验)、`material`(简历材料排布)、`judge`/`tech_stack`/`awards`(专项出题)、`scoring`(量规)、`schema`(数据契约)、`llm_common`(共享 LLM 小件)、`github_client`/`autograding`/`attribution`/`dossier` |
+| `evaluation/` | 评估域 | 流水线领域逻辑:`runner`(job 执行)、`bundle`(出题证据线)、`explore`+`investigate_graph`(仓探索/出题)、`graph`(评分子图)、`panel`(初筛合议:拆开的评委/批判者/答辩/汇总/主席)、`grounding`(落地校验)、`material`(简历材料排布)、`judge`/`tech_stack`/`awards`(专项出题)、`scoring`(量规)、`schema`(数据契约)、`llm_common`(共享 LLM 小件)、`github_client`/`autograding`/`attribution`/`dossier` |
 | `tools/` | 基础设施 | `client`(后端 REST 客户端,异常层级在此)、`readonly`/`knowledge`(语义化只读工具)、`write`(interrupt 写工具)、`credentials`(服务账号)、`interrupt_guard` |
 | `state/` | 基础设施 | Postgres 状态面:`pg`(checkpointer 连接)、`threads`(会话档案)、`conversation`(对话日志)、`evaluation/`(分卡/job/评审队列,包)、`qbank`(题库)、`audit`(审计)、`config_store`(热配置) |
 | `kb/` | 基础设施 | 知识库:入库分块/混合检索(按招新周期过滤)/表自举/检索日志(`query_log`) |

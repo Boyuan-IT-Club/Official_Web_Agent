@@ -845,12 +845,15 @@ async def test_claim_once_respects_capacity_and_excludes_own(monkeypatch) -> Non
 
 
 def test_scoring_mode_defaults_to_critic_and_rejects_unknown_values() -> None:
+    """拆评委的 panel 模式要显式配置才启用:缺省值不是它。"""
     from pydantic import ValidationError
 
     assert Settings(_env_file=None).evaluation_scoring_mode == "critic"
-    assert Settings(_env_file=None, evaluation_scoring_mode="single").evaluation_scoring_mode
+    for mode in ("single", "critic", "panel"):
+        configured = Settings(_env_file=None, evaluation_scoring_mode=mode)
+        assert configured.evaluation_scoring_mode == mode
     with pytest.raises(ValidationError):
-        Settings(_env_file=None, evaluation_scoring_mode="panel")
+        Settings(_env_file=None, evaluation_scoring_mode="debate")
 
 
 @pytest.mark.parametrize(
@@ -937,12 +940,65 @@ async def test_pii_is_masked_before_judge_critic_and_rebuttal(monkeypatch) -> No
 
     await ev_runner._do_scoring({"user_id": 42}, 99, 2026, 1)
 
-    assert [len(prompts) for prompts in model.calls.values()] == [1, 1, 1]
-    for role, prompts in model.calls.items():
+    roles = ("judge", "critic", "rebuttal")
+    assert model.call_counts(*roles) == [1, 1, 1]
+    for role in roles:
+        prompts = model.calls[role]
         for leak in ("张三", "13812345678", "me@x.com", "2021023456"):
             assert leak not in prompts[0], f"{role} 的 prompt 泄漏:{leak}"
         assert "138****5678" in prompts[0]  # 脱敏不是清空:三个角色都还看得到简历
     assert saved["card"]["panel"]["mode"] == "critic"
+
+
+async def test_pii_is_masked_before_every_split_judge_and_the_chair(monkeypatch) -> None:
+    """拆评委之后调用点从三个变成七个以上:每一位评委、批判者、主席拿到的都是脱敏后的文本。"""
+    import json
+
+    from tests.panel_helpers import PanelModel, judgement, split_judges
+
+    from official_agent.evaluation import graph as ev_graph
+
+    quote = "用 Flask 写过课程表查询小程序"
+    judged = judgement({("技术部", "技术基础"): quote})
+    model = PanelModel(
+        **split_judges(judged),
+        critic='{"injection_spans": [], "challenges": [], "agrees_bad_faith": null}',
+        chair=json.dumps({"summary": "做过小程序,与技术部对得上。"}, ensure_ascii=False),
+    )
+    saved: dict = {}
+
+    async def _fetch(user_id, cycle_id):
+        return 99, [
+            FieldText(field_key="real_name", title="姓名", value="张三"),
+            FieldText(
+                field_key="intro",
+                title="自我介绍",
+                value=f"{quote},已有两百名同学在用。电话 13812345678,邮箱 me@x.com,学号 2021023456",
+            ),
+        ], ApplicantProfile(first_dept="技术部")
+
+    def _save(card, **_kw):
+        saved["card"] = card
+        return 1
+
+    class _FakeSettings:
+        model_strong = "test-strong"
+
+    monkeypatch.setattr(ev_runner, "fetch_scoring_fields", _fetch)
+    monkeypatch.setattr(ev_runner.evaluation, "save_scorecard", _save)
+    monkeypatch.setattr(ev_runner.evaluation, "cycle_scoring_mode", lambda cycle_id: "panel")
+    monkeypatch.setattr(ev_graph, "build_model", lambda *a, **k: model)
+    monkeypatch.setattr(ev_graph, "get_effective_settings", lambda: _FakeSettings())
+
+    await ev_runner._do_scoring({"user_id": 42}, 99, 2026, 1)
+
+    assert model.total_calls == 7
+    for role, prompts in model.calls.items():
+        for prompt in prompts:
+            for leak in ("张三", "13812345678", "me@x.com", "2021023456"):
+                assert leak not in prompt, f"{role} 的 prompt 泄漏:{leak}"
+    assert "138****5678" in model.calls["技术部"][0]
+    assert saved["card"]["panel"]["mode"] == "panel"
 
 
 async def test_generated_audit_records_mode_confidence_and_prompt_versions(monkeypatch) -> None:

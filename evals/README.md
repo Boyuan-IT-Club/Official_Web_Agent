@@ -67,8 +67,9 @@ EVALUATION_SCORING_MODE=critic uv run python evals/run_evals.py --suite scoring_
   --baseline evals/baselines/scoring_probes.single.json
 ```
 
-- 执行器按配置里的评分模式(`EVALUATION_SCORING_MODE`,缺省 `critic`)跑评分子图,用了哪种
-  模式记在基线的 `context.scoring_mode` 里。出基线、做对比都要显式写明模式,别靠缺省值。
+- 执行器按配置里的评分模式(`EVALUATION_SCORING_MODE`:`single` / `critic` / `panel`,缺省
+  `critic`)跑评分子图,用了哪种模式记在基线的 `context.scoring_mode` 里。出基线、做对比都要
+  显式写明模式,别靠缺省值。`panel` 模式每份简历七次调用起,整套约是单评委的七倍。
 - 基线按评分模式各存一个文件(文件名里的 `single` 即模式),文件要提交进仓库。
   **`evals/baselines/` 目前还不存在:这条基线还没有在带 key 的环境里跑出来。**
 - 读成本时注意两点:同一份简历连评几次,后几次会命中前缀缓存,所以看总输入 token,缓存命中

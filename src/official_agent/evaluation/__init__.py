@@ -5,8 +5,9 @@
 - applicant.py:报名信息(志愿部门/专业/年级)的解析
 - schema.py:仓库首个 strict Pydantic 结构化输出契约
 - graph.py:langgraph 评分子图,按评分模式装配(single:precheck → llm_score → finalize;
-  critic:评委判完再过批判者、答辩与代码汇总)
-- panel/:初筛合议——批判者、评委答辩、纯函数汇总(分歧只产出置信度,不产出分数)
+  critic:评委判完再过批判者、答辩与代码汇总;panel:再把评委拆成一张清单一位)
+- panel/:初筛合议——拆开的评委、批判者、评委答辩、纯函数汇总(分歧只产出置信度,
+  不产出分数)、主席
 - grounding.py:落地校验(引文是否在原文里);material.py:简历材料进 prompt 的统一排布
 - prompts/evaluation/scoring.md:打分 prompt(ADR-0004:唯一权威是文件);
   prompts/evaluation/panel/:批判者与答辩的 prompt

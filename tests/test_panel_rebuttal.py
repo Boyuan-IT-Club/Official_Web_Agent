@@ -19,6 +19,7 @@ from tests.panel_helpers import (
 
 from official_agent.evaluation.material import resume_sources
 from official_agent.evaluation.panel import judges
+from official_agent.evaluation.schema import CHECKLISTS, EFFORT_CHECKLIST
 from official_agent.prompt_loader import load_prompt
 
 SOURCES = resume_sources(RESUME_FIELDS)
@@ -33,18 +34,20 @@ def _verdict(key, *, met: bool, quote: str = "", reason: str = "重看后的结�
     return {"checklist": key[0], "item": key[1], "met": met, "quote": quote, "reason": reason}
 
 
-def _parse(content, judged, challenges):
-    return judges.parse_rebuttal(content, judgement=judged, challenges=challenges, sources=SOURCES)
+def _parse(content, judged, challenges, scope=CHECKLISTS):
+    return judges.parse_rebuttal(
+        content, judgement=judged, challenges=challenges, sources=SOURCES, attitude_scope=scope
+    )
 
 
 def test_prompt_appends_to_the_judges_prompt_and_wraps_challenges_as_data() -> None:
     """前缀与评委首次判定逐字节相同(模型侧前缀缓存才命中);质疑理由是数据不是指令。"""
     judged = judgement({TECH_BASE: QUOTE_FLASK})
 
-    prompt = judges.build_prompt(BASE_PROMPT, judged, [challenge(TECH_BASE)])
+    prompt = judges.build_rebuttal_prompt(BASE_PROMPT, judged, [challenge(TECH_BASE)])
 
     assert prompt.startswith(BASE_PROMPT)
-    assert load_prompt(judges.PROMPT_FILE) in prompt
+    assert load_prompt(judges.REBUTTAL_PROMPT_FILE) in prompt
     # 答辩要求的正文里也提到了这个标签名;真正的数据区是最后一个
     zone = prompt[prompt.rindex('<data source="challenges">') :]
     payload = json.loads(zone[zone.index("\n") + 1 : zone.index("\n</data>")])
@@ -122,6 +125,27 @@ def test_parse_refuses_to_meet_anything_on_a_bad_faith_card() -> None:
         _parse(_reply(_verdict(TECH_BASE, met=True, quote=QUOTE_FLASK)), judged, missed)
 
 
+def test_dept_judge_rebuttal_is_not_bound_by_an_attitude_it_never_saw() -> None:
+    """拆开之后态度是认真程度评委判的,部门评委看不到:它在答辩里改判达成不算违例。
+
+    态度不端时要不要清零整张卡,留给汇总的双钥去定。
+    """
+    judged = judgement(attitude="bad_faith")
+    missed = [challenge(TECH_BASE, "missed_evidence", quote=QUOTE_FLASK)]
+    reply = _reply(_verdict(TECH_BASE, met=True, quote=QUOTE_FLASK))
+
+    assert _parse(reply, judged, missed, scope=())[TECH_BASE]["met"] is True
+    # 认真程度评委自己的清单仍受它自己判的态度约束
+    effort_missed = [challenge(EFFORT_SINCERE, "missed_evidence", quote=QUOTE_WHY)]
+    with pytest.raises(ValueError, match="bad_faith 必须两张清单无一项达成"):
+        _parse(
+            _reply(_verdict(EFFORT_SINCERE, met=True, quote=QUOTE_WHY)),
+            judged,
+            effort_missed,
+            scope=(EFFORT_CHECKLIST,),
+        )
+
+
 async def test_rebut_retries_once_then_returns_revised_items() -> None:
     judged = judgement({TECH_BASE: QUOTE_FLASK})
     model = ScriptedModel(
@@ -135,6 +159,7 @@ async def test_rebut_retries_once_then_returns_revised_items() -> None:
         judgement=judged,
         challenges=[challenge(TECH_BASE)],
         sources=SOURCES,
+        attitude_scope=CHECKLISTS,
     )
 
     assert revised[TECH_BASE]["quote"] == "已有两百名同学在用"
@@ -153,4 +178,5 @@ async def test_rebut_raises_when_the_judge_never_complies() -> None:
             judgement=judgement({TECH_BASE: QUOTE_FLASK}),
             challenges=[challenge(TECH_BASE)],
             sources=SOURCES,
+            attitude_scope=CHECKLISTS,
         )

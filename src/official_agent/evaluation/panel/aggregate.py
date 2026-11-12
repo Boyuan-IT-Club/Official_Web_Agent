@@ -27,13 +27,13 @@ class Settlement:
     """汇总结果:最终判定(与 Judgement 同形状的各部分)、是否重点复核、合议记录。
 
     panel 是落在卡上的合议记录:confidence / critic / injection / disputes /
-    revised / overrides / attitude_dispute。
+    revised / overrides / attitude_dispute。整体理由不在这里:它由调用方按模式决定
+    用谁写的(评委或主席),再经 annotate_summary 加说明。
     """
 
     match: list[dict[str, Any]]
     effort: list[dict[str, Any]]
     attitude: dict[str, str]
-    summary: str
     hard_zero: bool
     hard_zero_reasons: dict[str, str]
     panel: dict[str, Any]
@@ -68,11 +68,19 @@ def _confidence(
     return "medium" if disputes or revised else "high"
 
 
-def _annotated_summary(summary: str, *, injection_detected: bool, changed: int) -> str:
-    """整体理由是评委在质疑之前写的:汇总改动过判定或检出注入时,把这一点写在理由旁边。"""
-    if injection_detected:
+def annotate_summary(
+    summary: str, panel: dict[str, Any], *, written_before_settlement: bool
+) -> str:
+    """给整体理由加上程序的说明,不改写理由本身。
+
+    检出注入时在开头提醒:理由是模型写的,可能受那段文本影响。理由写在汇总之前
+    (评委自己写的)而汇总又改动过判定时,在末尾注明以逐项判定为准;写在汇总之后的
+    (主席写的)已经看过最终判定,不需要这一句。
+    """
+    if panel["injection"]["detected"]:
         summary = "【检出疑似提示注入:下面的整体理由可能受其影响,请对照原文与逐项判定】" + summary
-    if changed:
+    changed = len(panel["revised"]) + len(panel["overrides"])
+    if written_before_settlement and changed:
         summary += f"(汇总时有 {changed} 项判定被改动,以逐项判定为准。)"
     return summary
 
@@ -183,11 +191,6 @@ def settle(
         ],
         effort=[items[(EFFORT_CHECKLIST, it["item"])] for it in judgement["effort"]],
         attitude=dict(judgement["attitude"]),
-        summary=_annotated_summary(
-            judgement["summary"],
-            injection_detected=bool(spans),
-            changed=len(revised) + len(overrides),
-        ),
         hard_zero=confirmed_bad_faith or not any_met,
         hard_zero_reasons={} if any_met else {"_attitude": _NOTHING_MET},
         panel=panel,

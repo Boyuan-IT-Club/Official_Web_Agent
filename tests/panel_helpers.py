@@ -128,26 +128,54 @@ def scorecard_reply(judged: Judgement) -> str:
 
 
 class PanelModel:
-    """假模型:按 prompt 认出是评委、批判者还是答辩在调用,分别给预设回复。
+    """假模型:按 prompt 认出是哪个角色在调用,分别给预设回复。
 
-    每个角色的回复可以是一个字符串(每次都回它)、一个列表(按次序回,用完重复
-    最后一条)、一个函数(拿 prompt 算回复),或一个异常(调用即抛)。calls 记下
-    各角色收到的 prompt。
+    角色:judge(判全部清单的单评委)、critic、rebuttal、chair,以及拆开之后的评委——
+    effort(认真程度评委)和各部门评委(角色名就是部门名)。depts 可以给一个脚本(四位
+    部门评委共用),也可以给 {部门名: 脚本}。
+
+    脚本可以是一个字符串(每次都回它)、一个列表(按次序回,用完重复最后一条)、一个
+    函数(拿 prompt 算回复),或一个异常(调用即抛)。calls 记下各角色收到的 prompt。
     """
 
-    def __init__(self, *, judge: Any, critic: Any = None, rebuttal: Any = None) -> None:
-        self.scripts = {"judge": judge, "critic": critic, "rebuttal": rebuttal}
-        self.calls: dict[str, list[str]] = {"judge": [], "critic": [], "rebuttal": []}
+    def __init__(
+        self,
+        *,
+        judge: Any = None,
+        critic: Any = None,
+        rebuttal: Any = None,
+        chair: Any = None,
+        effort: Any = None,
+        depts: Any = None,
+    ) -> None:
+        self.scripts: dict[str, Any] = {
+            "judge": judge,
+            "critic": critic,
+            "rebuttal": rebuttal,
+            "chair": chair,
+            "effort": effort,
+        }
+        for dept in DEPARTMENTS:
+            self.scripts[dept] = depts.get(dept) if isinstance(depts, dict) else depts
+        self.calls: dict[str, list[str]] = {role: [] for role in self.scripts}
         self.usage: dict[str, int] | None = None
 
     @staticmethod
     def role_of(prompt: str) -> str:
-        from official_agent.evaluation.panel import critic, judges
+        from official_agent.evaluation.panel import chair, critic, judges
         from official_agent.prompt_loader import load_prompt
 
         if prompt.startswith(load_prompt(critic.PROMPT_FILE)):
             return "critic"
-        return "rebuttal" if load_prompt(judges.PROMPT_FILE) in prompt else "judge"
+        if prompt.startswith(load_prompt(chair.PROMPT_FILE)):
+            return "chair"
+        if load_prompt(judges.REBUTTAL_PROMPT_FILE) in prompt:
+            return "rebuttal"
+        if not prompt.startswith(load_prompt(judges.PREAMBLE_FILE)):
+            return "judge"
+        if load_prompt(judges.EFFORT_PROMPT_FILE) in prompt:
+            return "effort"
+        return next(dept for dept in DEPARTMENTS if f"## 判定标准\n\n### {dept}" in prompt)
 
     async def ainvoke(self, messages: list[Any], config: Any = None) -> Any:
         prompt = messages[0].content
@@ -174,3 +202,26 @@ class PanelModel:
     @property
     def total_calls(self) -> int:
         return sum(len(prompts) for prompts in self.calls.values())
+
+    def call_counts(self, *roles: str) -> list[int]:
+        """各角色被调用的次数,按给定的角色顺序。"""
+        return [len(self.calls[role]) for role in roles]
+
+
+def checklist_reply(judged: Judgement, checklist: str) -> str:
+    """整份判定 → 只判一张清单的评委该吐的 JSON 文本(认真程度评委带态度)。"""
+    import json
+
+    if checklist == EFFORT_CHECKLIST:
+        payload = {"items": judged["effort"], "attitude": judged["attitude"]}
+    else:
+        payload = {"items": next(m["items"] for m in judged["match"] if m["dept"] == checklist)}
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def split_judges(judged: Judgement) -> dict[str, Any]:
+    """整份判定 → PanelModel 的 effort / depts 两个参数:五位评委各回自己那张清单。"""
+    return {
+        "effort": checklist_reply(judged, EFFORT_CHECKLIST),
+        "depts": {dept: checklist_reply(judged, dept) for dept in DEPARTMENTS},
+    }

@@ -522,3 +522,28 @@ async def test_critic_mode_blocks_the_injection_the_single_judge_leaks(
     assert not any(note.startswith("注入未拦截") for note in result.notes)
     assert result.context["scoring_mode"] == "critic"
     assert len(model.calls["critic"]) == len(model.calls["judge"]) == 4  # 干净版与注入版各评 2 次
+
+
+
+async def test_panel_mode_is_measured_by_the_same_executor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """拆评委的模式用同一份数据集、同一个执行器出数;用了哪种模式记在运行条件里。"""
+    import json
+
+    from tests.panel_helpers import PanelModel, judgement, split_judges
+
+    judged = judgement(attitude="perfunctory")
+    model = PanelModel(
+        **split_judges(judged),
+        critic=_alert_critic,
+        chair=json.dumps({"summary": "材料很少。"}, ensure_ascii=False),
+    )
+
+    result = await _run_against_real_graph(
+        monkeypatch, _dataset(tmp_path, QUOTE_THE_INJECTION), mode="panel", model=model
+    )
+
+    assert result.context["scoring_mode"] == "panel"
+    assert result.metrics["injection_block_rate"] == 1.0
+    assert model.total_calls == 4 * 7  # 干净版与注入版各评 2 次,每次七个角色

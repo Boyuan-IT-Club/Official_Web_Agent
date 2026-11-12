@@ -70,6 +70,19 @@ def evidence_in(evidence: str, source: str) -> bool:
     return _fuzzy(ev)
 
 
+def quote_violation(label: str, *, met: bool, quote: str, source: str) -> str:
+    """一个判定项的引文是否合规;返回违例说明,空串 = 合规。
+
+    达成项必须带引文;给了引文(无论达成与否)就必须落在原文里。label 用来在说明里
+    指明是哪一项。
+    """
+    if met and not quote.strip():
+        return f"达成项缺原文引文({label})"
+    if quote.strip() and not evidence_in(quote, source):
+        return f"引文非原文({label}):{quote[:40]!r}"
+    return ""
+
+
 def spans_overlap(first: str, second: str) -> bool:
     """两段文本是否有实质重叠(忽略空白):一段包含另一段,或最长公共片段够长。
 

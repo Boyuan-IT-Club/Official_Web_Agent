@@ -86,9 +86,11 @@ src/official_agent/
 ├── evaluation/             # 评估域:流水线领域逻辑
 │   ├── runner.py           #   EvaluationRunner:submit/派发/_execute_job(评分段+题库段)
 │   ├── graph.py            #   评分子图,按评分模式装配:single = precheck→llm_score→finalize;
-│   │                       #   critic = precheck→judge→critic→(rebuttal)→aggregate→finalize
-│   ├── panel/              #   初筛合议:critic(批判者,只举手不改判)/ judges(评委答辩)/
-│   │                       #   aggregate(纯函数汇总:分歧、作废项、置信度)/ shapes
+│   │                       #   critic = precheck→judge→critic→(rebuttal)→aggregate→finalize;
+│   │                       #   panel = 五路评委→collect→critic→(rebuttal)→aggregate→chair(缺省不启用)
+│   ├── panel/              #   初筛合议:critic(批判者,只举手不改判)/ judges(拆开的评委与答辩)/
+│   │                       #   aggregate(纯函数汇总:分歧、作废项、置信度)/ chair(主席写整体理由)/
+│   │                       #   criteria(判定标准截自评分 prompt)/ shapes
 │   ├── grounding.py        #   落地校验:引文是否在原文里、两段文本是否重叠
 │   ├── material.py         #   简历材料进 prompt 的统一排布(报名信息 + 简历全文,包数据区)
 │   ├── investigate_graph.py#   调查出题子图:route→explore→generate(含 skip/guided 分支)
@@ -251,12 +253,18 @@ flowchart LR
     FIN --> E(["END"])
 ```
 
-评分模式(`evaluation_scoring_mode`:`single` / `critic`)**按周期固定**:一个周期最早落库
+评分模式(`evaluation_scoring_mode`:`single` / `critic` / `panel`)**按周期固定**:一个周期最早落库
 的那张卡用了哪种模式,之后的 job(含重评)都沿用,不再读配置——等级是池内相对排名,同一个
 池里的卡必须出自同一种模式。`critic` 模式下批判者没有改判权:被质疑的条目交回评委重判,
 评委维持原判就只记为分歧。唯一由代码直接改判的情形是达成项的引文落在批判者指出的注入
 片段里。分歧只产出**置信度**(`low / medium / high`,落在卡的 `panel` 块里),不进分数与
 等级;评审队列按低置信在前排序,并有 `low_confidence` 子队列。
+
+`panel` 模式(上图未画,**缺省不启用**)在 `critic` 的基础上把评委拆开:四位部门评委各判一张
+部门清单、一位认真程度评委判认真程度清单并给态度,用 `Send` 五路并行、各自独立上下文;
+任何一位评委失败即整份失败。批判者之后的答辩按清单分派给各自的评委,整体理由改由主席在
+汇总之后写(只看最终判定,不看简历;失败则用程序模板)。启用条件见
+`docs/proposals/screening-panel.md`「P2 落地」。
 
 初筛看两个维度,互不折算:**部门匹配度**(四个部门的录入标准清单都判,志愿部门那张
 决定匹配度,其余用于调剂建议)与**认真程度**(内容充实/了解社团部门/意愿真挚/成文/
@@ -323,7 +331,7 @@ flowchart TD
 |---|---|---|
 | `agent_threads` | 会话档案(thread_id/属主/状态) | thread_id 全局唯一;软删+保留期清理 |
 | `agent_conversation_log` | 对话日志(问题摘要/工具/耗时/usage/轮级 trace_id/守卫判定) | fail-open 写入 |
-| `evaluation_scorecard` | AI 参考分卡(card JSONB/total/hard_zero;critic 模式的卡带 `panel` 块:模式/置信度/注入片段/分歧) | UNIQUE(resume,cycle,card_version);状态机 CHECK |
+| `evaluation_scorecard` | AI 参考分卡(card JSONB/total/hard_zero;critic / panel 模式的卡带 `panel` 块:模式/置信度/注入片段/分歧) | UNIQUE(resume,cycle,card_version);状态机 CHECK |
 | `evaluation_job` | 执行 job(状态机/attempts/qbank_status) | 部分唯一索引:活跃 job 每 (resume,cycle) 一条 |
 | `interview_qbank` | 题库信封(v2 JSONB) | 版本递增 |
 | `qbank_pick_log` | 面试官选题记录 | 服务端权威引用(防伪造证据路径) |

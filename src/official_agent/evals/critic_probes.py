@@ -40,6 +40,7 @@ async def _review_with_model(
     from official_agent.evaluation import graph as scoring_graph
     from official_agent.evaluation.material import resume_material, resume_sources
     from official_agent.evaluation.panel import critic
+    from official_agent.evaluation.panel.criteria import criteria_from
     from official_agent.graphs.assistant import build_model
     from official_agent.prompt_loader import load_prompt
 
@@ -47,7 +48,7 @@ async def _review_with_model(
     critique, _usage = await critic.review(
         model,
         material=resume_material(fields, profile),
-        criteria=critic.criteria_from(load_prompt(scoring_graph.PROMPT_FILE)),
+        criteria=criteria_from(load_prompt(scoring_graph.PROMPT_FILE)),
         judgement=judgement,
         sources=resume_sources(fields),
     )

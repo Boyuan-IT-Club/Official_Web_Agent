@@ -134,6 +134,34 @@ class ScorecardOutput(BaseModel):
     attitude: AttitudeVerdict
 
 
+# ── 拆开的评委与主席:一位评委只判一张清单 ──
+
+
+class DeptJudgeOutput(BaseModel):
+    """部门评委的结构化输出:一个部门的匹配清单逐项判定。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ItemVerdict] = Field(min_length=1)
+
+
+class EffortJudgeOutput(BaseModel):
+    """认真程度评委的结构化输出:认真程度清单逐项判定,外加态度结论。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ItemVerdict] = Field(min_length=1)
+    attitude: AttitudeVerdict
+
+
+class ChairOutput(BaseModel):
+    """主席的结构化输出:给面试官看的整体理由。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1, max_length=600, description="2-4 句整体理由")
+
+
 # ── 批判者与答辩:评分卡出来之后的对抗复核 ──
 
 #: 质疑的两种类型。quote_not_supporting:评委判了达成,但引文撑不住这一项;

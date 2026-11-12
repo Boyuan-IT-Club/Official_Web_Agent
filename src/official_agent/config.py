@@ -99,17 +99,21 @@ class Settings(BaseSettings):
     # 初筛 job 后台领取循环的间隔(秒);0 = 关闭(只靠提交时派发 + 重启恢复)
     evaluation_claim_interval_seconds: int = 30
 
-    # 初筛评分模式(见 evaluation/graph.py 的 SCORING_MODES):single = 评委判完直接出卡;
-    # critic = 评委判完再过批判者(检测提示注入、质疑引文撑不住的判定)。
-    # 只对「还没有评分卡的周期」生效:周期一旦落了第一张卡,模式就按那张卡固定,
-    # 之后改这里不影响该周期(同一个等级池里的卡必须出自同一种模式)。
-    # 不在 HOT_KEYS:切换模式是周期之间的事,不做热生效。
-    evaluation_scoring_mode: Literal["single", "critic"] = "critic"
-
     # 初筛分级:同部门候选池内头部/尾部比例与小池阈值(见 evaluation/grading.py)
     evaluation_grade_top_ratio: float = 0.2
     evaluation_grade_bottom_ratio: float = 0.2
     evaluation_grade_min_pool: int = 15
+
+    # 初筛评分模式(见 evaluation/graph.py 的 SCORING_MODES):
+    #   single = 评委判完直接出卡;
+    #   critic = 评委判完再过批判者(检测提示注入、质疑引文撑不住的判定);
+    #   panel  = 一位评委只判一张清单(四个部门 + 认真程度),再过批判者,主席写整体理由。
+    # panel 每份简历要七次以上模型调用,**缺省不启用**:要先在评分基线上赢过 critic,
+    # 启用条件列在 docs/proposals/screening-panel.md 里讲拆评委落地的那一节。
+    # 只对「还没有评分卡的周期」生效:周期一旦落了第一张卡,模式就按那张卡固定,
+    # 之后改这里不影响该周期(同一个等级池里的卡必须出自同一种模式)。
+    # 不在 HOT_KEYS:切换模式是周期之间的事,不做热生效。
+    evaluation_scoring_mode: Literal["single", "critic", "panel"] = "critic"
 
 
 @lru_cache
