@@ -1,0 +1,94 @@
+# 审题探针数据集:真实模型驱动审题者(evaluation/question_review.py),看它能不能把
+# 植入的坏题标出来,又不误伤好题。
+#
+# 一组题混着两类:
+#   expect: good            —— 有出处、问得具体的好题。不该被判 drop;被判 keep 的比例
+#                              (good_keep_rate)就是「没有误伤」的比例,拦截模式要看它。
+#   expect: [理由, ...]      —— 植入的坏题。要被标出来(结论不是 keep),且给出的理由里
+#                              至少有一条在列表中。列表里写的是「这道题可以被归到的缺陷」,
+#                              例如八股题既可以算 recitable 也可以算 searchable。
+#
+# 植入的措辞不当题故意绕开了确定性预检的词表,重复题是改写而不是同文——这样量到的是
+# 模型的判断,不是预检。
+#
+# 门槛是初值,没有在真实模型上校准过:第一次跑出分布之后按分布重定,再写基线。
+
+runner: question_review_probes
+
+defaults:
+  min_planted_flag_rate: 0.7
+  min_good_not_dropped_rate: 1.0
+
+fixtures:
+  statement: |
+    我做了一个社团管理系统,负责报名接口和简历筛选模块,用 flask 写的后端。
+  dossier: |
+    ### C1_背景与动机
+    社团管理系统:解决招新报名与简历筛选效率问题。
+    ### C2_技术选型与权衡
+    依赖清单:redis 客户端、flask 框架、sqlalchemy ORM;放弃了 django(过重)。
+    ### C3_架构与数据流
+    路径清单:README.md src/app.py src/models.py tests/test_app.py
+    ### C4_实现细节拷打
+    src/app.py 中报名接口带限流与参数校验,缓存报名计数,并对重复提交做了幂等处理。
+    src/models.py 定义了报名、场次与候选人三类模型,报名与场次是一对多关系。
+    tests/test_app.py 覆盖了报名成功、重复报名、字段缺失三类场景,跑通 CI。
+    部署采用 docker compose,数据库迁移用 alembic 管理,配置面留了环境变量注入点。
+    报名高峰(开放首日)出现过短时排队,后续把写入改成队列异步落库。
+
+questions:
+  # ── 好题 ──
+  - key: entry
+    role: entry
+    question: 先整体讲讲这个社团管理系统:它要解决招新里的什么问题,你负责哪一部分?
+    expect: good
+  - key: "chain:0:0"
+    role: chain
+    context: src/app.py 报名接口的限流与幂等
+    question: 报名接口里你做了限流。限的是什么维度——按用户、按 IP 还是按接口?当时为什么这么选?
+    expect: good
+  - key: "chain:0:1"
+    role: chain
+    context: src/app.py 报名接口的限流与幂等
+    question: 重复提交的幂等是怎么判定「同一次提交」的?两个请求几乎同时到的时候,你的实现会发生什么?
+    expect: good
+  - key: "chain:1:0"
+    role: chain
+    context: 报名高峰后把写入改成队列异步落库
+    question: 开放首日出现排队之后,你把写入改成了队列异步落库。改之前的瓶颈具体卡在哪一步,你是怎么定位到的?
+    expect: good
+  - key: "reserve:0"
+    role: reserve
+    question: 你放弃了 django 改用 flask。回头看,这个系统里有哪一块是 django 自带、而你不得不自己补的?
+    expect: good
+
+  # ── 植入的坏题 ──
+  - key: "reserve:1"
+    role: reserve
+    question: Redis 支持哪几种数据结构?分别适合什么场景?
+    expect: [searchable, recitable]
+  - key: "reserve:2"
+    role: reserve
+    question: 请解释一下什么是幂等性,以及 HTTP 方法里哪些是幂等的。
+    expect: [recitable, searchable]
+  - key: "chain:1:1"
+    role: chain
+    context: 报名高峰后把写入改成队列异步落库
+    question: 你在项目里用 Kafka 做了消息队列,分区数是怎么定的?
+    expect: [ungrounded]
+  - key: "reserve:3"
+    role: reserve
+    question: src/payment.py 里的支付回调是怎么做签名校验的?
+    expect: [ungrounded]
+  - key: "reserve:4"
+    role: reserve
+    question: 你在团队合作中遇到过什么困难?是怎么解决的?
+    expect: [generic]
+  - key: "reserve:5"
+    role: reserve
+    question: 这个限流真的是你自己写的吗?看起来更像是从网上抄来的。
+    expect: [tone]
+  - key: "reserve:6"
+    role: reserve
+    question: 对于重复提交,你是如何判断两次请求属于同一次提交的?
+    expect: [duplicate]

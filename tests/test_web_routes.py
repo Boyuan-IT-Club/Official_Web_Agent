@@ -754,6 +754,43 @@ def test_chat_toolless_honest_reply_passes_through(
     assert deltas == ["我没有查询权限,请联系管理员。"]
 
 
+@pytest.mark.parametrize(
+    ("role", "reply", "expected_prefix"),
+    [
+        ("unknown", "查询结果:您有 3 份简历待筛选。", "fabrication_empty_tools=triggered:"),
+        ("unknown", "我没有查询权限,请联系管理员。", "fabrication_empty_tools=clean"),
+        ("candidate", "你好!", None),  # 有工具档不过这道守卫:留空,区别于 clean
+    ],
+)
+def test_chat_logs_guard_verdict_with_the_turn(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+    reply: str,
+    expected_prefix: str | None,
+) -> None:
+    """守卫判定随本轮对话日志落库:事后能按判定筛出被改写的轮次。"""
+    logged: list[dict] = []
+    monkeypatch.setattr(
+        "official_agent.web.telemetry.log_conversation", lambda *a, **k: logged.append(k)
+    )
+    _install_fake_agent(monkeypatch, reply)
+    ident = auth_ok_data(role=role)
+    if role == "unknown":
+        ident["permission_codes"] = []
+    monkeypatch.setattr("official_agent.web.auth.resolve", fake_resolve(ident))
+    resp = client.post(
+        "/api/agent/chat", json={"message": "有几份简历?"}, headers={"Authorization": "Bearer tok"}
+    )
+    assert resp.status_code == 200
+    (row,) = logged
+    verdict = row["guard_verdict"]
+    if expected_prefix is None:
+        assert verdict is None
+    else:
+        assert verdict is not None and verdict.startswith(expected_prefix)
+
+
 def test_guard_rewrite_persists_to_checkpointer(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1099,3 +1136,147 @@ def test_chat_malformed_body_not_500(
         "/api/agent/chat", json=["an", "array"], headers={"Authorization": "Bearer tok"}
     )
     assert resp.status_code == 422
+
+
+# ── 引用核验(只观测)──────────────────────────────────────
+
+
+def _install_kb_agent(
+    monkeypatch: pytest.MonkeyPatch, reply: str, *, titles: list[str] | None
+) -> None:
+    """假 agent:titles 不为 None 时本轮调用过一次知识库检索、命中这些标题;随后吐固定回复。"""
+    import json
+
+    from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
+
+    from official_agent.web import routes
+
+    class _KbAgent:
+        async def astream(self, inputs, config: RunnableConfig, **kwargs):
+            if titles is not None:
+                results = [{"source_id": f"kb_{i}", "title": t} for i, t in enumerate(titles)]
+                payload = {"status": "ok" if results else "not_found", "results": results}
+                call = {"name": "search_knowledge", "args": {"query": "q"}, "id": "c1"}
+                yield "updates", {"agent": {"messages": [AIMessage(content="", tool_calls=[call])]}}
+                yield (
+                    "updates",
+                    {
+                        "tools": {
+                            "messages": [
+                                ToolMessage(
+                                    json.dumps(payload, ensure_ascii=False),
+                                    tool_call_id="c1",
+                                    name="search_knowledge",
+                                )
+                            ]
+                        }
+                    },
+                )
+            yield "messages", (AIMessageChunk(content=reply), {})
+            yield "updates", {"agent": {"messages": []}}
+
+        async def aget_state(self, config: RunnableConfig):
+            return None
+
+    monkeypatch.setattr("official_agent.web.auth.resolve", fake_resolve(auth_ok_data()))
+    monkeypatch.setattr(routes, "build_assistant_agent", lambda *a, **k: _KbAgent())
+
+
+def _chat_and_capture_log(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> tuple[list, dict]:
+    logged: list[dict] = []
+    monkeypatch.setattr(
+        "official_agent.web.telemetry.log_conversation", lambda *a, **k: logged.append(k)
+    )
+    resp = client.post(
+        "/api/agent/chat",
+        json={"message": "技术部做什么?"},
+        headers={"Authorization": "Bearer tok"},
+    )
+    assert resp.status_code == 200
+    (row,) = logged
+    return _sse_events(resp), row
+
+
+@pytest.fixture
+def citation_check_on(monkeypatch: pytest.MonkeyPatch):
+    from official_agent.config import get_settings
+
+    monkeypatch.setenv("KB_CITATION_CHECK_ENABLED", "true")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def test_citation_check_is_off_by_default(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """默认不跑引用核验:就算回复引了没检索到的条目,对话日志里也没有这一项判定。"""
+    from official_agent.config import Settings, get_settings
+
+    assert Settings(_env_file=None).kb_citation_check_enabled is False
+    monkeypatch.delenv("KB_CITATION_CHECK_ENABLED", raising=False)
+    get_settings.cache_clear()
+    _install_kb_agent(monkeypatch, "据《奖学金办法》,每学期评奖学金。", titles=["技术部介绍"])
+    _events, row = _chat_and_capture_log(client, monkeypatch)
+    assert row["guard_verdict"] is None
+
+
+@pytest.mark.parametrize(
+    ("reply", "titles", "expected"),
+    [
+        ("据知识库《技术部介绍》,技术部负责官网开发。", ["技术部介绍"], "kb_citation=clean"),
+        (
+            "据《奖学金办法》,每学期评奖学金。",
+            ["技术部介绍"],
+            "kb_citation=unverified:奖学金办法",
+        ),
+        ("据《会费说明》,不收费。", [], "kb_citation=unverified:会费说明"),
+        ("上面说的《技术部介绍》里有。", None, "kb_citation=unsearched:技术部介绍"),
+        ("知识库里没有这部分。", ["技术部介绍"], None),  # 没有引用:守卫不适用,不留判定
+    ],
+)
+def test_citation_verdict_is_logged_with_the_turn(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    citation_check_on: None,
+    reply: str,
+    titles: list[str] | None,
+    expected: str | None,
+) -> None:
+    _install_kb_agent(monkeypatch, reply, titles=titles)
+    events, row = _chat_and_capture_log(client, monkeypatch)
+    assert row["guard_verdict"] == expected
+    # 只观测:回复原样发给用户,一个字都不改
+    assert "".join(e.get("content", "") for e in events if e["type"] == "delta") == reply
+    assert row["reply_summary"] == reply
+    assert events[-1]["type"] == "done"
+
+
+def test_citation_and_fabrication_verdicts_share_the_column(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, citation_check_on: None
+) -> None:
+    """无工具档:编造守卫与引用核验各有一项判定,落在同一列里。"""
+    _install_fake_agent(monkeypatch, "关于社团,可以看《招新简章》。")
+    ident = auth_ok_data(role="unknown")
+    ident["permission_codes"] = []
+    monkeypatch.setattr("official_agent.web.auth.resolve", fake_resolve(ident))
+    _events, row = _chat_and_capture_log(client, monkeypatch)
+    assert row["guard_verdict"] == (
+        "fabrication_empty_tools=clean;kb_citation=unsearched:招新简章"
+    )
+
+
+def test_citation_check_failure_never_breaks_the_turn(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, citation_check_on: None, caplog
+) -> None:
+    def boom(*_a, **_k):
+        raise RuntimeError("regex engine exploded")
+
+    monkeypatch.setattr("official_agent.security.citation_guard.check_citations", boom)
+    _install_kb_agent(monkeypatch, "据《技术部介绍》。", titles=["技术部介绍"])
+    events, row = _chat_and_capture_log(client, monkeypatch)
+    assert events[-1]["type"] == "done"  # 回合照常结束
+    assert row["guard_verdict"] is None and row["error_code"] is None
+    assert "引用核验失败" in caplog.text

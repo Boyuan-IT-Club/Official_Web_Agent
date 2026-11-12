@@ -63,9 +63,24 @@ EFFORT_ITEMS: tuple[tuple[str, int], ...] = (
 )
 
 
+#: 认真程度清单的清单名。一个判定项用「(清单名, 判定项名)」定位:部门清单的清单名
+#: 就是部门名,认真程度清单用这个名字。
+EFFORT_CHECKLIST = "认真程度"
+
+#: 全部清单名,按卡上的展示顺序
+CHECKLISTS: tuple[str, ...] = (*DEPARTMENTS, EFFORT_CHECKLIST)
+
+
 def item_names(items: tuple[tuple[str, int], ...]) -> tuple[str, ...]:
     """清单 → 判定项名(按清单顺序)。"""
     return tuple(name for name, _ in items)
+
+
+def checklist_item_names(checklist: str) -> tuple[str, ...]:
+    """清单名 → 该清单的判定项名;清单名不存在返回空元组。"""
+    if checklist == EFFORT_CHECKLIST:
+        return item_names(EFFORT_ITEMS)
+    return item_names(DEPT_MATCH_ITEMS.get(checklist, ()))
 
 
 class ItemVerdict(BaseModel):
@@ -117,6 +132,85 @@ class ScorecardOutput(BaseModel):
     effort: list[ItemVerdict] = Field(min_length=1)
     summary: str = Field(min_length=1, description="2-4 句整体评价,给面试官看的理由")
     attitude: AttitudeVerdict
+
+
+# ── 拆开的评委与主席:一位评委只判一张清单 ──
+
+
+class DeptJudgeOutput(BaseModel):
+    """部门评委的结构化输出:一个部门的匹配清单逐项判定。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ItemVerdict] = Field(min_length=1)
+
+
+class EffortJudgeOutput(BaseModel):
+    """认真程度评委的结构化输出:认真程度清单逐项判定,外加态度结论。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ItemVerdict] = Field(min_length=1)
+    attitude: AttitudeVerdict
+
+
+class ChairOutput(BaseModel):
+    """主席的结构化输出:给面试官看的整体理由。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(min_length=1, max_length=600, description="2-4 句整体理由")
+
+
+# ── 批判者与答辩:评分卡出来之后的对抗复核 ──
+
+#: 质疑的两种类型。quote_not_supporting:评委判了达成,但引文撑不住这一项;
+#: missed_evidence:评委判了未达成,而简历里有一段原文支持它。
+CHALLENGE_KIND = Literal["quote_not_supporting", "missed_evidence"]
+
+
+class Challenge(BaseModel):
+    """批判者对一个判定项的质疑。它不是判定:只表示这一项值得评委再看一眼。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    checklist: str = Field(min_length=1, description="清单名:部门名或「认真程度」")
+    item: str = Field(min_length=1, description="判定项名,与清单一字不差")
+    kind: CHALLENGE_KIND
+    quote: str = Field(
+        default="",
+        max_length=200,
+        description="missed_evidence 必填:支持该项的简历原文逐字片段",
+    )
+    reason: str = Field(min_length=1, description="为什么质疑")
+
+
+class CriticOutput(BaseModel):
+    """批判者的结构化输出:只有注入片段、质疑清单和对 bad_faith 的表态,没有判定。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    injection_spans: list[str] = Field(
+        default_factory=list, description="简历里对评审者说话的原文片段,逐字照抄"
+    )
+    challenges: list[Challenge] = Field(default_factory=list)
+    agrees_bad_faith: bool | None = Field(
+        default=None, description="评委判 bad_faith 时填:是否同意;其余情况为 null"
+    )
+
+
+class RebuttalVerdict(ItemVerdict):
+    """答辩里对一个被质疑条目的重判:比普通判定多一个清单名,用来对上是哪一项。"""
+
+    checklist: str = Field(min_length=1, description="清单名:部门名或「认真程度」")
+
+
+class RebuttalOutput(BaseModel):
+    """评委答辩的结构化输出:被质疑的条目逐条重判,不多不少。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    verdicts: list[RebuttalVerdict] = Field(min_length=1)
 
 
 class QuestionEvidence(BaseModel):
@@ -287,6 +381,7 @@ class ExploreMeta(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     turns: int = 0
+    seconds: float | None = None  # 探索自己花的墙钟;没有探索(简历路径等)为 None
     dossier_chars: int = 0
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -305,12 +400,66 @@ class UsageMeta(BaseModel):
     cache_miss_tokens: int | None = None
 
 
+# ── 审题标注:挂在题组旁边,不进题目对象 ──
+
+REVIEW_VERDICT = Literal["keep", "revise", "drop"]
+
+#: 审题理由的固定集合。意见只在这里取值:审题者看到的题目与仓内容同源,
+#: 让它写自由文本等于给注入留一条落库的通道。
+REVIEW_REASON = Literal[
+    "searchable",  # 搜一下就能答,和候选人的项目无关
+    "ungrounded",  # 题目声称的事实在材料里找不到
+    "recitable",  # 背八股就能答,问不出是不是自己做的
+    "duplicate",  # 与同组里另一道题问的是同一件事
+    "generic",  # 换一份简历照样能问
+    "tone",  # 质问、设套、让人难堪的措辞
+]
+
+
+class QuestionReview(BaseModel):
+    """一道题的审题意见。keep 不带理由;revise / drop 至少带一条。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(
+        min_length=1, description="题目在题组里的编号(state/qbank.py 的 question_key)"
+    )
+    verdict: REVIEW_VERDICT
+    reasons: list[REVIEW_REASON] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _reasons_match_verdict(self) -> "QuestionReview":
+        if self.verdict == "keep" and self.reasons:
+            raise ValueError(f"keep 不该带理由:{self.key} {self.reasons}")
+        if self.verdict != "keep" and not self.reasons:
+            raise ValueError(f"{self.verdict} 必须带理由:{self.key}")
+        return self
+
+
+class LineReview(BaseModel):
+    """一条证据线的审题结果:逐题意见 + 这次审题本身的元信息。
+
+    意见放在题组**旁边**而不是题目对象里:题目对象是出题模型的输出面,在那里
+    留一个 review 字段,出题模型(或仓里的注入文本)就能替自己的题预先填上
+    「放行」。status=unavailable 表示审题模型没给出可用结果,题目原样放行,
+    此时 items 里只有确定性预检查出来的那几条。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["reviewed", "unavailable"]
+    items: list[QuestionReview] = Field(default_factory=list)
+    prompt_version: str = ""
+    usage: UsageMeta | None = None
+
+
 class QbankV2(BaseModel):
     """调查出题信封 v2(evaluation_qbank/v2,直接替换不兼容)。
 
     attribution/degraded 是信封一等概念(ADR-0008:unverified 绝不出仓题;
     预算触顶 degraded 出题)。mode/guide 沿用旧语义:guided=仓库材料
     缺失的通用引导组(此时 entry 可以是引导题,chains 空)。
+    review 为空 = 这组题没有审过(审题关闭,或该模式不审)。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -324,6 +473,7 @@ class QbankV2(BaseModel):
     degrade_reason: str = ""
     explore_meta: ExploreMeta = Field(default_factory=ExploreMeta)
     generation_usage: UsageMeta | None = None  # 出题段单次调用用量
+    review: LineReview | None = None
     prompt_version: str = ""
 
 

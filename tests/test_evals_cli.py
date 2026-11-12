@@ -79,3 +79,55 @@ async def test_write_then_regress_baseline_gate_fails(tmp_path: Path) -> None:
     # ③ 指标持平 → PASS
     rc = await mod._run(_ns(baseline=baseline_path), evals_dir=tree, registry=registry)
     assert rc == 0
+
+
+async def test_baseline_file_keeps_observations_and_context(tmp_path: Path) -> None:
+    """基线要能回答「这些数是在什么条件下量的、当时花了多少」,不只是指标本身。"""
+    mod = _load_cli()
+    tree = _tree(tmp_path)
+
+    async def run(path: Path, *, distribution: bool = False) -> SuiteResult:
+        return SuiteResult(
+            name=path.stem,
+            kind="fake",
+            source=path.name,
+            status="PASS",
+            metrics={"item_stability": 0.9},
+            observations={"avg_input_tokens": 3200.0},
+            context={"repeats": 3, "model": "fake-strong"},
+        )
+
+    registry = {"fake": SuiteSpec(run=run, env_blocker=lambda: None)}
+    # 目录不存在也能写:各模式的基线各放一个文件,通常落在子目录里
+    baseline_path = tmp_path / "baselines" / "foo.single.json"
+
+    rc = await mod._run(_ns(write_baseline=baseline_path), evals_dir=tree, registry=registry)
+
+    assert rc == 0
+    entry = json.loads(baseline_path.read_text(encoding="utf-8"))["suites"]["foo"]
+    assert entry["metrics"] == {"item_stability": 0.9}
+    assert entry["observations"] == {"avg_input_tokens": 3200.0}
+    assert entry["context"] == {"repeats": 3, "model": "fake-strong"}
+
+
+async def test_skipped_suite_never_becomes_a_baseline(tmp_path: Path) -> None:
+    """没跑的 suite 没有指标;把它记成基线,以后任何结果都「不低于基线」,门禁就空转了。"""
+    mod = _load_cli()
+    tree = _tree(tmp_path)
+
+    async def never(path: Path, *, distribution: bool = False) -> SuiteResult:
+        raise AssertionError("环境未配置时不应执行")
+
+    skipped = {"fake": SuiteSpec(run=never, env_blocker=lambda: "LLM_* 未配置")}
+    baseline_path = tmp_path / "baselines.json"
+
+    rc = await mod._run(_ns(write_baseline=baseline_path), evals_dir=tree, registry=skipped)
+    assert rc == 2
+    assert not baseline_path.exists()
+
+    # 已有的基线不会被一次全 SKIP 的运行冲掉
+    baseline_path.write_text('{"suites": {"foo": {"metrics": {"m": 0.9}}}}', encoding="utf-8")
+    await mod._run(_ns(write_baseline=baseline_path), evals_dir=tree, registry=skipped)
+    assert json.loads(baseline_path.read_text(encoding="utf-8"))["suites"]["foo"]["metrics"] == {
+        "m": 0.9
+    }

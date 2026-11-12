@@ -89,13 +89,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "启动自动恢复失败,残留 job 留待下次/手动重试", exc_info=True
             )
 
-        # 会话 TTL 清理 job——软删档案超保留期(连带 checkpoint/对话日志)
-        # 物理清理,每 6h 一轮,fail-open。thread_retention_days=0 时为 no-op:
-        # 保留天数由数据留存 ADR 决定,ADR 落地前不启用。
+        # 会话 TTL 清理 job——软删档案超保留期(连带 checkpoint/对话日志/知识库
+        # 检索日志)物理清理,每 6h 一轮,fail-open。thread_retention_days=0 时为
+        # no-op:保留天数由数据留存 ADR 决定,ADR 落地前不启用。
         ttl_stop = asyncio.Event()
 
         async def _session_ttl_loop() -> None:
             from official_agent.config import get_effective_settings
+            from official_agent.kb.query_log import delete_thread_queries
             from official_agent.state.conversation import delete_thread_conversations
             from official_agent.state.pg import purge_thread_checkpoints
             from official_agent.state.threads import (
@@ -111,6 +112,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                         with contextlib.suppress(Exception):
                             await asyncio.to_thread(purge_thread_checkpoints, tid)
                             await asyncio.to_thread(delete_thread_conversations, tid)
+                            await asyncio.to_thread(delete_thread_queries, tid)
                             await asyncio.to_thread(hard_delete_thread, tid, owner_user_id=None)
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(ttl_stop.wait(), timeout=6 * 3600)
@@ -220,6 +222,14 @@ def create_app() -> FastAPI:
     from official_agent.web.memory_routes import router as memory_router
 
     app.include_router(memory_router, prefix="/api/agent")
+
+    from official_agent.web.retrospective_admin import router as retrospective_admin_router
+
+    app.include_router(retrospective_admin_router, prefix="/api/agent")
+
+    from official_agent.web.org_memory_admin import router as org_memory_admin_router
+
+    app.include_router(org_memory_admin_router, prefix="/api/agent")
 
     @app.get("/health")
     async def health() -> dict[str, str]:

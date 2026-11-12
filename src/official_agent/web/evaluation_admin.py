@@ -14,10 +14,13 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from official_agent.config import get_settings
+from official_agent.evaluation import calibration
 from official_agent.evaluation import runner as eval_runner
 from official_agent.evaluation.grading import CardGrades, GradingPolicy, PoolEntry, grade_pool
-from official_agent.evaluation.graph import CARD_SCHEMA_VERSION
+from official_agent.evaluation.graph import GRADED_CARD_SCHEMAS
+from official_agent.evaluation.panel import anchors as panel_anchors
 from official_agent.graphs.identity import ResolvedIdentity
+from official_agent.kb.embedding import EmbeddingError
 from official_agent.state import audit, evaluation
 from official_agent.state import qbank as qbank_store
 from official_agent.web.auth import require_any as _require_any
@@ -80,7 +83,7 @@ def _attach_grades_and_mask(
     """
     card = row.get("card") if isinstance(row.get("card"), dict) else None
     schema = row.get("card_schema") or (card or {}).get("schema")
-    is_current = schema == CARD_SCHEMA_VERSION
+    is_current = schema in GRADED_CARD_SCHEMAS
     row["needs_rerun"] = not is_current
     shown = grades if is_current else None
     row["match_level"] = shown.match.level if shown else None
@@ -317,6 +320,10 @@ class RejectBody(BaseModel):
     version: int | None = None
 
 
+#: 评审队列的取值:全部 / 需重点复核(hard_zero)/ 低置信
+_REVIEW_QUEUES = ("all", "zero", "low_confidence")
+
+
 @router.get("/admin/evaluation/queue")
 async def evaluation_queue(
     identity: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
@@ -325,17 +332,22 @@ async def evaluation_queue(
     limit: int = 200,
     offset: int = 0,
 ) -> dict[str, Any]:
-    """评审队列:queue=zero → 需重点复核(hard_zero)子队列;all → 全部评分卡。
+    """评审队列:queue=zero → 需重点复核(hard_zero)子队列;low_confidence → AI 自己
+    拿不准的卡(检出提示注入、判定有分歧、批判者不可用);all → 全部评分卡。
+    三种队列都是低置信的卡排在前面:人的时间先花在最需要人的卡上。
 
     每项带 match_level/effort_level(同部门候选池内的相对等级)与 needs_rerun
     (旧版卡,需重新初筛才有两维等级)。
+
+    每项带 scoring_mode/confidence/dispute_count/injection_detected:取自带批判者的
+    评分模式产出的合议记录;单评委模式的卡前两项为 null。
 
     每项带 decided_status/decided_version:复评会写一张新 draft 卡把
     `status` 顶回 draft,这对字段保留了该简历历史上的人工决策,前端据此
     区分"没看过"与"看过已采纳/已驳回"。
     """
-    if queue not in ("zero", "all"):
-        raise HTTPException(status_code=400, detail="queue 只支持 zero/all")
+    if queue not in _REVIEW_QUEUES:
+        raise HTTPException(status_code=400, detail=f"queue 只支持 {'/'.join(_REVIEW_QUEUES)}")
 
     try:
         items = await asyncio.to_thread(
@@ -563,3 +575,170 @@ async def reject_scorecard(
         "version": version,
         "status": "rejected",
     }
+
+
+# ── 校准案例(往届判例):种子判例录入 / 停用 / 从已结束周期收割 ──────────
+#
+# 判例会被原样放进评委的 prompt,改它等于改评分的标尺:录入、停用、收割都要
+# evaluation:run(与触发初筛同一权限),并先落审计再执行;查看只要 resume:audit。
+
+
+class CalibrationCaseBody(BaseModel):
+    """一条种子判例:某个判定项在某段原文上算达成还是不算,以及理由。"""
+
+    checklist: str = Field(min_length=1, max_length=20)  # 部门名或「认真程度」
+    item: str = Field(min_length=1, max_length=40)
+    met: bool
+    quote: str = Field(default="", max_length=panel_anchors.MAX_QUOTE_CHARS)
+    reason: str = Field(min_length=1, max_length=panel_anchors.MAX_REASON_CHARS)
+
+
+class HarvestBody(BaseModel):
+    cycle_id: int = Field(ge=1)
+
+
+async def _audit_calibration(
+    identity: ResolvedIdentity, action: dict[str, Any], result: str
+) -> None:
+    """校准案例写操作的前置审计(fail-closed):审计落不下就不执行,返回 503。"""
+    try:
+        await asyncio.to_thread(
+            audit.write_audit,
+            thread_id=f"eval:calibration:{secrets.token_hex(4)}",
+            acting_user_id=int(identity.get("user_id") or 0),
+            channel="evaluation",
+            agent="evaluation-calibration",
+            action=action,
+            decision=f"u{identity.get('user_id')}:{action['op']}",
+            result=result,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="审计服务不可用,操作未执行,请稍后重试") from exc
+
+
+@router.get("/admin/evaluation/calibration/cases")
+async def list_calibration_cases(
+    _: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
+    checklist: str | None = None,
+    item: str | None = None,
+    include_retired: bool = False,
+    limit: int = 200,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """校准案例列表(不带向量),可按清单、判定项过滤。
+
+    watermark 是当前最大的案例号:新周期开跑时,案例号不大于它的在用案例就是那个周期
+    的标尺。enabled 是评分时是否给评委看判例的开关。
+    """
+    try:
+        items = await asyncio.to_thread(
+            evaluation.calibration_store.list_cases,
+            checklist=checklist,
+            item=item,
+            include_retired=include_retired,
+            limit=limit,
+            offset=offset,
+        )
+        watermark = await asyncio.to_thread(evaluation.calibration_store.current_watermark)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail="查询校准案例失败,请稍后重试") from exc
+    return {
+        "items": items,
+        "total": len(items),
+        "watermark": watermark,
+        "enabled": get_settings().evaluation_calibration_enabled,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@router.post("/admin/evaluation/calibration/cases", status_code=201)
+async def add_calibration_case(
+    body: CalibrationCaseBody,
+    identity: Annotated[ResolvedIdentity, Depends(_require_evaluation_run)],
+) -> dict[str, Any]:
+    """录入一条种子判例。新判例只对之后才开跑的周期生效,不影响已经在评的周期。
+
+    顺序:入库筛查(判定项存在、内容齐全、不含指令样文本,不过 → 400,零副作用)
+    → 审计 → 算向量并落库(嵌入服务不可用 → 503,判例未入库)。
+    """
+    try:
+        panel_anchors.screen_case(**body.model_dump())
+    except panel_anchors.CaseRejectedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    added = {
+        "op": "calibration_case_added",
+        "checklist": body.checklist,
+        "item": body.item,
+        "met": body.met,
+    }
+    await _audit_calibration(identity, added, "录入种子判例")
+    try:
+        return await calibration.add_seed_case(
+            **body.model_dump(), created_by=int(identity.get("user_id") or 0)
+        )
+    except EmbeddingError as exc:
+        raise HTTPException(status_code=503, detail="嵌入服务不可用,判例未入库,请稍后重试") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail="判例入库失败,请稍后重试") from exc
+
+
+@router.delete("/admin/evaluation/calibration/cases/{case_id}")
+async def retire_calibration_case(
+    case_id: int,
+    identity: Annotated[ResolvedIdentity, Depends(_require_evaluation_run)],
+) -> dict[str, Any]:
+    """停用一条判例(不删行,留着追溯)。停用立即生效,包括已经在评的周期。"""
+    await _audit_calibration(
+        identity, {"op": "calibration_case_retired", "case_id": case_id}, "停用校准案例"
+    )
+    retired = await asyncio.to_thread(evaluation.calibration_store.retire_case, case_id)
+    if not retired:
+        raise HTTPException(status_code=404, detail="判例不存在或已停用")
+    return {"case_id": case_id, "status": "retired"}
+
+
+async def _open_cycle_ids() -> set[int]:
+    """后端当前开放的招新周期号。读不到就抛:收割前必须能确认周期已经结束。"""
+    from official_agent.tools.readonly import get_backend_client
+
+    client = await get_backend_client()
+    cycles = await client.get("/api/cycles/open")
+    return {int(c["cycleId"]) for c in cycles or [] if isinstance(c, dict) and c.get("cycleId")}
+
+
+@router.post("/admin/evaluation/calibration/harvest")
+async def harvest_calibration_cases(
+    body: HarvestBody,
+    identity: Annotated[ResolvedIdentity, Depends(_require_evaluation_run)],
+) -> dict[str, Any]:
+    """把一个**已结束**周期里人机一致的卡收割成校准案例,返回各步计数。重复收割是幂等的。
+
+    缺省关闭(409):要有至少一个完整周期的人工采纳数据才有意义。周期还开着 → 409;
+    确认不了周期是否结束 → 503。
+    """
+    settings = get_settings()
+    if not settings.evaluation_calibration_harvest_enabled:
+        raise HTTPException(status_code=409, detail="从往届评分卡收割校准案例的功能未启用")
+    try:
+        open_ids = await _open_cycle_ids()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="无法确认该周期是否已结束,未执行") from exc
+    if body.cycle_id in open_ids:
+        raise HTTPException(status_code=409, detail="该周期还在进行中,结束后才能收割")
+    await _audit_calibration(
+        identity, {"op": "calibration_harvest", "cycle_id": body.cycle_id}, "收割往届人机一致的卡"
+    )
+    try:
+        counts = await calibration.harvest_cycle(
+            body.cycle_id,
+            policy=_grading_policy(),
+            created_by=int(identity.get("user_id") or 0),
+        )
+    except EmbeddingError as exc:
+        raise HTTPException(
+            status_code=503, detail="嵌入服务不可用,收割中断;已入库的保留,可稍后重新收割"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail="收割失败,请稍后重试") from exc
+    return {"cycle_id": body.cycle_id, **counts}

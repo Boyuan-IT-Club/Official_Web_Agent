@@ -1,6 +1,7 @@
 """集中配置:全部来自环境变量 / .env,真实凭证永不入库。"""
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -44,6 +45,31 @@ class Settings(BaseSettings):
     # 正例 top1 最低 0.54,明显无关的问题最高 0.45;换 embedding 模型须重校
     kb_min_score: float = 0.45
     kb_keyword_min_ratio: float = 0.5
+
+    # 知识库运营(kb_ops/):把没答上的检索聚成主题。下面四个数都是起点,没有用真实
+    # 日志校准过;换 embedding 模型后相似度分布会变,聚类阈值要重校。
+    # 两个问题算同一个主题的最低余弦相似度
+    kb_ops_cluster_threshold: float = 0.75
+    # 主题的最小支持度:至少这么多次检索、来自至少这么多个会话。会话数同时是隐私
+    # 下限(只有多人问过的问题才摘给管理员看),代码里不接受小于 2 的值
+    kb_ops_min_queries: int = 3
+    kb_ops_min_threads: int = 2
+    # 没命中、但最高向量分落在 [kb_min_score - 本值, kb_min_score) 的检索算「差一点命中」
+    kb_ops_near_miss_margin: float = 0.08
+    # 主题清单只保留最近这么多次运行,更早的随下一次运行清掉
+    kb_ops_run_retention: int = 8
+    # 是否为「该由知识库回答」的主题起草带出处的草稿。默认关闭:离线分析只出主题清单,
+    # 没有起草与审核的模型调用。打开之前先在真实模型上跑过 kb_ops_triage 与
+    # kb_ops_verify 两个 eval 并留下基线(ADR-0004:新模型角色先有 eval 再上线)
+    kb_ops_drafting_enabled: bool = False
+    # 处理完(批准/驳回/被顶替)的草稿保留这么多天;待审的草稿不清
+    kb_ops_draft_retention_days: int = 365
+    # 在线引用核验:回复里用书名号引的条目是不是本轮检索到的。只把判定记进对话日志,
+    # 不改写回复、不调模型。默认关闭,打开后先看一段时间的误报再决定要不要据此做事
+    kb_citation_check_enabled: bool = False
+    # 离线忠实度抽样:抽已答复的回合,由模型核对回复与当时检索到的条目。默认关闭:
+    # 打开之前先在真实模型上跑过 kb_ops_faithfulness 这个 eval 并留下基线
+    kb_ops_faithfulness_enabled: bool = False
 
     # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)
     postgres_url: str = "postgresql://localhost:5432/official_agent"
@@ -95,13 +121,75 @@ class Settings(BaseSettings):
     memory_recall_limit: int = 3
     memory_ttl_days: int = 180
 
+    # 周期复盘报告的生成(三位分析员 + 撰稿人,见 retrospective/graph.py)。默认关闭:
+    # 四份 prompt 要先在真实模型上跑过 evals 的 retro_probes 与 retro_injection 才能打开。
+    # 关着时指标快照的采集与读取照常可用,已有的报告也照常可读可发布
+    retrospective_report_enabled: bool = False
+
+    # 组织记忆(memory/org_store.py):复盘报告里经管理员勾选的教训,召回进管理员与社员的
+    # 对话。默认关闭:召回会改变对话助理的回答,要先在真实模型上跑过 evals 的
+    # org_memory_probes 才能打开。关着时勾选、退役、续期照常可用,只是不召回。
+    # 候选人会话在任何配置下都不注入(装配层按身份拦,见 memory/recall.py)
+    org_memory_enabled: bool = False
+    org_memory_recall_limit: int = 3
+    # 勾选时的默认保质期(天):招新一年一届,一届之后要有人确认它还成立
+    org_memory_ttl_days: int = 365
+
     # 初筛 job 后台领取循环的间隔(秒);0 = 关闭(只靠提交时派发 + 重启恢复)
     evaluation_claim_interval_seconds: int = 30
+
+    # 评估域同时在途的模型调用上限(评分、探索、出题、审题共用一把进程级闸)。
+    # 出题证据线并发、runner 多 job 并行会叠乘;8 是 runner 的 job 并发数的两倍,
+    # 没有按模型供应商的限流实测过,见到 429 就调小
+    evaluation_model_concurrency: int = 8
+
+    # 审题(出题之后逐题给意见,只标注不改题):off = 不审;annotate = 审并把意见
+    # 挂在题库上。默认关:每条有题的证据线多一次 strong 调用,要先在真实模型上跑过
+    # evals/datasets/question_review_probes.yaml 再打开
+    qbank_review_mode: str = "off"
+
+    # 题目向量索引(本包跨线查重 + 跨简历通用题标注,只标注不删题)。默认关:
+    # 两个相似度门槛和「几份简历算通用」都是初值,要先拿现有题库量过分布再打开;
+    # 打开还需要 EMBED_* 已配置、题库所在的库装有 pgvector
+    qbank_index_enabled: bool = False
+    qbank_duplicate_min_similarity: float = 0.9
+    qbank_generic_min_similarity: float = 0.9
+    qbank_generic_min_resumes: int = 3
+
+    # 规划者(给每条仓线定探索档位与侧重,预算数值由代码按档位映射):off = 不调,
+    # 每条线都是最高档;plan = 调。默认关:要先在真实模型上跑过
+    # evals/datasets/plan_probes.yaml 的模型段再打开
+    qbank_plan_mode: str = "off"
+    # 一份简历的探索预算总上限(各仓线预算之和),规划者开没开都生效。缺省值是
+    # 「5 条仓线全部最高档」的总量,即不比没有上限时更紧;调小后超出的部分从
+    # 最低档的线开始砍(见 evaluation/plan.py 的 cap_lines)
+    qbank_explore_max_total_turns: int = 400
+    qbank_explore_max_total_wall_seconds: int = 1500
 
     # 初筛分级:同部门候选池内头部/尾部比例与小池阈值(见 evaluation/grading.py)
     evaluation_grade_top_ratio: float = 0.2
     evaluation_grade_bottom_ratio: float = 0.2
     evaluation_grade_min_pool: int = 15
+
+    # 初筛评分模式(见 evaluation/graph.py 的 SCORING_MODES):
+    #   single = 评委判完直接出卡;
+    #   critic = 评委判完再过批判者(检测提示注入、质疑引文撑不住的判定);
+    #   panel  = 一位评委只判一张清单(四个部门 + 认真程度),再过批判者,主席写整体理由。
+    # panel 每份简历要七次以上模型调用,**缺省不启用**:要先在评分基线上赢过 critic,
+    # 启用条件列在 docs/proposals/screening-panel.md 里讲拆评委落地的那一节。
+    # 只对「还没有评分卡的周期」生效:周期一旦落了第一张卡,模式就按那张卡固定,
+    # 之后改这里不影响该周期(同一个等级池里的卡必须出自同一种模式)。
+    # 不在 HOT_KEYS:切换模式是周期之间的事,不做热生效。
+    evaluation_scoring_mode: Literal["single", "critic", "panel"] = "critic"
+
+    # 初筛校准案例(往届判例,见 evaluation/calibration.py),两个开关都**缺省关闭**:
+    #   enabled         = 评分时给评委看判例。只对 critic / panel 模式、且「还没有评分卡的
+    #                     周期」生效:周期开跑时把当时的案例集定为本周期的标尺,中途不变。
+    #                     需要 EMBED_* 已配置;案例库是空的时候开了也没有效果。
+    #   harvest_enabled = 允许从已结束的周期收割人机一致的卡作为案例。要有至少一个完整
+    #                     周期的人工采纳数据才有意义。
+    evaluation_calibration_enabled: bool = False
+    evaluation_calibration_harvest_enabled: bool = False
 
 
 @lru_cache

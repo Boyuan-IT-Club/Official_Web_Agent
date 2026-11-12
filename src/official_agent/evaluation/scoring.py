@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 
 # 纯数字/标点(允许分隔符,但必须出现过数字):整栏 111、2024.09 等
@@ -125,6 +126,39 @@ def checklist_score(met: dict[str, bool], items: tuple[tuple[str, int], ...]) ->
         return 0.0
     got = sum(weight for name, weight in items if met.get(name, False))
     return round(10 * got / total_weight, 1)
+
+
+def checklist_names_violation(label: str, got: list[str], expected: tuple[str, ...]) -> str:
+    """判定项集合是否与清单一致;返回违例说明,空串 = 一致。
+
+    漏项会冤判,多项会虚增。用 Counter 而非 set 比较,重复项才报得出来。
+    """
+    if sorted(got) == sorted(expected):
+        return ""
+    missing = sorted(set(expected) - set(got))
+    unknown = sorted(set(got) - set(expected))
+    dupes = sorted(k for k, n in Counter(got).items() if n > 1)
+    return f"{label}判定项不符:缺 {missing},多 {unknown}" + (f",重复 {dupes}" if dupes else "")
+
+
+#: 整体敷衍(perfunctory)时,认真程度清单至多能达成的项数
+PERFUNCTORY_MAX_EFFORT_MET = 2
+
+
+def attitude_contract_violation(verdict: str, *, any_met: bool, effort_met: int) -> str:
+    """态度结论与逐项判定是否自相矛盾;返回违例说明,空串 = 对得上。
+
+    态度不端(bad_faith)的简历两张清单不该有任何一项达成;整体敷衍(perfunctory)
+    的简历认真程度清单至多达成 PERFUNCTORY_MAX_EFFORT_MET 项。
+    """
+    if verdict == "bad_faith" and any_met:
+        return "bad_faith 必须两张清单无一项达成(模型判了达成)"
+    if verdict == "perfunctory" and effort_met > PERFUNCTORY_MAX_EFFORT_MET:
+        return (
+            f"perfunctory 时认真程度至多达成 {PERFUNCTORY_MAX_EFFORT_MET} 项"
+            f"(模型判了 {effort_met} 项)"
+        )
+    return ""
 
 
 #: 简历实质篇幅 → 认真程度上限(0-10)。认真程度的判定项是模型判的:一句话的

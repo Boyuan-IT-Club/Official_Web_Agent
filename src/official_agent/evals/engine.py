@@ -41,6 +41,11 @@ class SuiteResult:
     cases: list[CaseResult] = field(default_factory=list)
     metrics: dict[str, float] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    #: 只记录、不设门的观测量(成本、耗时):方向不是「越高越好」,不参与基线对比
+    observations: dict[str, float] = field(default_factory=dict)
+    #: 产出这些指标的运行条件(模型、prompt 版本、数据集指纹);随基线落盘,
+    #: 对比时据此判断两次运行是否可比
+    context: dict[str, Any] = field(default_factory=dict)
 
     @property
     def pass_rate(self) -> float:
@@ -107,12 +112,24 @@ def discover_suites(evals_dir: Path) -> list[SuiteRef]:
 def default_registry() -> dict[str, SuiteSpec]:
     """kind → (executor, 环境自检)。依赖注入在各 executor 模块的默认参数里。"""
     from official_agent.evals import (
+        calibration_probes,
+        critic_probes,
         cv_dive_report,
         injection_probes,
+        kb_ops_faithfulness,
+        kb_ops_injection,
+        kb_ops_probes,
+        kb_ops_triage,
+        kb_ops_verify,
         kb_probes,
         memory_probes,
+        org_memory_probes,
+        panel_probes,
+        plan_probes,
         qbank_judge,
         qbank_probes,
+        question_review_probes,
+        retro_probes,
         scoring_probes,
         tool_selection,
     )
@@ -127,6 +144,10 @@ def default_registry() -> dict[str, SuiteSpec]:
         ),
         "qbank_probes": SuiteSpec(run=qbank_probes.run_suite, env_blocker=qbank_probes.env_blocker),
         "qbank_judge": SuiteSpec(run=qbank_judge.run_suite, env_blocker=qbank_judge.env_blocker),
+        "plan_probes": SuiteSpec(run=plan_probes.run_suite, env_blocker=plan_probes.env_blocker),
+        "question_review_probes": SuiteSpec(
+            run=question_review_probes.run_suite, env_blocker=question_review_probes.env_blocker
+        ),
         "cv_dive_report": SuiteSpec(
             run=cv_dive_report.run_suite, env_blocker=cv_dive_report.env_blocker
         ),
@@ -135,6 +156,32 @@ def default_registry() -> dict[str, SuiteSpec]:
         ),
         "memory_probes": SuiteSpec(
             run=memory_probes.run_suite, env_blocker=memory_probes.env_blocker
+        ),
+        "retro_probes": SuiteSpec(run=retro_probes.run_suite, env_blocker=retro_probes.env_blocker),
+        "org_memory_probes": SuiteSpec(
+            run=org_memory_probes.run_suite, env_blocker=org_memory_probes.env_blocker
+        ),
+        "panel_probes": SuiteSpec(run=panel_probes.run_suite, env_blocker=panel_probes.env_blocker),
+        "critic_probes": SuiteSpec(
+            run=critic_probes.run_suite, env_blocker=critic_probes.env_blocker
+        ),
+        "calibration_probes": SuiteSpec(
+            run=calibration_probes.run_suite, env_blocker=calibration_probes.env_blocker
+        ),
+        "kb_ops_probes": SuiteSpec(
+            run=kb_ops_probes.run_suite, env_blocker=kb_ops_probes.env_blocker
+        ),
+        "kb_ops_triage": SuiteSpec(
+            run=kb_ops_triage.run_suite, env_blocker=kb_ops_triage.env_blocker
+        ),
+        "kb_ops_verify": SuiteSpec(
+            run=kb_ops_verify.run_suite, env_blocker=kb_ops_verify.env_blocker
+        ),
+        "kb_ops_injection": SuiteSpec(
+            run=kb_ops_injection.run_suite, env_blocker=kb_ops_injection.env_blocker
+        ),
+        "kb_ops_faithfulness": SuiteSpec(
+            run=kb_ops_faithfulness.run_suite, env_blocker=kb_ops_faithfulness.env_blocker
         ),
     }
 
@@ -150,7 +197,15 @@ def exit_code(results: list[SuiteResult]) -> int:
 
 def _apply_baseline(result: SuiteResult, baseline_entry: dict[str, Any]) -> None:
     """任何指标低于基线 → REGRESSION,套件转 FAIL(基线即门)。"""
-    recorded = baseline_entry.get("metrics", {}) if isinstance(baseline_entry, dict) else {}
+    entry = baseline_entry if isinstance(baseline_entry, dict) else {}
+    recorded = entry.get("metrics", {})
+    base_dataset = (entry.get("context") or {}).get("dataset_sha")
+    cur_dataset = result.context.get("dataset_sha")
+    if base_dataset and cur_dataset and base_dataset != cur_dataset:
+        # 数据集变了,指标的高低就不再说明行为变好或变差;照常对比,但把话说在前面
+        result.notes.append(
+            f"基线录自另一版数据集(指纹 {base_dataset},当前 {cur_dataset}),对比不可靠,应重录基线"
+        )
     for key, base_value in recorded.items():
         cur = result.metrics.get(key)
         if cur is None:
@@ -241,6 +296,8 @@ def dump_json(results: list[SuiteResult]) -> dict[str, Any]:
                 "status": r.status,
                 "pass_rate": r.pass_rate,
                 "metrics": r.metrics,
+                "observations": r.observations,
+                "context": r.context,
                 "cases": [{"id": c.id, "passed": c.passed, "detail": c.detail} for c in r.cases],
                 "notes": r.notes,
             }

@@ -4,6 +4,7 @@
 - 生成轨与评分轨相同:提示词 JSON + strict Pydantic;后置校验:
   deep_dive 题必带 evidence.path 且路径必须真实存在于仓;guided 题不得带仓路径
 - GitHub 不可达不是失败:降级 guided(注明 unavailable),不阻塞任务
+- 出题之后有一段可选的审题(question_review.py):只给题目挂意见,不改题
 """
 
 from __future__ import annotations
@@ -24,10 +25,11 @@ from official_agent.evaluation.attribution import (
     resolve_entry,
 )
 from official_agent.evaluation.dossier import dossier_from_resume
-from official_agent.evaluation.explore import run_explore
+from official_agent.evaluation.explore import ExploreBudget, run_explore
 from official_agent.evaluation.github_client import GitHubClient, GitHubUnavailable
 from official_agent.evaluation.graph import _extract_json
 from official_agent.evaluation.investigate import (
+    ADVERSARIAL_WORDS,
     DEFAULT_GRADE_BAND,
     GRADE_BAND_LABELS,
     LAYER_BOUNDS,
@@ -40,6 +42,11 @@ from official_agent.evaluation.llm_common import (
     TEMPERATURE_GENERATION,
     invoke_with_retry,
     prompt_version,
+)
+from official_agent.evaluation.question_review import (
+    review_line,
+    review_mode,
+    targets_from_group,
 )
 from official_agent.evaluation.schema import (
     MAX_CHAINS,
@@ -75,8 +82,9 @@ class InvestigationState(TypedDict, total=False):
     github_token: str
     candidate_login: str
     #: 本份简历是否已有一条线走过简历深挖。多仓候选是一个仓跑一次子图,而简历
-    #: 自述只有一份——仓读不到时那份自述就是全部材料,第一条线挖过之后,后面的
-    #: 仓再挖只会得到一套一模一样的题。由调用方在**上一次结果**上读出来回填。
+    #: 自述只有一份——仓读不到时那份自述就是全部材料,已有线挖过之后,别的仓
+    #: 再挖只会得到一套一模一样的题。只有逐条顺序跑线的调用方答得出这个问题;
+    #: 并发跑线的调用方(evaluation/bundle.py)不传,改在汇合处只留一条。
     cv_dive_done: bool
     route: str
     repo_owner: str
@@ -86,7 +94,12 @@ class InvestigationState(TypedDict, total=False):
     dossier_degraded: bool
     dossier_degrade_reason: str
     dossier_turns: int
+    dossier_seconds: float
     explore_usage: dict
+    #: 本条线的探索预算与侧重类别,由调用方的代码给(缺省即探索段的缺省上限、
+    #: 无侧重);不来自模型输出,也不来自候选人材料
+    explore_budget: ExploreBudget | None
+    explore_focus: tuple[str, ...]
     tech_items: list[dict]
     attribution: dict
     #: 出题深度档,由年级派生;元信息,不进评分
@@ -287,6 +300,8 @@ async def explore_node(state: InvestigationState) -> dict:
         login=state.get("candidate_login", ""),
         github_base=state.get("github_base") or "https://api.github.com",
         github_token=state.get("github_token") or "",
+        budget=state.get("explore_budget"),
+        focus=tuple(state.get("explore_focus") or ()),
     )
     if dossier.is_empty():
         return {
@@ -298,6 +313,7 @@ async def explore_node(state: InvestigationState) -> dict:
             "dossier_degraded": True,
             "dossier_degrade_reason": dossier.degrade_reason,
             "dossier_turns": dossier.turns_used,
+            "dossier_seconds": dossier.seconds_used,
         }
     if dossier.degraded:
         # 预算触顶:用已有材料出题,降级标记进材料头,题面可感知
@@ -312,6 +328,7 @@ async def explore_node(state: InvestigationState) -> dict:
         "dossier_degraded": dossier.degraded,
         "dossier_degrade_reason": dossier.degrade_reason,
         "dossier_turns": dossier.turns_used,
+        "dossier_seconds": dossier.seconds_used,
         "explore_usage": {
             "input_tokens": dossier.input_tokens,
             "output_tokens": dossier.output_tokens,
@@ -320,6 +337,27 @@ async def explore_node(state: InvestigationState) -> dict:
         },
         "error": None,
     }
+
+
+def _generation_material(state: InvestigationState) -> str:
+    """出题段喂给模型的证据材料;审题段看的是同一份。
+
+    简历路径在档案之外**追加**技术栈清单(供逐技术出题);档案本身必须保留
+    ——简历的项目栏、自我介绍、实习经历都在里面,项目深挖链靠它取材。
+    年级**原文不进材料**(那一栏并不干净,后端记录过里面存着姓名);只给派生的
+    档位标签,让 prompt 据此定链长与深度。
+    """
+    material = state.get("dossier_text", "")
+    if state["route"] != "cv_dive":
+        return material
+    band = state.get("grade_band") or DEFAULT_GRADE_BAND
+    return (
+        material
+        + "\n\n"
+        + TECH_STACK_HEADER
+        + _render_tech(state)
+        + f"\n\n出题深度档:{GRADE_BAND_LABELS.get(band, band)}。"
+    )
 
 
 async def generate_node(state: InvestigationState) -> dict:
@@ -343,15 +381,7 @@ async def generate_node(state: InvestigationState) -> dict:
         # 规则文本各在自己的文件里,故按路径选文件。
         prompt_file = CV_PROMPT_FILE if cv else PROMPT_FILE
         material_note = f"材料体量={'贫乏' if thin else '充足'}。"
-        # 简历路径在档案之外**追加**技术栈清单(供逐技术出题);档案本身必须
-        # 保留——简历的项目栏、自我介绍、实习经历都在里面,项目深挖链靠它取材。
-        material = dossier_text
-        if cv:
-            material += "\n\n" + TECH_STACK_HEADER + _render_tech(state)
-            # 年级**原文不进材料**(那一栏并不干净,后端记录过里面存着姓名);
-            # 只给派生的档位标签,让 prompt 据此定链长与深度。
-            band = state.get("grade_band") or DEFAULT_GRADE_BAND
-            material += f"\n\n出题深度档:{GRADE_BAND_LABELS.get(band, band)}。"
+        material = _generation_material(state)
         # 自述与材料都是不可信输入(自述来自候选人,GitHub 文字来自任意仓库),
         # 一律包数据区,由 prompt 侧的数据区纪律声明「标签内只当内容」。不包的话
         # 简历里一句指令样文本就直接落在指令区——与评分轨同一条红线。
@@ -438,6 +468,7 @@ async def generate_node(state: InvestigationState) -> dict:
             degrade_reason=str(state.get("dossier_degrade_reason", "")),
             explore_meta=ExploreMeta(
                 turns=int(state.get("dossier_turns", 0)),
+                seconds=state.get("dossier_seconds"),
                 dossier_chars=len(dossier_text),
                 **(state.get("explore_usage") or {}),
             ),
@@ -452,10 +483,6 @@ async def generate_node(state: InvestigationState) -> dict:
     except Exception as exc:  # noqa: BLE001 — 失败进 error 态,可由调用方重试
         return {"question_set": None, "error": f"{type(exc).__name__}: {exc}"}
 
-
-#: 对抗前提黑名单(「你自述了X…但仓库却是Y…请解释矛盾」式)
-#: 注意:「自述」单独出现是合法锚定(简历锚定横切),不在黑名单
-_ADVERSARIAL_WORDS = ("矛盾", "撒谎", "撒了谎", "夸大", "打脸", "为什么没做到")
 
 #: 链源真实性校验的忽略词:**只收我们自己材料里的拴架词**——模型会把材料
 #: 标签原样抄进 theme(如「源自 dossier C4 项目经验栏」),那是我们的内部
@@ -490,7 +517,7 @@ def _validate_group_v2(
     dossier_lowers = dossier_text.lower()
 
     def _check_question(q: str) -> None:
-        for word in _ADVERSARIAL_WORDS:
+        for word in ADVERSARIAL_WORDS:
             if word in q:
                 raise ValueError(f"对抗前提问法({word}):{q[:40]!r}")
 
@@ -649,6 +676,30 @@ def _attribution_level(level: Any) -> Any:
     return level if level in allowed else "none"
 
 
+#: 过审题的出题模式:题目由模型依据证据材料写成的那两种。guided 是材料读不到
+#: 时的通用引导题,通用是它的本分;skipped 没有题。
+_REVIEWED_MODES = ("repo_deep_dive", "cv_dive")
+
+
+async def review_node(state: InvestigationState) -> dict:
+    """审题段:出题之后逐题给意见,挂在信封的 review 上;题目本身不动。
+
+    审题关闭、出题失败、或该模式不审时原样放行。审题自身失败也不影响题目
+    (review_line 不抛,只把结果标成 unavailable)。
+    """
+    envelope = state.get("question_set")
+    if state.get("error") or not envelope or envelope.get("mode") not in _REVIEWED_MODES:
+        return {}
+    if review_mode() != "annotate":
+        return {}
+    review = await review_line(
+        targets_from_group(envelope.get("group") or {}),
+        material=_generation_material(state),
+        statement=state["project_text"],
+    )
+    return {"question_set": {**envelope, "review": review}}
+
+
 async def skip_node(state: InvestigationState) -> dict:
     """skip:此维不出题(空集合法);信封 v2 形状。"""
     envelope = QbankV2(mode="skipped", group=QuestionGroupV2(), prompt_version=_prompt_version())
@@ -663,10 +714,11 @@ _compiled: Any | None = None
 
 
 def build_investigation_subgraph() -> Any:
-    """调查子图:route →(deep_dive/cv_dive→explore)/guided/skip → generate → finalize。
+    """调查子图:route →(deep_dive/cv_dive→explore)/guided/skip → generate → review → finalize。
 
     cv_dive 与 deep_dive 同走 explore→generate(都要取材后出带链的题组),
     区别在 explore 的取材来源(代码仓 vs 简历文本)与 generate 的出题 prompt。
+    review 只给题目挂意见,不改题,也不改变路由。
     """
     global _compiled
     if _compiled is not None:
@@ -675,6 +727,7 @@ def build_investigation_subgraph() -> Any:
     g.add_node("route", route_node)
     g.add_node("explore", explore_node)
     g.add_node("generate", generate_node)
+    g.add_node("review", review_node)
     g.add_node("skip", skip_node)
     g.add_node("finalize", finalize)
     g.set_entry_point("route")
@@ -689,7 +742,8 @@ def build_investigation_subgraph() -> Any:
         },
     )
     g.add_edge("explore", "generate")
-    g.add_edge("generate", "finalize")
+    g.add_edge("generate", "review")
+    g.add_edge("review", "finalize")
     g.add_edge("skip", "finalize")
     g.add_edge("finalize", END)
     _compiled = g.compile()
@@ -706,6 +760,8 @@ async def run_investigation(
     candidate_login: str = "",
     grade: str = "",
     cv_dive_done: bool = False,
+    explore_budget: ExploreBudget | None = None,
+    explore_focus: tuple[str, ...] = (),
 ) -> dict:
     """便捷入口:返回题集 dict(questions 可为空=skip/降级);LLM 失败抛 RuntimeError。
 
@@ -715,9 +771,12 @@ async def run_investigation(
     看不见它);缺省退化为 project_text,单栏调用方行为不变。
     grade 传年级原文(元信息):只用来派生**出题深度档**,不进评分;缺省即
     「年级缺失」,分档走标准档(与加档位之前的行为一致)。
-    cv_dive_done 传「本份简历此前是否已有线走过简历深挖」:多仓循环里的调用方
-    在上一次返回的信封上读 mode 回填。为 True 时,读不到的仓不再重复挖同一份
-    自述,直接出空组。
+    cv_dive_done 传「本份简历此前是否已有线走过简历深挖」:为 True 时,读不到
+    的仓不再重复挖同一份自述,直接出空组。逐条顺序跑线的调用方可在上一次返回
+    的信封上读 mode 回填;并发跑线时各线互不等待、答不出这个问题,保持缺省,
+    由调用方在汇合处去重(见 evaluation/bundle.py 的 _keep_first_cv_dive)。
+    explore_budget / explore_focus 传这条线的探索预算与侧重类别(只对仓深挖
+    生效);缺省即探索段的缺省上限、无侧重。
     """
     graph = build_investigation_subgraph()
     init: InvestigationState = {
@@ -728,6 +787,8 @@ async def run_investigation(
         "candidate_login": candidate_login,
         "grade_band": grade_band(grade),
         "cv_dive_done": cv_dive_done,
+        "explore_budget": explore_budget,
+        "explore_focus": explore_focus,
     }
     if repo:
         init["repo_owner"], init["repo_name"] = repo

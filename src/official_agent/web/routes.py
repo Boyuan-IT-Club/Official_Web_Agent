@@ -39,6 +39,7 @@ from official_agent.graphs.assistant.compression import (
 from official_agent.graphs.identity import ResolvedIdentity
 from official_agent.memory import recall as memory_recall
 from official_agent.observability import langfuse_callbacks
+from official_agent.security.guard_verdict import format_verdicts
 from official_agent.security.pii import ReplyPiiMasker
 from official_agent.state.threads import create_thread, new_thread_id, resolve_thread
 from official_agent.tools.client import BackendError, BackendUnavailableError
@@ -412,6 +413,10 @@ class _TurnAccum:
     )
     # 本轮停在写操作确认处(interrupt 挂起):载荷原样给前端渲染确认卡片
     confirm: dict[str, Any] | None = None
+    # 本轮是否调用过知识库检索(引用核验要区分「查了没引对」与「根本没查」)
+    kb_searched: bool = False
+    # 回复出口各守卫的判定 {守卫名: 判定},随对话日志落库;没跑的守卫不在里面
+    guard_verdicts: dict[str, str] = field(default_factory=dict)
 
 
 def _feed_text_chunk(
@@ -477,6 +482,7 @@ def _drain_updates(payload: Any, acc: _TurnAccum) -> list[dict[str, Any]]:
                 events.append({"type": "tool", "role": "tool", "name": tc.get("name")})
             # search_knowledge 的结果收集为引用锚(轮末随 delta.sources 下发)
             if isinstance(m, ToolMessage) and getattr(m, "name", "") == "search_knowledge":
+                acc.kb_searched = True
                 telemetry.collect_sources(m, acc.sources, acc.seen_sources)
     return events
 
@@ -489,17 +495,19 @@ async def _consume_model_stream(
     masker: ReplyPiiMasker | None,
     acc: _TurnAccum,
     memories: list[str] | None = None,
+    org_memories: list[str] | None = None,
 ) -> AsyncIterator[str]:
     """消费 astream 双模式流:吐 SSE 事件,就地更新 acc(回复/工具/引用/usage)。
 
     graph_input:新一轮是 {"messages": [...]};确认续跑是 Command(resume=...)。
-    memories:本轮召回的长期记忆,经运行时上下文进 system prompt(不进 checkpoint)。
+    memories / org_memories:本轮召回的用户长期记忆与组织记忆,经运行时上下文进
+    system prompt(不进 checkpoint)。
     """
     last_usage: dict[str, int | None] | None = None
     async for mode, payload in agent.astream(
         graph_input,
         config=config,
-        context={"memories": memories or []},
+        context={"memories": memories or [], "org_memories": org_memories or []},
         stream_mode=["messages", "updates"],
     ):
         if mode == "messages":
@@ -515,17 +523,19 @@ async def _consume_model_stream(
 
 
 async def _toolless_guarded_reply(
-    agent: Any, config: dict, reply_chunks: list[str]
+    agent: Any, config: dict, acc: _TurnAccum
 ) -> AsyncIterator[str]:
     """无工具档:整段回复过编造守卫后一次性下发(缓冲直播)。
 
     守卫在一切持久化之前——直播、conversation_log、checkpointer 三面同用
     改写文本;压缩必须排在其后,否则编造原文会被压进摘要。
+    判定写进 acc.guard_verdicts,随本轮对话日志落库。
     """
-    from official_agent.security.fabrication_guard import guard_empty_tools_reply
+    from official_agent.security.fabrication_guard import GUARD_NAME, guard_empty_tools_reply
     from official_agent.security.pii import mask_pii_output
 
-    final_reply, verdict = guard_empty_tools_reply("".join(reply_chunks))
+    final_reply, verdict = guard_empty_tools_reply("".join(acc.reply_chunks))
+    acc.guard_verdicts[GUARD_NAME] = verdict
     # toolless 回复出口同过 PII 掩(与 cli 对称;掩后文本进回写)
     final_reply, _pii_trace = mask_pii_output(final_reply)
     if verdict != "clean":
@@ -534,10 +544,38 @@ async def _toolless_guarded_reply(
             "fabrication_empty_tools",
             verdict,
         )
-        reply_chunks[:] = [final_reply]
+        acc.reply_chunks[:] = [final_reply]
         await _rewrite_last_ai_message(agent, config, final_reply)
     if final_reply:
         yield _sse({"type": "delta", "role": "assistant", "content": final_reply})
+
+
+def _check_kb_citations(acc: _TurnAccum) -> None:
+    """引用核验(只观测):把判定记进 acc.guard_verdicts,不改回复。配置没打开时什么都不做。"""
+    from official_agent.config import get_settings
+    from official_agent.security import citation_guard
+
+    if not get_settings().kb_citation_check_enabled:
+        return
+
+    try:
+        verdict = citation_guard.check_citations(
+            "".join(acc.reply_chunks),
+            [s.get("title", "") for s in acc.sources],
+            searched=acc.kb_searched,
+        )
+    except Exception:  # noqa: BLE001
+        # 观测面 fail-open(ADR-0005):核验只是多记一项判定,它出错不能影响已经
+        # 发给用户的这一轮;代价是这一轮没有引用核验的判定
+        logging.getLogger(__name__).warning("引用核验失败(已忽略)", exc_info=True)
+        return
+    if verdict is None:
+        return
+    acc.guard_verdicts[citation_guard.GUARD_NAME] = verdict
+    if verdict != citation_guard.VERDICT_CLEAN:
+        logging.getLogger(__name__).info(
+            "guard_event guard_name=%s verdict=%s", citation_guard.GUARD_NAME, verdict
+        )
 
 
 def _usage_out(usage_acc: dict[str, int | None]) -> dict[str, int | None]:
@@ -731,11 +769,11 @@ async def _stream_turn(
                     async with asyncio.timeout(max(int(_settings.turn_wall_clock_timeout), 1)):
                         if resume is None and checkpointer is not None:
                             await _cancel_pending_confirmation(session.agent, config)
-                        # 长期记忆按本轮问题召回(确认续跑不是新问题,不召回);fail-open
-                        memories = (
-                            await memory_recall.recall_for(session.identity, message)
+                        # 记忆按本轮问题召回(确认续跑不是新问题,不召回);fail-open
+                        memories, org_memories = (
+                            await memory_recall.recall_both(session.identity, message)
                             if resume is None
-                            else []
+                            else ([], [])
                         )
                         async for event in _consume_model_stream(
                             session.agent,
@@ -744,6 +782,7 @@ async def _stream_turn(
                             masker=masker,
                             acc=acc,
                             memories=memories,
+                            org_memories=org_memories,
                         ):
                             yield event
             except asyncio.CancelledError:
@@ -775,7 +814,7 @@ async def _stream_turn(
         from official_agent.graphs.assistant import build_system_prompt
 
         if toolless and error_code is None:
-            async for event in _toolless_guarded_reply(session.agent, config, acc.reply_chunks):
+            async for event in _toolless_guarded_reply(session.agent, config, acc):
                 yield event
 
         # 回复出口 PII 守卫——全部会话适用。流式 delta 已逐块掩(尾部缓冲抗
@@ -784,6 +823,9 @@ async def _stream_turn(
             tail = masker.finish()
             if tail:
                 yield _sse({"type": "delta", "role": "assistant", "content": tail})
+
+        if error_code is None:
+            _check_kb_citations(acc)
 
         # 轮末按需压缩(先压缩后落行,同一行携带 compress_event)。
         # 在 done 事件前执行:失败 fail-open 返回 None,不阻断 done。
@@ -807,6 +849,7 @@ async def _stream_turn(
             usage=_usage_out(acc.usage),
             prefix_hash=p_hash,
             compress_event=compress_event,
+            guard_verdict=format_verdicts(acc.guard_verdicts),
         )
         # 记忆提取放在落账之后、done 之前触发(后台任务,不阻塞本轮收尾)
         if error_code is None and acc.confirm is None and resume is None:
@@ -1027,11 +1070,12 @@ async def delete_my_session(
     auth: Annotated[tuple[ResolvedIdentity, str], Depends(_authenticate)],
 ) -> Response:
     """用户删除自己的会话:档案行物理 DELETE + checkpoint
-    三表物理清理 + 对话日志物理清理;进程内运行时对象同步移除。
+    三表物理清理 + 对话日志与知识库检索日志物理清理;进程内运行时对象同步移除。
 
     Langfuse trace 的删除需经其外部 API(自托管/云与 trace 关联键尚未确定)
     ——本端点删除后 trace 已无可关联档案,残余 trace 按留存策略
     过期,运维手册见 docs/eval-observability.md 同级说明。"""
+    from official_agent.kb.query_log import delete_thread_queries
     from official_agent.state.conversation import delete_thread_conversations
     from official_agent.state.pg import purge_thread_checkpoints
     from official_agent.state.threads import hard_delete_thread, resolve_thread
@@ -1057,6 +1101,8 @@ async def delete_my_session(
         try:
             await asyncio.to_thread(purge_thread_checkpoints, thread_id)
             await asyncio.to_thread(delete_thread_conversations, thread_id)
+            # 检索日志里存着这段对话里问过的问题(脱敏后),同样属于会话留存
+            await asyncio.to_thread(delete_thread_queries, thread_id)
             # 该会话里整理出的长期记忆一并删除:删会话即撤回这段对话的一切留存
             from official_agent.memory import store as memory_store
 

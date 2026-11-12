@@ -101,3 +101,23 @@ async def test_turn_id_fallback_without_span(monkeypatch) -> None:
     want = hashlib.sha256(b"cli:u123:a1b2c3d4").hexdigest()[:32]
     assert trace_ids_of([api_route, user_route]) == [want] * 2
     await client.aclose()
+
+
+def test_turn_trace_id_ignores_active_span(monkeypatch) -> None:
+    """图内有活跃 span 时 current_trace_id 返回 span 的 id,turn_trace_id 仍是入口那个
+    ——对话日志(图外写)与检索日志(图内写)都取后者,两表才对得上。"""
+    import official_agent.observability as obs
+
+    monkeypatch.setattr(obs, "_active_span_trace_id", lambda: "a" * 32)
+    token = set_turn_trace_id("b" * 32)
+    try:
+        assert obs.current_trace_id() == "a" * 32
+        assert obs.turn_trace_id() == "b" * 32
+    finally:
+        reset_turn_trace_id(token)
+
+
+def test_turn_trace_id_falls_back_to_zero_when_unset() -> None:
+    import official_agent.observability as obs
+
+    assert obs.turn_trace_id() == "0" * 32

@@ -22,7 +22,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from official_agent.config import get_effective_settings
+from official_agent.config import get_effective_settings, get_settings
+from official_agent.evaluation import calibration
 from official_agent.evaluation.applicant import ApplicantProfile, parse_intended_departments
 from official_agent.evaluation.github_client import normalize_github_login
 from official_agent.evaluation.graph import _prompt_version, run_evaluation
@@ -53,17 +54,27 @@ class TriggerItem:
     resume_id: int
 
 
+#: 用量行的段标记,写进 tools 列。一个 job 的评分段与题库段各落一行、挂在同一个
+#: eval:<job_id> 线程下,按段统计成本只能靠这一列区分——文案列写入前会过 PII
+#: 掩码(简历号这类数字可能被改写),不能当判据。
+_SCORING_STAGE_TOOLS = ("scoring",)
+_QBANK_STAGE_TOOLS = ("explore", "grilling")
+
+
 def _write_eval_usage_log(
     *,
     job_id: int,
     job_user_id: int | None,
-    resume_id: int,
-    cycle_id: int,
-    qbank_version: int,
+    stage_tools: tuple[str, ...],
+    user_message: str,
+    reply_summary: str,
     usage: dict,
 ) -> None:
-    """eval 通道用量日志:thread_id 关联 job;四列 token 进会话用量面板。
+    """eval 通道用量日志:每段一行,thread_id 关联 job;四列 token 进会话用量面板。
 
+    stage_tools 取 _SCORING_STAGE_TOOLS / _QBANK_STAGE_TOOLS,标明这一行属于哪一段。
+    usage 为空(该段没调模型,或模型响应不带用量)照样落行,token 四列留 NULL:
+    NULL 表示「没有用量记录」,不是 0。
     fail-open:日志写失败不拖垮 job(与审计同语义)。"""
     try:
         from official_agent.state.conversation import write_conversation
@@ -72,13 +83,15 @@ def _write_eval_usage_log(
             thread_id=f"eval:{job_id}",
             user_id=job_user_id,
             channel="evaluation",
-            user_message=f"简历 {resume_id} 初筛+题库(周期 {cycle_id})",
-            reply_summary=f"题库 v{qbank_version} 落库",
-            tools=["explore", "grilling"],
+            user_message=user_message,
+            reply_summary=reply_summary,
+            tools=list(stage_tools),
             **(usage or {}),
         )
     except Exception:  # noqa: BLE001 — 用量日志缺失可容忍
-        logging.getLogger(__name__).warning("eval 用量日志写入失败", exc_info=True)
+        logging.getLogger(__name__).warning(
+            "eval 用量日志写入失败(job=%s,stage=%s)", job_id, "+".join(stage_tools), exc_info=True
+        )
 
 
 def _log_event(job_id: int, cycle_id: int, resume_id: int, stage: str, **fields: object) -> None:
@@ -273,10 +286,47 @@ def _mask_fields_for_model(fields: list[FieldText], *, resume_id: int) -> list[F
     return out
 
 
+async def _scoring_mode_for(cycle_id: int) -> str:
+    """本周期用哪种评分模式:周期里已有评分卡就沿用第一张卡的模式,否则取配置。
+
+    等级是候选池内的相对排名,同一个池里混着两种模式判出来的卡不可比。所以模式只在
+    周期之间切换:周期中途改配置不生效,重评也沿用本周期的模式。
+    """
+    pinned = await asyncio.to_thread(evaluation.cycle_scoring_mode, cycle_id)
+    return pinned or get_settings().evaluation_scoring_mode
+
+
+async def _calibration_set_for(cycle_id: int, mode: str) -> int:
+    """本周期冻结的校准案例集水位;0 = 本周期不用校准案例。
+
+    与评分模式同理按周期固定:周期里已有评分卡就沿用第一张卡记的水位(没记即不用);
+    还没有卡时,开关开着才把当前的案例集定为本周期的标尺。单评委模式不用校准案例。
+    """
+    if mode == "single":
+        return 0
+    pinned = await asyncio.to_thread(evaluation.cycle_calibration_set, cycle_id)
+    if pinned is not None:
+        return pinned
+    if not get_settings().evaluation_calibration_enabled:
+        return 0
+    return await asyncio.to_thread(evaluation.calibration_store.current_watermark)
+
+
+def _panel_facts(card: dict[str, Any] | None) -> dict[str, Any]:
+    """卡上的合议结论里值得进日志与审计的几项。只有模式、档位和布尔量,不含简历文本。"""
+    panel = (card or {}).get("panel") or {}
+    return {
+        "scoring_mode": panel.get("mode", "single"),
+        "confidence": panel.get("confidence"),
+        "injection_detected": (panel.get("injection") or {}).get("detected"),
+        "calibration_set": (panel.get("calibration") or {}).get("set"),
+    }
+
+
 async def _do_scoring(
     job: dict[str, Any], resume_id: int, cycle_id: int, job_id: int
 ) -> tuple[dict, int, list, str]:
-    """评分段:取数 → 归属硬断言 → 脱敏 → 评分子图 → 落卡。
+    """评分段:取数 → 归属硬断言 → 脱敏 → 定评分模式与校准案例 → 评分子图 → 落卡。
 
     返回 (卡, 卡版本, 脱敏后字段, 年级)——字段与年级是出题段的输入,
     两个模型入口共用同一份脱敏后材料(出口契约)。
@@ -295,22 +345,35 @@ async def _do_scoring(
     # 出口契约:评分与出题两个模型入口共用这份脱敏后字段
     fields = _mask_fields_for_model(fields, resume_id=resume_id)
     scoring_usage: dict[str, int | None] = {}
+    scoring_fields = [
+        {
+            "field_key": f.field_key,
+            "title": f.title,
+            "value": f.value,
+            "placeholder": f.placeholder,
+            "required": f.required,
+        }
+        for f in fields
+    ]
+    mode = await _scoring_mode_for(cycle_id)
+    watermark = await _calibration_set_for(cycle_id, mode)
+    # 取判例用的是脱敏后的字段:送去算向量的文本与进评分模型的是同一份
+    anchors = (
+        await calibration.retrieve_for_resume(
+            scoring_fields, resume_id=resume_id, cycle_id=cycle_id, watermark=watermark
+        )
+        if watermark
+        else None
+    )
     card = await run_evaluation(
-        [
-            {
-                "field_key": f.field_key,
-                "title": f.title,
-                "value": f.value,
-                "placeholder": f.placeholder,
-                "required": f.required,
-            }
-            for f in fields
-        ],
+        scoring_fields,
         resume_id=resume_id,
         cycle_id=cycle_id,
         profile=profile,
         usage_out=scoring_usage,
         correlation_id=eval_job_trace_id(job_id),
+        mode=mode,
+        anchors=anchors,
     )
     version = await asyncio.to_thread(
         evaluation.save_scorecard,
@@ -329,6 +392,18 @@ async def _do_scoring(
         prompt_version=_prompt_version(),
         input_tokens=scoring_usage.get("input_tokens"),
         output_tokens=scoring_usage.get("output_tokens"),
+        **_panel_facts(card),
+    )
+    # 落卡之后才记用量:这一行对应一张已落库的卡。评分失败的那次调用不记
+    # (子图失败时不回传用量)。
+    await asyncio.to_thread(
+        _write_eval_usage_log,
+        job_id=job_id,
+        job_user_id=job.get("user_id"),
+        stage_tools=_SCORING_STAGE_TOOLS,
+        user_message=f"简历 {resume_id} 初筛评分(周期 {cycle_id})",
+        reply_summary=f"评分卡 v{version} 落库",
+        usage=scoring_usage,
     )
     return card, version, fields, profile.grade
 
@@ -349,6 +424,7 @@ async def _do_qbank(
     有效,题库缺失管理面可见、可单独重试。
     """
     from official_agent.evaluation import bundle as eval_bundle
+    from official_agent.evaluation import question_similarity
     from official_agent.state import qbank as qbank_store
 
     t_qbank = time.monotonic()
@@ -360,6 +436,11 @@ async def _do_qbank(
             github_key=await fetch_candidate_github(job["user_id"]) or None,
             github_token=get_effective_settings().github_token,
             grade=grade,
+        )
+        # 相似度标注要写进信封,所以在落库前;向量要按题库版本落索引,所以在落库后。
+        # 两步都是旁路,自己兜住失败,不影响题库落库
+        pending_index = await question_similarity.annotate(
+            envelope, resume_id=resume_id, cycle_id=cycle_id
         )
         qbank_version = await asyncio.to_thread(
             qbank_store.save_qbank,
@@ -373,6 +454,13 @@ async def _do_qbank(
             envelope=envelope,
             prompt_version=str(envelope.get("prompt_version", "")),
         )
+        await question_similarity.persist(
+            pending_index,
+            envelope,
+            resume_id=resume_id,
+            cycle_id=cycle_id,
+            qbank_version=qbank_version,
+        )
         # 探索+出题用量进 conversation_log(evaluation 通道,
         # 关联 job;复用四列 token 管道,不新建表)
         usage_total = envelope.get("explore_usage_total") or {}
@@ -380,9 +468,9 @@ async def _do_qbank(
             _write_eval_usage_log,
             job_id=job_id,
             job_user_id=job.get("user_id"),
-            resume_id=resume_id,
-            cycle_id=cycle_id,
-            qbank_version=qbank_version,
+            stage_tools=_QBANK_STAGE_TOOLS,
+            user_message=f"简历 {resume_id} 初筛+题库(周期 {cycle_id})",
+            reply_summary=f"题库 v{qbank_version} 落库",
             usage=usage_total,
         )
     except Exception as qbank_exc:  # noqa: BLE001 — 题库线失败不拖垮评分卡
@@ -632,6 +720,9 @@ class EvaluationRunner:
                         "candidate_user_id": job["user_id"],
                         "hard_zero": bool(card.get("hard_zero")) if card else None,
                         "qbank_status": qbank_status,
+                        # 这张卡由哪种评分模式、哪几版 prompt 产出,合议给了什么结论
+                        **_panel_facts(card),
+                        "prompt_versions": ((card or {}).get("versions") or {}).get("prompts"),
                     },
                     decision="system:auto",
                     result=(

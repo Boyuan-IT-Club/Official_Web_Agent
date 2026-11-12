@@ -447,3 +447,129 @@ def test_qbank_generating_job_returns_flag_not_error(
     body = resp.json()
     assert body["generating"] is True
     assert "envelope" not in body
+
+
+# ── 可挑题视图:并入审题意见与相似度标注 ───────────────────
+
+
+def _annotated_envelope() -> dict:
+    """两条线的题库:仓线(入口 + 一条两层的链 + 一道备选)与评测线(两道题)。
+
+    标注都挂在题组旁边或信封顶层,题目对象里没有。
+    """
+    return {
+        "schema_name": "evaluation_qbank/v2",
+        "groups": [
+            {
+                "group": "repo",
+                "repo": "me/a",
+                "qbank_v2": {
+                    "group": {
+                        "entry": {"category": "C1_背景与动机", "question": "为什么做?"},
+                        "chains": [
+                            {
+                                "category": "C4_实现细节拷打",
+                                "theme": "限流",
+                                "layers": [{"question": "按什么限?"}, {"question": "并发时呢?"}],
+                            }
+                        ],
+                        "reserves": [{"category": "C9_变更条件", "question": "流量 ×10 呢?"}],
+                    },
+                    "review": {
+                        "status": "reviewed",
+                        "items": [
+                            {"key": "entry", "verdict": "keep", "reasons": []},
+                            {"key": "chain:0:1", "verdict": "revise", "reasons": ["recitable"]},
+                        ],
+                    },
+                },
+            },
+            {
+                "group": "autograding",
+                "questions": [
+                    {"anchor": "guided", "question": "超时那条怎么查的?"},
+                    {"anchor": "guided", "question": "边界用例为什么挂?"},
+                ],
+                "review": {
+                    "status": "reviewed",
+                    "items": [{"key": "question:1", "verdict": "drop", "reasons": ["generic"]}],
+                },
+            },
+        ],
+        "similarity": {
+            "embed_model": "test-embed",
+            "items": [
+                {
+                    "group_index": 1,
+                    "key": "question:0",
+                    "duplicate_of": {"group_index": 0, "key": "chain:0:0"},
+                    "generic_resumes": 0,
+                },
+                {"group_index": 0, "key": "reserve:0", "duplicate_of": None, "generic_resumes": 4},
+            ],
+        },
+    }
+
+
+def _flat(envelope: dict) -> dict[tuple[int, str], dict]:
+    entries = qbank.flatten_v2_pickable(envelope, resume_id=9, cycle_id=2026, qbank_version=2)
+    return {(e["group_index"], qbank.entry_key(e)): e for e in entries}
+
+
+def test_pickable_entries_carry_review_and_similarity() -> None:
+    """标注按「组下标 + 组内编号」对回题目;没被标注的题不带这两个键。"""
+    flat = _flat(_annotated_envelope())
+
+    assert flat[(0, "entry")]["review"] == {"verdict": "keep", "reasons": []}
+    assert flat[(0, "chain:0:1")]["review"] == {"verdict": "revise", "reasons": ["recitable"]}
+    assert flat[(1, "question:1")]["review"] == {"verdict": "drop", "reasons": ["generic"]}
+    assert "review" not in flat[(0, "chain:0:0")]  # 审题者没给这道题意见
+    assert "review" not in flat[(1, "question:0")]
+
+    # 重复指向本包里问同一件事、证据更强的那道题,用的是稳定题引用 id
+    assert flat[(1, "question:0")]["similarity"] == {
+        "duplicate_of_ref_id": flat[(0, "chain:0:0")]["ref_id"],
+        "generic_resumes": 0,
+    }
+    assert flat[(0, "reserve:0")]["similarity"] == {
+        "duplicate_of_ref_id": None,
+        "generic_resumes": 4,
+    }
+    assert "similarity" not in flat[(0, "entry")]
+
+
+def test_annotations_do_not_change_entries_or_ref_ids() -> None:
+    """去掉标注后,可挑题条目与题引用 id 和带标注时完全一致(除了那两个键)。"""
+    annotated = _annotated_envelope()
+    plain = _annotated_envelope()
+    plain.pop("similarity")
+    plain["groups"][0]["qbank_v2"].pop("review")
+    plain["groups"][1].pop("review")
+
+    with_notes, without_notes = _flat(annotated), _flat(plain)
+
+    assert list(with_notes) == list(without_notes)
+    for locator, entry in without_notes.items():
+        assert "review" not in entry and "similarity" not in entry
+        stripped = {
+            k: v for k, v in with_notes[locator].items() if k not in ("review", "similarity")
+        }
+        assert stripped == entry
+
+
+def test_pick_by_ref_id_returns_entry_with_its_review(monkeypatch) -> None:
+    """按 ref_id 勾选仍然精确命中;落进 pick log 的权威条目带着当时的审题意见。"""
+    envelope = _annotated_envelope()
+    monkeypatch.setattr(
+        qbank,
+        "latest_qbank",
+        lambda r, c: {"envelope": envelope, "qbank_version": 2},
+    )
+    target = _flat(envelope)[(0, "chain:0:1")]
+
+    (resolved,) = qbank.resolve_picks(
+        9, 2026, [{"ref_id": target["ref_id"], "question": target["question"]}]
+    )
+
+    assert resolved["ref_id"] == target["ref_id"]
+    assert resolved["review"] == {"verdict": "revise", "reasons": ["recitable"]}

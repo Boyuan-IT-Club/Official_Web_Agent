@@ -1,0 +1,164 @@
+# 周期复盘报告门禁:合成快照里植入异常,看对应的分析员指不指得出来。
+# 用例给各域的原始聚合(形状同 state/retrospective/aggregates.py 各函数的返回),
+# 快照由真实的口径与抑制代码拼出来。断言:
+#   cited_by:       {角色: [指标 id…]}  该分析员的发现里要有一条引用到这个指标
+#   section_status: {角色: 状态}        该节的状态
+#   forbid_text:    [片段…]             模型写的文字里不得出现
+#   allow_dropped:  true               允许有发现被闸门丢掉(缺省不允许:每条发现都要带
+#                                      有效依据,报告里不能有快照之外的数字)
+# 改 prompts/retrospective/ 下任何一份、改闸门或数字落地守卫,必须跑。
+
+runner: retro_probes
+
+defaults:
+  min_pass_rate: 1.0
+
+# 一个平平无奇的周期;各用例只换掉要植入异常的那个域
+fixtures:
+  funnel: &funnel
+    totalResumes: 213
+    totalResults: 180
+    decisionCounts: { pending: 12, passed: 68, rejected: 92, toTransfer: 8 }
+    assignedByDeptId: { "1": 52, "2": 44, "3": 41, "4": 37 }
+    evaluatedCandidates: 150
+  conversation: &conversation
+    turns: 4000
+    sessions: 900
+    error_turns: 80
+    timed_turns: 3900
+    duration_p50_ms: 1835
+    duration_p90_ms: 5120
+    duration_p99_ms: 20480
+    metered_turns: 3800
+    input_tokens: 9000000
+    output_tokens: 600000
+    cache_turns: 3700
+    cache_hit_tokens: 6000000
+    cache_miss_tokens: 2000000
+    by_channel: { web: 3900, cli: 100 }
+    tool_calls: { search_knowledge: 2500, get_open_cycle: 800, get_my_interview: 300 }
+  kb: &kb
+    searches: 2500
+    hits: 2000
+    not_found: 450
+    unavailable: 50
+    low_score_hits: 300
+  screening: &screening
+    jobs: 230
+    failed_jobs: 12
+    by_attempts: { 1: 205, 2: 18, 3: 7 }
+    scored_resumes: 200
+    hard_zero_resumes: 14
+    card_versions: 215
+    decisions:
+      - [adopted, 技术部, 34]
+      - [adopted, 项目部, 28]
+      - [adopted, 媒体部, 26]
+      - [adopted, 综合部, 24]
+      - [rejected, 技术部, 12]
+      - [rejected, 项目部, 10]
+      - [rejected, 媒体部, 9]
+      - [rejected, 综合部, 8]
+  qbank: &qbank
+    generated: 190
+    degraded: 19
+    picked_resumes: 80
+    offered_by_group: { repo: 600, awards: 100, base_and_skills: 200 }
+    picked_by_group: { repo: 240, awards: 20, base_and_skills: 30 }
+  evaluation_usage: &usage
+    metered_resumes: 150
+    input_tokens: 30000000
+    output_tokens: 1500000
+  normal: &normal
+    funnel: *funnel
+    conversation: *conversation
+    kb: *kb
+    screening: *screening
+    qbank: *qbank
+    evaluation_usage: *usage
+
+cases:
+  - id: rejections_concentrated_in_one_department
+    aggregates:
+      <<: *normal
+      screening:
+        <<: *screening
+        decisions:
+          - [adopted, 技术部, 30]
+          - [adopted, 项目部, 28]
+          - [adopted, 媒体部, 26]
+          - [adopted, 综合部, 24]
+          - [rejected, 技术部, 78]
+          - [rejected, 项目部, 6]
+          - [rejected, 媒体部, 7]
+          - [rejected, 综合部, 5]
+    expect:
+      cited_by: { evaluation: ["screening.rejected_by_dept[技术部]"] }
+
+  - id: error_rate_jumped_against_baseline
+    aggregates:
+      <<: *normal
+      conversation: { <<: *conversation, error_turns: 720 }
+    baseline: *normal
+    expect:
+      cited_by: { qa: ["conversation.error_rate"] }
+
+  - id: knowledge_base_misses_nearly_half
+    aggregates:
+      <<: *normal
+      kb: { searches: 2500, hits: 1300, not_found: 1150, unavailable: 50, low_score_hits: 300 }
+    expect:
+      cited_by: { qa: ["kb.not_found_rate"] }
+
+  - id: one_department_takes_most_candidates
+    aggregates:
+      <<: *normal
+      funnel:
+        <<: *funnel
+        assignedByDeptId: { "1": 150, "2": 12, "3": 10, "4": 8 }
+    expect:
+      cited_by: { data: ["funnel.assigned_by_dept[1]"] }
+
+  - id: question_banks_mostly_degraded
+    aggregates:
+      <<: *normal
+      qbank: { <<: *qbank, degraded: 120 }
+    expect:
+      cited_by: { evaluation: ["qbank.degraded_rate"] }
+
+  - id: hard_zero_rate_unusually_high
+    aggregates:
+      <<: *normal
+      screening: { <<: *screening, hard_zero_resumes: 90 }
+    expect:
+      cited_by: { evaluation: ["screening.hard_zero_rate"] }
+
+  # 小格子被抑制成「不足 5」:报告只能照这个说法提,猜出来的数会被守卫删掉 → 用例失败
+  - id: suppressed_cells_are_not_guessed
+    aggregates:
+      <<: *normal
+      funnel:
+        <<: *funnel
+        decisionCounts: { pending: 2, passed: 68, rejected: 107, toTransfer: 3 }
+      screening:
+        <<: *screening
+        decisions:
+          - [adopted, 技术部, 34]
+          - [adopted, 项目部, 28]
+          - [adopted, 媒体部, 26]
+          - [adopted, 综合部, 24]
+          - [rejected, 技术部, 30]
+          - [rejected, 项目部, 2]
+          - [rejected, 媒体部, 3]
+          - [rejected, 综合部, 9]
+    expect: {}
+
+  # 对话与检索两个域都没有数据:问答一节应标为没有数据,其余两节照常
+  - id: section_without_data_is_marked_not_invented
+    aggregates:
+      funnel: *funnel
+      screening: *screening
+      qbank: *qbank
+      evaluation_usage: *usage
+    expect:
+      section_status: { qa: no_data, data: ok, evaluation: ok }

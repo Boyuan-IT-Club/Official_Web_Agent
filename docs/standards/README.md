@@ -15,7 +15,8 @@
    docker compose -f deploy/docker-compose.local.yml up -d agent-pg   # pgvector,端口 5433
    POSTGRES_URL=postgresql://postgres:agent_dev@localhost:5433/official_agent \
      uv run pytest tests/test_evaluation_state_pg.py tests/test_qbank_state_pg.py \
-                   tests/test_state_pg.py tests/test_kb_integration.py
+                   tests/test_state_pg.py tests/test_kb_integration.py \
+                   tests/test_retrospective_state_pg.py
    ```
    (自 SKIP 不是通过;`.env` 已含同样的 POSTGRES_URL。)
 5. **eval 门禁**(改 prompt/模型路由/温度/图结构时必跑):
