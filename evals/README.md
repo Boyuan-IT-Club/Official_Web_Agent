@@ -40,6 +40,7 @@ uv run python evals/run_evals.py --write-baseline evals/baselines.json # 落新�
 | `datasets/memory_probes.yaml` | datasets | `memory_probes` | LLM_* 配置(提取闸门 + 模型,不落库) |
 | `datasets/retro_probes.yaml` | datasets | `retro_probes` | LLM_* 配置(合成快照跑复盘报告整张图,不落库) |
 | `datasets/retro_injection.yaml` | datasets | `retro_probes` | LLM_* 配置(指标键名里夹带指令,报告不被带偏) |
+| `datasets/org_memory_probes.yaml` | datasets | `org_memory_probes` | LLM_* 配置(真实助理带组织记忆作答;候选人零泄漏、相关教训被用上;不连库) |
 
 ## 专项数据集与纪律
 

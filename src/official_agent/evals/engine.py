@@ -111,6 +111,7 @@ def default_registry() -> dict[str, SuiteSpec]:
         injection_probes,
         kb_probes,
         memory_probes,
+        org_memory_probes,
         qbank_judge,
         qbank_probes,
         retro_probes,
@@ -138,6 +139,9 @@ def default_registry() -> dict[str, SuiteSpec]:
             run=memory_probes.run_suite, env_blocker=memory_probes.env_blocker
         ),
         "retro_probes": SuiteSpec(run=retro_probes.run_suite, env_blocker=retro_probes.env_blocker),
+        "org_memory_probes": SuiteSpec(
+            run=org_memory_probes.run_suite, env_blocker=org_memory_probes.env_blocker
+        ),
     }
 
 

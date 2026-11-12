@@ -33,6 +33,8 @@ last_qbank_judge_report.json
 # 周期复盘报告门禁:合成的聚合计数,无真实数据
 !evals/datasets/retro_probes.yaml
 !evals/datasets/retro_injection.yaml
+# 组织记忆门禁:虚构的教训,无真实数据
+!evals/datasets/org_memory_probes.yaml
 # CV 深挖报告逐字引用简历原文(防编造设计使然),与样本同级敏感:整体忽略,
 # 防误 add 把 PII 带进仓库。
 evals/reports/cv_dive_report.md

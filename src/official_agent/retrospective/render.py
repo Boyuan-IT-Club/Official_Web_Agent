@@ -24,8 +24,18 @@ from official_agent.security.pii import mask_pii
 _LESSON_KIND_LABELS = {"lesson": "经验", "norm": "规矩", "calendar": "时间规律"}
 
 
-def render_markdown(report: dict[str, Any], snapshot: dict[str, Any], *, version: int) -> str:
-    """报告正文 + 它依据的快照 → Markdown 全文。"""
+def render_markdown(
+    report: dict[str, Any],
+    snapshot: dict[str, Any],
+    *,
+    version: int,
+    prior_lessons: list[dict[str, Any]] | None = None,
+) -> str:
+    """报告正文 + 它依据的快照 → Markdown 全文。
+
+    prior_lessons 是往届留下、还没退役的组织记忆:列在报告末尾,请审阅的人对照本届的
+    情况决定续期还是退役。
+    """
     names = {entry["id"]: entry["name"] for entry in snapshot.get("catalog", [])}
     lines = [f"# 招新周期复盘报告 · 周期 {snapshot.get('cycle_id')}(第 {version} 版)", ""]
     baseline = snapshot.get("baseline")
@@ -52,6 +62,16 @@ def render_markdown(report: dict[str, Any], snapshot: dict[str, Any], *, version
         for index, candidate in enumerate(report["rubric_candidates"], start=1):
             lines.append(f"{index}. {candidate['text']}")
             lines.append(f"   依据:{_cited_names(candidate['metric_ids'], snapshot, names)}")
+    if prior_lessons:
+        lines += ["", "## 往届教训复核", ""]
+        lines += ["这些是往届复盘留下、还没退役的经验。对照本届的情况,逐条决定续期还是退役。", ""]
+        for index, lesson in enumerate(prior_lessons, start=1):
+            label = _LESSON_KIND_LABELS.get(lesson["kind"], lesson["kind"])
+            validity = "已过期" if lesson["expired"] else f"有效期至 {lesson['valid_until']}"
+            lines.append(
+                f"{index}. 〔{label}〕{lesson['content']}"
+                f"(出自周期 {lesson['source_cycle']};{validity})"
+            )
     if report.get("unverified"):
         lines += ["", "## 被程序改动过的地方", ""]
         lines += ["下面的内容没有进入报告,列出来供审阅时参考。", ""]

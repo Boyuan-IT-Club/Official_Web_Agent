@@ -11,6 +11,7 @@ import asyncio
 import logging
 from typing import Any
 
+from official_agent.memory import org_store
 from official_agent.retrospective import graph
 from official_agent.retrospective.render import render_markdown
 from official_agent.state.retrospective import report_store
@@ -30,14 +31,24 @@ async def generate_report(
     """
     try:
         report = await graph.run_retrospective(snapshot, model=model)
-        markdown = render_markdown(report, snapshot, version=version)
+        prior_lessons = await _prior_lessons(cycle_id)
+        markdown = render_markdown(report, snapshot, version=version, prior_lessons=prior_lessons)
         saved = await asyncio.to_thread(
             report_store.finish_report,
             cycle_id,
             version,
             sections={
-                key: report[key]
-                for key in ("summary", "sections", "lessons", "rubric_candidates", "writer_status")
+                **{
+                    key: report[key]
+                    for key in (
+                        "summary",
+                        "sections",
+                        "lessons",
+                        "rubric_candidates",
+                        "writer_status",
+                    )
+                },
+                "prior_lessons": prior_lessons,
             },
             report_md=markdown,
             unverified=report["unverified"],
@@ -64,6 +75,32 @@ async def generate_report(
             "复盘报告生成失败 cycle_id=%s version=%s", cycle_id, version, exc_info=True
         )
         await _mark_failed(cycle_id, version, exc)
+
+
+async def _prior_lessons(cycle_id: int) -> list[dict[str, Any]]:
+    """往届留下、还没退役的组织记忆(含已过期的),给这份报告的审阅者复核。
+
+    取不到不影响报告:这一栏是给人的提醒,不是报告的内容(fail-open)。
+    """
+    try:
+        memories = await asyncio.to_thread(org_store.list_from_other_cycles, cycle_id)
+    except Exception:  # noqa: BLE001 — 复核清单缺席只是少一栏提醒,报告照常生成
+        logger.warning(
+            "往届组织记忆读取失败,报告里不列复核清单 cycle_id=%s", cycle_id, exc_info=True
+        )
+        return []
+    return [
+        {
+            "memory_id": memory.memory_id,
+            "kind": memory.kind,
+            "content": memory.content,
+            "audience": memory.audience,
+            "source_cycle": memory.source_cycle,
+            "valid_until": memory.valid_until.date().isoformat(),
+            "expired": memory.expired,
+        }
+        for memory in memories
+    ]
 
 
 async def _mark_failed(cycle_id: int, version: int, exc: Exception) -> None:

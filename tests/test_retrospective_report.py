@@ -100,12 +100,23 @@ async def test_markdown_says_so_when_the_writer_failed() -> None:
 
 
 class _Store:
-    def __init__(self, monkeypatch, *, finish_result: bool = True) -> None:
+    """替换报告表与组织记忆表:不连 PG。prior 是往届留下、还没退役的组织记忆。"""
+
+    def __init__(self, monkeypatch, *, finish_result: bool = True, prior=None) -> None:
         self.finished: list[dict] = []
         self.failed: list[tuple] = []
         self.finish_result = finish_result
+        self.prior = prior if prior is not None else []
+        self.prior_asked_for: list[int] = []
         monkeypatch.setattr(reports.report_store, "finish_report", self._finish)
         monkeypatch.setattr(reports.report_store, "fail_report", self._fail)
+        monkeypatch.setattr(reports.org_store, "list_from_other_cycles", self._prior)
+
+    def _prior(self, cycle_id: int):
+        self.prior_asked_for.append(cycle_id)
+        if isinstance(self.prior, Exception):
+            raise self.prior
+        return self.prior
 
     def _finish(self, cycle_id, version, **body) -> bool:
         self.finished.append({"cycle_id": cycle_id, "version": version, **body})
@@ -127,8 +138,9 @@ async def test_generate_saves_draft_with_versions_and_usage(monkeypatch) -> None
     (saved,) = store.finished
     assert (saved["cycle_id"], saved["version"]) == (12, 3)
     assert set(saved["sections"]) == {
-        "summary", "sections", "lessons", "rubric_candidates", "writer_status",
+        "summary", "sections", "lessons", "rubric_candidates", "writer_status", "prior_lessons",
     }
+    assert saved["sections"]["prior_lessons"] == [] and store.prior_asked_for == [12]
     assert saved["report_md"].startswith("# 招新周期复盘报告 · 周期 12(第 3 版)")
     assert [entry["text"] for entry in saved["unverified"]] == ["还有 7 次超时。"]
     assert saved["prompt_versions"]["writer"] == "retrospective_writer/v1"
@@ -136,6 +148,71 @@ async def test_generate_saves_draft_with_versions_and_usage(monkeypatch) -> None
     assert saved["prompt_versions"]["model"]  # 用的是哪个模型,随报告留底
     assert saved["usage"]["input_tokens"] > 0
     assert store.failed == []
+
+
+def _org_memory(**over):
+    from datetime import UTC, datetime
+
+    from official_agent.memory.org_store import OrgMemory
+
+    fields = {
+        "memory_id": "org_abc",
+        "kind": "norm",
+        "content": "复核队列应在两天内清完。",
+        "audience": "admin",
+        "status": "approved",
+        "source_cycle": 11,
+        "source_report_version": 2,
+        "source_lesson_index": 0,
+        "evidence": {"metric_ids": ["screening.jobs"]},
+        "approved_by": 3,
+        "approved_at": datetime(2025, 11, 20, tzinfo=UTC),
+        "valid_until": datetime(2026, 11, 20, tzinfo=UTC),
+        "retired_by": None,
+        "retired_at": None,
+        "expired": False,
+    }
+    fields.update(over)
+    return OrgMemory(**fields)
+
+
+async def test_report_lists_lessons_from_earlier_cycles_for_review(monkeypatch) -> None:
+    """往届的教训今年还成立吗:没退役的(含已过期的)列在报告末尾,请审阅的人续期或退役。"""
+    prior = [
+        _org_memory(),
+        _org_memory(memory_id="org_old", kind="calendar", content="宣讲会后一周是投递高峰。",
+                    source_cycle=10, expired=True),
+    ]
+    store = _Store(monkeypatch, prior=prior)
+
+    await reports.generate_report(
+        cycle_id=12, version=1, snapshot=await make_snapshot(), model=ScriptedModel(SCRIPT)
+    )
+
+    saved = store.finished[0]
+    assert saved["sections"]["prior_lessons"] == [
+        {"memory_id": "org_abc", "kind": "norm", "content": "复核队列应在两天内清完。",
+         "audience": "admin", "source_cycle": 11, "valid_until": "2026-11-20", "expired": False},
+        {"memory_id": "org_old", "kind": "calendar", "content": "宣讲会后一周是投递高峰。",
+         "audience": "admin", "source_cycle": 10, "valid_until": "2026-11-20", "expired": True},
+    ]
+    markdown = saved["report_md"]
+    assert "## 往届教训复核" in markdown
+    assert "1. 〔规矩〕复核队列应在两天内清完。(出自周期 11;有效期至 2026-11-20)" in markdown
+    assert "2. 〔时间规律〕宣讲会后一周是投递高峰。(出自周期 10;已过期)" in markdown
+
+
+async def test_report_is_still_generated_when_prior_lessons_cannot_be_read(
+    monkeypatch, caplog
+) -> None:
+    store = _Store(monkeypatch, prior=RuntimeError("pg down"))
+    with caplog.at_level("WARNING"):
+        await reports.generate_report(
+            cycle_id=12, version=1, snapshot=await make_snapshot(), model=ScriptedModel(SCRIPT)
+        )
+    assert store.failed == [] and store.finished[0]["sections"]["prior_lessons"] == []
+    assert "## 往届教训复核" not in store.finished[0]["report_md"]
+    assert any("不列复核清单" in r.getMessage() for r in caplog.records)
 
 
 async def test_generate_marks_the_version_failed_when_anything_breaks(monkeypatch) -> None:

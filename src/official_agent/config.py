@@ -100,6 +100,15 @@ class Settings(BaseSettings):
     # 关着时指标快照的采集与读取照常可用,已有的报告也照常可读可发布
     retrospective_report_enabled: bool = False
 
+    # 组织记忆(memory/org_store.py):复盘报告里经管理员勾选的教训,召回进管理员与社员的
+    # 对话。默认关闭:召回会改变对话助理的回答,要先在真实模型上跑过 evals 的
+    # org_memory_probes 才能打开。关着时勾选、退役、续期照常可用,只是不召回。
+    # 候选人会话在任何配置下都不注入(装配层按身份拦,见 memory/recall.py)
+    org_memory_enabled: bool = False
+    org_memory_recall_limit: int = 3
+    # 勾选时的默认保质期(天):招新一年一届,一届之后要有人确认它还成立
+    org_memory_ttl_days: int = 365
+
     # 初筛 job 后台领取循环的间隔(秒);0 = 关闭(只靠提交时派发 + 重启恢复)
     evaluation_claim_interval_seconds: int = 30
 

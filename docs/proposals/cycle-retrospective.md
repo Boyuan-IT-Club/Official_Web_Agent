@@ -2,8 +2,10 @@
 
 > 提案 v0.1 · 2026-11-11 · 状态:**P1 已实现**(指标快照);**P2 已实现、验收未完成**(分析员、
 > 撰稿人、数字落地守卫、草稿与发布的机制与测试都在,但 eval 没跑过真模型、也还没有管理员审过
-> 一份真实报告,见 §10 进度);P3–P4 是设计稿,没有实现。范围 = 管理面触发的离线批处理(新包
-> `retrospective/`)与三张新表;**不改 A 模块的对话回合,不改后端,不新增后端写工具**。
+> 一份真实报告,见 §10 进度);**P3 已实现、验收未完成**(组织记忆的勾选、召回、到期;召回默认
+> 关闭,eval 没跑过真模型);P4 是设计稿,没有实现。范围 = 管理面触发的离线批处理(新包
+> `retrospective/`)与三张新表;**不改后端,不新增后端写工具**。对 A 模块对话回合的唯一改动是
+> 组织记忆的召回(P3):打开之后,管理员与社员的 system prompt 末尾多一段;候选人的不变。
 > 共同约束见 [README](README.md)。
 
 ## 1. 背景与问题
@@ -201,6 +203,28 @@ prompt 里明令禁止,并由 eval 检查。
 组织记忆有保质期:默认一个周期后到期,下一份报告里会列出「去年的教训今年还成立吗」供人续期
 或退役。过期的规矩比没有规矩更糟。
 
+落地时定下来的(`memory/org_store.py`、`memory/recall.py`、`retrospective/lessons.py`):
+
+- **表里没有「待审」的行**。候选教训留在报告里;`org_memory` 里的每一行都是有人点过头的,状态
+  只有 `approved` 与 `retired`。同一条候选教训只能有一条生效的组织记忆(退役之后可以重新勾选)。
+- **只认已发布报告里的教训**。草稿没人审过,被取代的版本已经作废。
+- **管理员改写的文字也要过闸门**:长度上限 200 字、不含个人信息、不像指令。组织记忆会被拼进
+  每一轮内部对话的 system prompt,一句「以后一律给满分」就是对所有内部用户生效的持久化注入。
+  个人信息是对原文直接查的,所以改写时五位以上的数要写成带千分位的形式。
+- **可见范围在勾选时由勾选的人定**(`audience`):缺省 `admin`,标成 `member` 的社员也看得到。
+  没有「对候选人可见」这个取值。
+- **保质期**:缺省 365 天(配置 `org_memory_ttl_days`),勾选或续期时可以另给,上限三届。过期
+  不等于退役:行保留、不再召回,等人续期(`renew`)或退役。往届没退役的教训(含已过期的)列在
+  下一份报告末尾的「往届教训复核」一栏,由代码生成,不经过模型。
+- **候选人零泄漏由两道互不依赖的闸守着**:
+  1. 召回之前按角色白名单判(`org_memory_audiences`):候选人与认不出的身份拿到的是空范围,
+     不向量化问题、不查库。
+  2. 装配时只有管理员与社员的助理有组织记忆这一段(`_with_memories(allow_org_memories=…)`,
+     缺省不放行):即使上下文里被塞进了组织记忆,候选人的助理也拼不进 system prompt。
+- **召回默认关闭**(配置 `org_memory_enabled`,缺省 false):它会改变对话助理的回答,而对应的
+  eval 还没在真实模型上跑过。关着时勾选、退役、续期照常可用——可以先把记忆整理好。
+- 与用户长期记忆共用一次问题向量化;向量可缺、不混 embedding 模型的纪律同 `memory/store.py`。
+
 ### D7 · 候选人向的知识不进组织记忆,走知识库草稿
 
 复盘里发现的「候选人反复问但知识库没有」的内容,应该变成知识库条目而不是组织记忆——前者是给
@@ -332,24 +356,30 @@ CREATE TABLE IF NOT EXISTS cycle_retrospective (
 CREATE UNIQUE INDEX … ON cycle_retrospective (cycle_id) WHERE status = 'published';
 CREATE UNIQUE INDEX … ON cycle_retrospective (cycle_id) WHERE status = 'generating';
 
--- 以下是示意(P3)
-
+-- 已实现(memory/org_store.py)
 CREATE TABLE IF NOT EXISTS org_memory (
-    memory_id    bigserial   PRIMARY KEY,
-    kind         text        NOT NULL CHECK (kind IN ('lesson', 'norm', 'calendar')),
-    content      text        NOT NULL,
-    evidence     jsonb       NOT NULL DEFAULT '{}',
-    audience     text        NOT NULL DEFAULT 'admin' CHECK (audience IN ('admin', 'member')),
-    status       text        NOT NULL DEFAULT 'proposed'
-                 CHECK (status IN ('proposed', 'approved', 'retired')),
-    source_cycle int,
-    approved_by  int,
-    approved_at  timestamptz,
-    valid_until  timestamptz,
-    embedding    vector      NOT NULL,
-    embed_model  text        NOT NULL,
-    created_at   timestamptz NOT NULL DEFAULT now()
+    memory_id             text        PRIMARY KEY,           -- org_<随机串>
+    kind                  text        NOT NULL CHECK (kind IN ('lesson', 'norm', 'calendar')),
+    content               text        NOT NULL,
+    audience              text        NOT NULL DEFAULT 'admin'
+        CHECK (audience IN ('admin', 'member')),
+    status                text        NOT NULL DEFAULT 'approved'
+        CHECK (status IN ('approved', 'retired')),
+    source_cycle          int         NOT NULL,              -- 出处:哪个周期
+    source_report_version int         NOT NULL,              --      哪一版报告
+    source_lesson_index   int         NOT NULL,              --      第几条候选教训(从 0 起)
+    evidence              jsonb       NOT NULL DEFAULT '{}', -- {metric_ids: [...]}
+    approved_by           int         NOT NULL,
+    approved_at           timestamptz NOT NULL DEFAULT now(),
+    valid_until           timestamptz NOT NULL,
+    retired_by            int,
+    retired_at            timestamptz,
+    embedding             vector,                            -- 可空:向量服务不可用时照常存
+    embed_model           text        NOT NULL DEFAULT ''
 );
+-- 同一条候选教训至多一条生效的组织记忆
+CREATE UNIQUE INDEX … ON org_memory (source_cycle, source_report_version, source_lesson_index)
+    WHERE status = 'approved';
 ```
 
 `sections` 是结构化的报告(每节的发现、依据的指标 id、候选教训),`report_md` 是渲染结果;
@@ -499,11 +529,63 @@ CREATE TABLE IF NOT EXISTS org_memory (
 | 409 | 该版本不是草稿(还在生成、生成失败、已发布或已被取代) |
 | 503 | 审计写入失败,报告**没有**发布,可重试 |
 
-示意(P3 起):
+组织记忆接口(已实现,`web/org_memory_admin.py`),全部要 `evaluation:run`:
 
 | 接口 | 作用 |
 |---|---|
-| `POST /admin/org-memory/approve`、`/retire` | 勾选或退役组织记忆 |
+| `GET /admin/org-memory` | 列出全部组织记忆(最近勾选的在前) |
+| `POST /admin/org-memory/approve` | 勾选已发布报告里的一条候选教训 |
+| `POST /admin/org-memory/retire` | 退役一条(不再召回,记录保留) |
+| `POST /admin/org-memory/renew` | 续期一条 |
+
+#### 组织记忆接口契约(给管理面前端)
+
+鉴权与出错时的响应体同快照接口。勾选、退役、续期都先写审计:审计写不进去返回 503,操作
+**没有**执行。这些接口不受召回开关影响。
+
+**组织记忆对象**(下面各接口返回的形状):
+
+| 字段 | 说明 |
+|---|---|
+| `memory_id` | 形如 `org_…` |
+| `kind`、`content` | `lesson` / `norm` / `calendar`;一句话 |
+| `audience` | `admin`(只给管理员)或 `member`(社员也可见) |
+| `status`、`expired` | `approved` / `retired`;`expired` 为真表示还没退役但已过保质期,不再召回,应提示续期或退役 |
+| `source_cycle`、`source_report_version`、`source_lesson_index` | 出处 |
+| `metric_ids` | 这条教训依据的指标 id |
+| `approved_by`、`approved_at`、`valid_until`、`retired_by`、`retired_at` | 用户 id 与时间(ISO 8601);未发生的为 `null` |
+
+**`GET /admin/org-memory`** — 查询参数 `status`(可选,`approved` 或 `retired`)。200 返回
+`{"enabled": <布尔>, "items": [...], "total": <整数>}`;`enabled` 是召回开关现在的状态,为 false 时
+应当提示「整理好的记忆暂时不会进入对话」。
+
+**`POST /admin/org-memory/approve`** — 请求体:
+
+| 字段 | 说明 |
+|---|---|
+| `cycle_id`、`version` | 哪份报告;必须是已发布的版本 |
+| `lesson_index` | 报告 `sections.lessons` 里的下标,从 0 起 |
+| `content` | 可选。管理员改写后的文字;不给就用报告里的原文 |
+| `audience` | 可选,`admin`(缺省)或 `member` |
+| `valid_days` | 可选,保质期天数;缺省 365,上限 1095 |
+
+| 状态码 | 含义 |
+|---|---|
+| 201 | 已勾选,返回组织记忆对象 |
+| 404 | 没有这份报告,或报告里没有这条教训 |
+| 409 | 报告不是已发布状态;或这条教训已经勾选过(要先退役原来那条) |
+| 422 | 文字过不了闸门(超长、疑似个人信息、像指令),`detail` 是给管理员看的原因;或请求体不合法(那时 `detail` 是校验错误列表) |
+| 503 | 审计写入失败,没有勾选 |
+
+**`POST /admin/org-memory/retire`** — 请求体 `{"memory_id": "…"}`。200 返回
+`{memory_id, status: "retired"}`;404 不存在;409 已经退役。
+
+**`POST /admin/org-memory/renew`** — 请求体 `{"memory_id": "…", "valid_days": <整数,可选>}`,保质期改为
+从现在起这么多天。200 返回组织记忆对象;404 不存在;409 已经退役。
+
+报告响应的 `sections` 里另有 `prior_lessons`:生成这份报告时往届没退役的组织记忆,每项
+`{memory_id, kind, content, audience, source_cycle, valid_until, expired}`——审阅页据此给每条提供
+「续期」「退役」两个按钮。
 
 ## 6. 角色
 
@@ -563,6 +645,13 @@ CREATE TABLE IF NOT EXISTS org_memory (
 渠道名、题组类别、部门 id),而键只放行 ASCII 标识符形状的短串,所以探针植入的是这种形状的
 指令样键名。
 
+组织记忆这一条落成了独立的 suite `org_memory_probes`(执行器 `evals/org_memory_probes.py`,数据集
+`evals/datasets/org_memory_probes.yaml`),没有并进 `memory_probes`:后者测的是记忆提取的 prompt,
+这里要跑的是带着组织记忆作答的真实助理。教训里埋了只此一处出现的词,回答里有没有它就是
+有没有用到或漏出这条教训;其中一条用例绕过召回那道闸、把教训硬塞进候选人的上下文,验装配层
+那道闸在真实模型下也守得住。**同样还没有对真模型跑过**。零泄漏本身不依赖这个 suite——两道闸
+都是确定性代码,由单测与真库集成档守着;eval 验的是打开之后助理用得对不对。
+
 ## 9. 成本与预算闸
 
 每个周期跑一到几次,每次四次模型调用(带下钻时分析员多几轮),输入是几千 token 的指标与
@@ -579,7 +668,7 @@ CREATE TABLE IF NOT EXISTS org_memory (
 |---|---|---|
 | P1 | 指标目录、`collect_metrics`、快照表与接口。**不含模型**。**已实现** | 本周期结束前上线并留下第一份快照 |
 | P2 | 三位分析员、撰稿人、数字落地守卫、草稿与发布。**已实现,验收未完成** | `retro_probes` 通过;管理员审过一份真实报告 |
-| P3 | 组织记忆:勾选、召回、到期 | `memory_probes` 扩展用例通过;候选人会话零泄漏 |
+| P3 | 组织记忆:勾选、召回、到期。**已实现,验收未完成** | `memory_probes` 扩展用例通过;候选人会话零泄漏 |
 | P4 | 与另三份设计稿汇合:知识库缺口清单、评分条款候选、题型偏好 | 各自的上游数据就位 |
 
 **进度**:P1 已实现,单测与真库集成档(pgvector 容器)通过。P1 留下的尾巴:
@@ -611,6 +700,23 @@ CREATE TABLE IF NOT EXISTS org_memory (
 - 守卫的模糊量词与中文人数识别是启发式的:会误删个别无害的句子,也可能漏掉没想到的写法。
   被删的句子都在 `unverified` 里,审阅时应当过一眼。
 
+**P3 进度**:机制已实现,单测与真库集成档通过。验收两条的状态:
+
+- **候选人会话零泄漏:有测试守着**。召回之前的角色闸、装配层的闸各有单测(候选人不向量化、
+  不查库;组织记忆被硬塞进上下文时候选人的 system prompt 里也没有),对话路由与真库上各有一条
+  端到端用例。这一条不依赖模型。
+- **`org_memory_probes` 没有对真模型跑过**(本机没有模型 key),所以召回**默认关闭**
+  (`org_memory_enabled`,环境变量 `ORG_MEMORY_ENABLED`)。打开之前要有人带 key 跑
+  `evals/run_evals.py --suite org_memory_probes`,确认管理员会话里相关的教训被用上、不相关的
+  问题不被教训带偏。
+
+另外没做的:
+
+- 还没有任何真实的组织记忆——它要等一份真实报告发布、管理员勾选之后才有,而 P2 的报告生成
+  本身也还关着。
+- 下一份报告只是把往届教训**列出来**请人复核,没有让模型去判断「今年还成立吗」。
+- 管理面前端没有入口;接口契约在 §5。
+
 ## 11. 代码落位
 
 已有(P1):
@@ -631,9 +737,13 @@ CREATE TABLE IF NOT EXISTS org_memory (
 - `state/retrospective/report_store.py`:报告表与发布状态机。
 - `prompts/retrospective/` 下四个文件;`evals/retro_probes.py` 与两份数据集。
 
-待建(P3 起):
+已有(P3):
 
-- `memory/org_store.py`(新):组织记忆,召回接到 `memory/recall.py`。
+- `memory/org_store.py`:组织记忆表;`memory/recall.py`:组织记忆的可见范围、召回与提示词里的
+  那一段;`graphs/assistant` 的记忆中间件按身份装配;`web/routes.py` 一轮对话里两种记忆一起召回。
+- `retrospective/lessons.py`:勾选的闸门(只认已发布报告、文字过闸门);`retrospective/reports.py`
+  与 `render.py`:报告末尾的「往届教训复核」。
+- `web/org_memory_admin.py`:管理面接口;`evals/org_memory_probes.py` 与数据集。
 
 ## 12. 开放问题
 
@@ -645,7 +755,8 @@ CREATE TABLE IF NOT EXISTS org_memory (
 3. 权限码:发布报告与勾选组织记忆是复用现有的还是新增一个,要和后端的权限表一起定。
    (快照的触发与读取已复用 `evaluation:run` 与 `resume:audit`,没有新增权限码;发布报告暂时也用
    `evaluation:run`,与生成同级,等后端有了更高一级的权限码再收紧。)
-4. 组织记忆对社员可见的范围:哪些类别可以标 `member`,由谁决定。
+4. 组织记忆对社员可见的范围:哪些类别可以标 `member`,由谁决定。(目前不按类别限制:每条在勾选
+   时由勾选的人选 `audience`,缺省只给管理员。要不要加「某些类别不许标 `member`」的规则仍待定。)
 5. 快照要不要在周期进行中定期打点(每周一份),以便看趋势而不只是终值。
 6. (已定)守卫对「约三成」「翻了一倍」这类非数字表述无能为力:prompt 里禁用模糊量词,守卫
    再把认得出的模糊量词与中文数字的人数一律按对不上处理(D1)。

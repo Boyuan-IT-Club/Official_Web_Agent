@@ -88,7 +88,8 @@ src/official_agent/
 │   ├── config_admin.py     #   /admin/config:低敏热改 + 高敏掩码 + base_url 白名单
 │   ├── kb_admin.py         #   /admin/kb*:知识条目 CRUD/入库重嵌
 │   ├── evaluation_admin.py #   /admin/evaluation*:触发/队列/维卡/采纳/驳回/题库
-│   └── retrospective_admin.py # /admin/retrospective/*:指标快照采集与读取;报告生成/审阅/发布
+│   ├── retrospective_admin.py # /admin/retrospective/*:指标快照采集与读取;报告生成/审阅/发布
+│   └── org_memory_admin.py #   /admin/org-memory*:组织记忆的勾选/退役/续期/列表
 ├── graphs/                 # 编排层:LangGraph 图
 │   ├── assistant/          #   A:build_assistant_agent(create_agent ReAct)+ 会话压缩
 │   ├── identity.py         #   JWT → ResolvedIdentity(权限码/角色/属主)
@@ -128,11 +129,13 @@ src/official_agent/
 ├── kb/                     # 知识库:chunking / embedding / keywords(分词) / schema / store(混合检索+周期过滤)
 │                           #   / query_log(kb_query_log:每次检索的结局与门槛前最高分)
 ├── memory/                 # 长期记忆:store(agent_memory 表) / extract(后台提取+闸门) / recall(注入 system 末尾)
+│                           #   组织记忆:org_store(org_memory 表,人勾选才写入);recall 里按角色定可见范围
 ├── retrospective/          # 周期复盘:catalog(指标目录:id/名字/口径) / metrics(各域口径函数+collect_metrics)
 │                           #   / guard(小格子抑制) / compare(跨周期差值,跨指标定义版本拒绝)
 │                           #   / views(分析员的指标视图) / roles(四个角色的输出结构与闸门)
 │                           #   / grounding(数字落地守卫) / graph(扇出→撰稿→守卫回炉→成稿)
 │                           #   / render(Markdown 渲染) / reports(后台生成任务)
+│                           #   / lessons(候选教训勾选成组织记忆的闸门)
 ├── security/               # 横切:pii(脱敏)/ injection_guard(数据区+扫描)/ fabrication_guard
 ├── prompts/                # prompt 唯一权威(一图一节点一文件 + frontmatter,ADR-0004)
 ├── evals/                  # eval 集 + 统一 runner(python -m evals / evals/run_evals.py)
@@ -333,6 +336,7 @@ flowchart TD
 | `kb_query_log` | 对话里每次知识库检索一行(脱敏后的问题/结局/门槛前最高分/命中条目/生效周期) | fail-open 写入;按 `thread_id` 随会话删除;`trace_id` 关联对话日志 |
 | `cycle_metrics_snapshot` | 每个招新周期的指标快照(过了小格子抑制的聚合数 + 当时的指标目录) | UNIQUE(cycle,version),只追加;没有 `thread_id`,不随会话删除或保留期清理 |
 | `cycle_retrospective` | 周期复盘报告(结构化正文/Markdown/被守卫删掉的句子/prompt 版本) | UNIQUE(cycle,version);状态机 CHECK;部分唯一索引:每周期至多一份已发布、一份在生成 |
+| `org_memory` | 组织记忆:已发布报告里经管理员勾选的教训(可见范围/保质期/出处/向量) | 只由人工动作写入;部分唯一索引:同一条候选教训至多一条生效;过期保留不召回 |
 
 ## 9. 横切机制
 
@@ -418,7 +422,17 @@ flowchart TD
 - **任何一步失败都不让整份报告失败**:分析员失败 → 该节只列指标;撰稿人失败 → 直接列发现;
   生成任务本身出错 → 该版本 `failed`,不影响已有版本。
 - **草稿只给有执行权的人看**;只有查看权的人只看得到已发布的版本。
-- 组织记忆(勾选教训、召回、到期)还是设计稿,没有实现。
+
+组织记忆接在已发布的报告之后:管理员在 `POST /admin/org-memory/approve` 勾选一条候选教训
+(可改写;文字要过长度、个人信息、指令样文本三道闸门),它才进 `org_memory`。之后每轮对话
+与用户长期记忆一起召回,拼在 system prompt 末尾单独一段。
+
+- **候选人零泄漏靠两道互不依赖的闸**:召回之前按角色白名单判(`memory/recall.org_memory_audiences`,
+  候选人连库都不查);装配时只有管理员与社员的助理有这一段
+  (`graphs/assistant._with_memories(allow_org_memories=…)`,缺省不放行)。
+- **有保质期**:缺省一年;过期不再召回但行保留,列在下一份报告的「往届教训复核」里等人续期或退役。
+- **两个默认关闭的开关**:`retrospective_report_enabled`(报告生成)与 `org_memory_enabled`
+  (组织记忆召回)。对应的 eval 没在真实模型上跑过之前不打开;关着时指标快照照常可用。
 
 ## 文档地图
 

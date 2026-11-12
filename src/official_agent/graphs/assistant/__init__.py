@@ -284,19 +284,30 @@ def build_model(
 
 
 class AssistantContext(TypedDict, total=False):
-    """每轮随调用传入的运行时上下文(不进 checkpoint)。memories:本轮召回的长期记忆。"""
+    """每轮随调用传入的运行时上下文(不进 checkpoint)。
+
+    memories:本轮召回的用户长期记忆;org_memories:本轮召回的组织记忆。
+    """
 
     memories: list[str]
+    org_memories: list[str]
 
 
-def _with_memories(base_prompt: str) -> Any:
-    """system prompt 中间件:静态 prompt 末尾拼上本轮召回的长期记忆(没有则原样)。"""
-    from official_agent.memory.recall import memory_section
+def _with_memories(base_prompt: str, *, allow_org_memories: bool = False) -> Any:
+    """system prompt 中间件:静态 prompt 末尾拼上本轮召回的记忆(没有则原样)。
+
+    allow_org_memories 缺省为假:组织记忆这一段只在装配时明确放行的助理里才有。
+    候选人的助理不放行——即使上下文里被塞进了组织记忆,也拼不进它的 system prompt。
+    """
+    from official_agent.memory.recall import memory_section, org_memory_section
 
     @dynamic_prompt
     def _prompt(request: ModelRequest) -> str:
         context = getattr(request.runtime, "context", None) or {}
-        return base_prompt + memory_section(list(context.get("memories") or []))
+        prompt = base_prompt + memory_section(list(context.get("memories") or []))
+        if allow_org_memories:
+            prompt += org_memory_section(list(context.get("org_memories") or []))
+        return prompt
 
     return _prompt
 
@@ -320,8 +331,11 @@ def build_assistant_agent(
     非流式 ainvoke 调用方(如 eval runner)必须传 False。
     allow_write:装配写工具(仅官网 web 通道);没有 checkpointer 时强制关闭——
     写操作要挂起等确认,挂不住就不该让模型看见写工具。
-    长期记忆经运行时上下文 context={"memories": [...]} 传入,由中间件拼在
-    system prompt 末尾(memory/recall.py);不传则与无记忆时完全一致。"""
+    长期记忆经运行时上下文 context={"memories": [...], "org_memories": [...]} 传入,
+    由中间件拼在 system prompt 末尾(memory/recall.py);不传则与无记忆时完全一致。
+    组织记忆这一段按身份装配:只有管理员与社员的助理有,候选人的没有。"""
+    from official_agent.memory.recall import ORG_MEMORY_ROLES
+
     settings = get_effective_settings()
     writable = allow_write and checkpointer is not None
     system_prompt = build_system_prompt(identity, allow_write=writable)
@@ -329,7 +343,11 @@ def build_assistant_agent(
         build_model(settings, stream_usage=stream_usage),
         tools=assemble_tools(identity, user_token, allow_write=writable),
         system_prompt=system_prompt,
-        middleware=[_with_memories(system_prompt)],
+        middleware=[
+            _with_memories(
+                system_prompt, allow_org_memories=identity.get("role") in ORG_MEMORY_ROLES
+            )
+        ],
         context_schema=AssistantContext,
         checkpointer=checkpointer,
     )

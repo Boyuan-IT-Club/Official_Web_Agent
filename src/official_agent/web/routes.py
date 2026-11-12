@@ -491,17 +491,19 @@ async def _consume_model_stream(
     masker: ReplyPiiMasker | None,
     acc: _TurnAccum,
     memories: list[str] | None = None,
+    org_memories: list[str] | None = None,
 ) -> AsyncIterator[str]:
     """消费 astream 双模式流:吐 SSE 事件,就地更新 acc(回复/工具/引用/usage)。
 
     graph_input:新一轮是 {"messages": [...]};确认续跑是 Command(resume=...)。
-    memories:本轮召回的长期记忆,经运行时上下文进 system prompt(不进 checkpoint)。
+    memories / org_memories:本轮召回的用户长期记忆与组织记忆,经运行时上下文进
+    system prompt(不进 checkpoint)。
     """
     last_usage: dict[str, int | None] | None = None
     async for mode, payload in agent.astream(
         graph_input,
         config=config,
-        context={"memories": memories or []},
+        context={"memories": memories or [], "org_memories": org_memories or []},
         stream_mode=["messages", "updates"],
     ):
         if mode == "messages":
@@ -735,11 +737,11 @@ async def _stream_turn(
                     async with asyncio.timeout(max(int(_settings.turn_wall_clock_timeout), 1)):
                         if resume is None and checkpointer is not None:
                             await _cancel_pending_confirmation(session.agent, config)
-                        # 长期记忆按本轮问题召回(确认续跑不是新问题,不召回);fail-open
-                        memories = (
-                            await memory_recall.recall_for(session.identity, message)
+                        # 记忆按本轮问题召回(确认续跑不是新问题,不召回);fail-open
+                        memories, org_memories = (
+                            await memory_recall.recall_both(session.identity, message)
                             if resume is None
-                            else []
+                            else ([], [])
                         )
                         async for event in _consume_model_stream(
                             session.agent,
@@ -748,6 +750,7 @@ async def _stream_turn(
                             masker=masker,
                             acc=acc,
                             memories=memories,
+                            org_memories=org_memories,
                         ):
                             yield event
             except asyncio.CancelledError:

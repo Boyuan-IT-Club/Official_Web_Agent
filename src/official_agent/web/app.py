@@ -227,6 +227,10 @@ def create_app() -> FastAPI:
 
     app.include_router(retrospective_admin_router, prefix="/api/agent")
 
+    from official_agent.web.org_memory_admin import router as org_memory_admin_router
+
+    app.include_router(org_memory_admin_router, prefix="/api/agent")
+
     @app.get("/health")
     async def health() -> dict[str, str]:
         """探活(不鉴权)。checkpointer 就绪(PG 连通)才算健康。"""

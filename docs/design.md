@@ -75,10 +75,10 @@ C:管理端面试页(规划)      ─┘        │
 
 | 目录 | 层 | 职责 |
 |---|---|---|
-| `web/` | 接口层 | FastAPI 路由与入口横切:`routes`(chat SSE + 会话路由)、`config_admin`(配置管理面)、`kb_admin`(知识库管理面)、`evaluation_admin`(初筛管理面)、`retrospective_admin`(周期复盘管理面)、`auth`(鉴权依赖)、`session_store`(会话注册表,纯状态)、`agent_factory`(配置热生效)、`telemetry`(对话观测落账)、`app`(装配 + 生命周期 + trace 中间件) |
+| `web/` | 接口层 | FastAPI 路由与入口横切:`routes`(chat SSE + 会话路由)、`config_admin`(配置管理面)、`kb_admin`(知识库管理面)、`evaluation_admin`(初筛管理面)、`retrospective_admin`(周期复盘管理面)、`org_memory_admin`(组织记忆管理面)、`auth`(鉴权依赖)、`session_store`(会话注册表,纯状态)、`agent_factory`(配置热生效)、`telemetry`(对话观测落账)、`app`(装配 + 生命周期 + trace 中间件) |
 | `graphs/` | 编排层 | `assistant/`(A:ReAct 单循环 + 会话压缩)、`evaluation/`+`investigate_graph`(B 的编排面)、`copilot/`(C,规划)、`identity`(JWT→身份)、`router`(统一路由图,未接入) |
 | `evaluation/` | 评估域 | 流水线领域逻辑:`runner`(job 执行)、`bundle`(出题证据线)、`explore`+`investigate_graph`(仓探索/出题)、`graph`(评分子图)、`judge`/`tech_stack`/`awards`(专项出题)、`scoring`(量规)、`schema`(数据契约)、`llm_common`(共享 LLM 小件)、`github_client`/`autograding`/`attribution`/`dossier` |
-| `retrospective/` | 复盘域 | 周期指标快照(纯代码,不含模型):`catalog`(指标目录)、`metrics`(各域口径、`collect_metrics`)、`guard`(小格子抑制)、`compare`(跨周期差值)。复盘报告(四个模型角色):`views`(分析员的指标视图)、`roles`(输出结构与闸门)、`grounding`(数字落地守卫)、`graph`(编排图)、`render`、`reports`(后台生成任务) |
+| `retrospective/` | 复盘域 | 周期指标快照(纯代码,不含模型):`catalog`(指标目录)、`metrics`(各域口径、`collect_metrics`)、`guard`(小格子抑制)、`compare`(跨周期差值)。复盘报告(四个模型角色):`views`(分析员的指标视图)、`roles`(输出结构与闸门)、`grounding`(数字落地守卫)、`graph`(编排图)、`render`、`reports`(后台生成任务)、`lessons`(候选教训勾选成组织记忆的闸门;组织记忆的表与召回在 `memory/`) |
 | `tools/` | 基础设施 | `client`(后端 REST 客户端,异常层级在此)、`readonly`/`knowledge`(语义化只读工具)、`write`(interrupt 写工具)、`credentials`(服务账号)、`interrupt_guard` |
 | `state/` | 基础设施 | Postgres 状态面:`pg`(checkpointer 连接)、`threads`(会话档案)、`conversation`(对话日志)、`evaluation/`(分卡/job/评审队列,包)、`qbank`(题库)、`audit`(审计)、`config_store`(热配置)、`retrospective/`(指标快照表 + 各域只读聚合,包) |
 | `kb/` | 基础设施 | 知识库:入库分块/混合检索(按招新周期过滤)/表自举/检索日志(`query_log`) |
@@ -140,7 +140,11 @@ POST /admin/retrospective/publish(先写审计)→ published,旧的已发布版�
 ```
 
 失败语义:分析员失败该节只列指标,撰稿人失败直接列发现,生成任务出错该版本转 failed;
-都不影响已有版本。草稿只给有执行权的人看。
+都不影响已有版本。草稿只给有执行权的人看。报告生成默认关闭(`retrospective_report_enabled`)。
+
+已发布报告里的候选教训经管理员勾选(`POST /admin/org-memory/approve`)成为**组织记忆**,之后
+召回进管理员与社员的对话;候选人会话永远不注入(召回前按角色拦 + 装配层不给这一段)。
+召回默认关闭(`org_memory_enabled`)。
 
 ## 6. 工具 ↔ 端点映射(要点)
 
@@ -157,7 +161,7 @@ POST /admin/retrospective/publish(先写审计)→ published,旧的已发布版�
 - **存储只有 Postgres**(ADR-0007):checkpointer、会话档案(agent_threads)、
   对话日志、评测三表(分卡/job/题库)、审计、kb 向量、kb 检索日志(kb_query_log,
   随会话删除)、周期指标快照(cycle_metrics_snapshot,只追加,不随会话清理)、
-  周期复盘报告(cycle_retrospective)
+  周期复盘报告(cycle_retrospective)、组织记忆(org_memory)
 - **PII 是分层边界**:进模型前脱敏(tools 出口)+ trace 采集侧遮蔽(observability
   handler)+ 模型输出侧守卫 + 挂起载荷 TTL
 - **不可信输入**:简历/评测记录/候选人自述进 prompt 一律包数据区;批判节点兼作
@@ -182,6 +186,6 @@ POST /admin/retrospective/publish(先写审计)→ published,旧的已发布版�
 - 重构计划与进度:`docs/refactor-roadmap.md`
 - 多 agent 方向的设计稿:`docs/proposals/`(入口 README)。其中知识库运营闭环的 P0
   (检索信号落库、周期过滤)与招新周期复盘的 P1(指标快照)已实现,复盘 P2(报告生成与发布)
-  已实现但验收未完成,其余无实现无排期
+  与 P3(组织记忆)已实现但验收未完成、默认关闭,其余无实现无排期
 - 历史过程记录(评审纪要/谈判清单/里程碑规划):`docs/archive/`(仅追溯用)
 - 架构决策的背景与备选:git 历史与 ADR;本文件只描述**当前**形态
