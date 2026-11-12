@@ -1,6 +1,7 @@
 """集中配置:全部来自环境变量 / .env,真实凭证永不入库。"""
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -144,6 +145,26 @@ class Settings(BaseSettings):
     evaluation_grade_top_ratio: float = 0.2
     evaluation_grade_bottom_ratio: float = 0.2
     evaluation_grade_min_pool: int = 15
+
+    # 初筛评分模式(见 evaluation/graph.py 的 SCORING_MODES):
+    #   single = 评委判完直接出卡;
+    #   critic = 评委判完再过批判者(检测提示注入、质疑引文撑不住的判定);
+    #   panel  = 一位评委只判一张清单(四个部门 + 认真程度),再过批判者,主席写整体理由。
+    # panel 每份简历要七次以上模型调用,**缺省不启用**:要先在评分基线上赢过 critic,
+    # 启用条件列在 docs/proposals/screening-panel.md 里讲拆评委落地的那一节。
+    # 只对「还没有评分卡的周期」生效:周期一旦落了第一张卡,模式就按那张卡固定,
+    # 之后改这里不影响该周期(同一个等级池里的卡必须出自同一种模式)。
+    # 不在 HOT_KEYS:切换模式是周期之间的事,不做热生效。
+    evaluation_scoring_mode: Literal["single", "critic", "panel"] = "critic"
+
+    # 初筛校准案例(往届判例,见 evaluation/calibration.py),两个开关都**缺省关闭**:
+    #   enabled         = 评分时给评委看判例。只对 critic / panel 模式、且「还没有评分卡的
+    #                     周期」生效:周期开跑时把当时的案例集定为本周期的标尺,中途不变。
+    #                     需要 EMBED_* 已配置;案例库是空的时候开了也没有效果。
+    #   harvest_enabled = 允许从已结束的周期收割人机一致的卡作为案例。要有至少一个完整
+    #                     周期的人工采纳数据才有意义。
+    evaluation_calibration_enabled: bool = False
+    evaluation_calibration_harvest_enabled: bool = False
 
 
 @lru_cache

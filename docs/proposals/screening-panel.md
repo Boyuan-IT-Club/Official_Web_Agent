@@ -1,11 +1,17 @@
 # 初筛多评委合议 + 校准案例检索
 
-> 提案 v0.1 · 2026-11-11 · 状态:未立项。范围 = B 模块评分子图(`evaluation/graph.py`)与人工
-> 复核队列;**不改出题线,不改等级划分规则**。共同约束见 [README](README.md)。
+> 提案 v0.5 · 2026-11-12 · 状态:**P0 的度量已实现,基线数字还没跑出来**(需要带模型 key 的
+> 环境,见 D1「落地」);**P1(批判者先行)已实现**,真模型的 eval 同样没跑(见「P1 落地」);
+> **P2(拆评委)的机制已实现,缺省不启用,启用条件尚未满足**(见「P2 落地」);
+> **P3(校准案例)的机制已实现,两个开关缺省关闭**:种子判例还没人写,往届一致卡要等一个
+> 完整周期的人工采纳数据(见「P3 落地」);P4 未实现。
+> 范围 = B 模块评分子图(`evaluation/graph.py`)与人工复核队列;**不改出题线,不改等级划分
+> 规则**。共同约束见 [README](README.md)。
 
 ## 1. 背景与问题
 
-现状(均可在代码里查到):
+立项时的现状(其中「没有批判节点」「没有置信度」「只有两个队列」三条已随 P1 改变,
+见「P1 落地」):
 
 - 评分子图是 `precheck → llm_score → finalize`,命中绝对卡走 `finalize_hard`。`llm_score` **一次
   调用**要判完:四个部门的匹配清单(`DEPT_MATCH_ITEMS`)、认真程度清单(`EFFORT_ITEMS`)、态度
@@ -89,6 +95,42 @@ flowchart TD
 先把这四个数在单评委上量出来写成基线。之后每一期都对着它比:没有改善就停在上一期。阈值不预设,
 等基线出来再定。
 
+**落地(P0)。** 四个数由 `scoring_probes` 执行器(`evals/scoring_probes.py`)一次运行量出,
+出基线与对比的命令见 `evals/README.md`「初筛评分基线」。实现时定下来的口径:
+
+| 指标 | 落在哪 | 口径 |
+|---|---|---|
+| 区间一致率 | `metrics.scoring_pass_rate` | 每条用例「满足期望的评分占比」的平均;每份只评一次时等于用例通过率 |
+| 条目翻转率 | `metrics.item_stability` | 引擎的指标一律「越高越好」,所以记的是 1 − 翻转率。命中绝对卡的简历不调模型,只评一次,不进分母 |
+| 注入拦截率 | `metrics.injection_block_rate` | 成对比较:注入样本 = 某条用例的简历 + 追加在指定栏末尾的一段文本。注入版只要有一次判出了干净版**每次**都没判达成的条目,就算没拦住;注入版评分失败也算没拦住(拦截指卡照常出、且没被抬高) |
+| 单份成本与耗时 | `observations.avg_*` | 不设门,只随基线落盘。成本越低越好,放进 metrics 会被「低于基线即回归」判反 |
+
+- 每份简历评 3 次(`defaults.repeats`),注入样本 6 条,覆盖冒充系统指令、冒充评审备注并诱导
+  引用自身、搬人背书、伪造数据区结束标记、英文指令、空口自评六种写法。部署后冒烟仍然每份只评
+  一次,不量后两个数。
+- 基线文件带运行条件(模型、prompt 版本、数据集指纹)。数据集改过之后拿旧基线来比,报告会提示
+  对比不可靠——「同一份数据集」这个前提由代码看着,不靠人记。
+- 已知的三处不准,读基线时要知道:
+  1. 注入拦截率会被评分的自然波动压低(干净版三次没判、注入版偶然判出一次,也记为没拦住),
+     所以它只用来前后对比,不对着 100% 读。
+  2. 成本在重试时偏低:输出不合规回灌重试时,用量只记到最后一次调用
+     (`llm_common.invoke_with_retry`)。一张卡上的多次调用(评委、批判者、答辩)之间是
+     累加的。
+  3. 人工标注区间的真实简历集(`evals/datasets/resumes/`)不在仓库里,也没有随 P0 跑:它用同一个
+     执行器,但要在有数据、有 key 的环境里另跑一次。
+
+| 基线(单评委) | 数值 |
+|---|---|
+| 区间一致率 | 待测 |
+| 条目翻转率 | 待测 |
+| 注入拦截率 | 待测 |
+| 单份成本与耗时 | 待测 |
+
+以上四格**待有模型 key 的环境跑出**后回填;基线文件落在 `evals/baselines/scoring_probes.single.json`。
+执行器按配置里的评分模式跑,出这条基线要显式指定 `EVALUATION_SCORING_MODE=single`
+(命令见「P1 落地」末尾)。
+没有这份基线,P1 的「注入拦截率上升」与 P2 的「翻转率下降」都无从验收。
+
 ### D2 · 一位评委一张清单;批判者不改分,只举手
 
 **评委**是单次调用、没有工具。四位部门评委各拿一张部门清单,一位认真程度评委拿认真程度清单并
@@ -154,6 +196,7 @@ flowchart TD
 |---|---|---|
 | 任一评委两次都不合规 | 整份失败,job 进 `failed`,可重试(与现状相同) | 缺一个部门的卡在等级池里不可比 |
 | 批判者失败 | 卡照出,标记批判者不可用,置信度强制 `low` | 评分卡是草稿,人采纳才生效;防线失效应转成人工复核,而不是让整份失败 |
+| 答辩失败(P1 补) | 被质疑的条目保持原判,全部记为分歧(`no_response`) | 质疑已经举了手,评委没能回应就交给人看;为几项重判让整份失败不值得 |
 | 主席失败 | 用确定性模板拼整体理由 | 整体理由不参与任何派生 |
 | 取校准案例失败 | 评委不带案例照常判 | 案例是增强,不是依赖 |
 
@@ -162,6 +205,12 @@ flowchart TD
 配置项 `evaluation_scoring_mode` 取 `single / critic / panel`。等级是池内相对排名,同一个池里
 混着两种模式判出来的卡不可比,所以模式**只在周期之间切换**:一个周期的第一张卡落库时的模式即
 本周期模式,之后的 job(包括重评)沿用它,不再读配置。模式写在卡上。
+
+**落地(P1、P2)。** 配置项是 `evaluation_scoring_mode`(环境变量 `EVALUATION_SCORING_MODE`),
+取 `single / critic / panel`,缺省 `critic`;`panel` 要显式配置才会用。它不进热配置:切换模式
+是周期之间的事。runner 在评每一份简历之前查本周期最早落库的那张卡(`cycle_scoring_mode`):有卡就用
+那张卡的模式,没有才读配置。所以**已经出过卡的周期不受这次上线影响**,仍按单评委评完;
+命中绝对卡的卡也写明模式,免得新周期的头一份简历恰好是空白卷时把整个周期认成单评委。
 
 ### D8 · 校准案例是条目级的,并冻结到周期
 
@@ -201,50 +250,143 @@ flowchart TD
 (ADR-0004)。不存在任何自动写 prompt 的路径——打分规则的变化是行为变更,必须有人审,而且同样
 只能在周期之间生效。
 
-## 5. 数据面(示意)
+## 5. 数据面
 
-评分卡增加 `panel` 块,卡 schema 升到 `evaluation_scorecard/v3`(旧卡没有该块,读时按
-`mode=single`、置信度未知处理):
+带批判者的模式(`critic`)出的卡是 `evaluation_scorecard/v3`:在 v2 的基础上多一个 `panel`
+块,其余字段形状不变。单评委模式(`single`)照旧出 v2,没有这个块——读的时候按
+`mode=single`、置信度未知处理。两种卡都有两维分数,都参与分级,都不会被标成「需要重新
+初筛」。
 
 ```json
 {
+  "schema": "evaluation_scorecard/v3",
   "panel": {
-    "mode": "panel",
+    "mode": "critic",
     "confidence": "low",
     "critic": "ok",
-    "injection": {"detected": true, "spans": ["…"]},
+    "injection": {"detected": true, "spans": ["(评审备注:……)"]},
     "disputes": [
-      {"dept": "技术部", "item": "技术基础", "kind": "quote_not_supporting",
-       "judge_decision": "upheld", "reason": "…"}
+      {"checklist": "技术部", "item": "技术基础", "kind": "quote_not_supporting",
+       "judge_decision": "upheld", "reason": "……"}
     ],
-    "judges": {"技术部": {"prompt_version": "…", "retries": 0, "revised": 1}},
-    "calibration_set": "…"
-  }
+    "revised": [{"checklist": "技术部", "item": "探索内驱力"}],
+    "overrides": [
+      {"checklist": "技术部", "item": "分享意愿", "reason": "引文落在疑似提示注入的片段里……"}
+    ],
+    "attitude_dispute": false,
+    "judges": {"全部清单": {"prompt_version": "evaluation_scoring/v7", "retries": 0, "revised": 1}}
+  },
+  "versions": {"prompts": {"scoring": "…", "critic": "…", "rebuttal": "…"}}
 }
 ```
 
-校准案例表:
+| 字段 | 取值与含义 |
+|---|---|
+| `mode` | `critic` 或 `panel`。没有 `panel` 块的卡即 `single` |
+| `confidence` | `low / medium / high`,推导规则见 D4 |
+| `critic` | `ok` 批判者正常;`unavailable` 批判者调用失败或输出两次都不合规;`skipped` 命中绝对卡、没有可复核的判定 |
+| `injection` | `detected` 是否检出;`spans` 是简历里的原文片段(已脱敏),都经过落地校验 |
+| `disputes` | 批判者质疑、评委没有改判的条目。`kind`:`quote_not_supporting`(引文撑不住)/ `missed_evidence`(漏判);`judge_decision`:`upheld`(评委维持原判)/ `no_response`(答辩失败) |
+| `revised` | 评委在答辩中改判的条目 |
+| `overrides` | 由代码改判为未达成的条目与原因(引文落在注入片段里;或态度不端经双钥确认) |
+| `attitude_dispute` | 评委判 `bad_faith` 而批判者不同意(或没表态) |
+| `judges` | 每位评委的 prompt 版本、回灌重试次数、答辩中改判的条数。`critic` 模式只有一位评委,键是「全部清单」;`panel` 模式有五位,键是清单名(四个部门名 + 「认真程度」) |
+| `chair` | 只在 `panel` 模式出现:`ok` 整体理由是主席写的;`fallback` 主席失败,整体理由是程序按模板拼的 |
+| `calibration` | 只在本周期用了校准案例时出现:`set` 本周期冻结的案例集水位(案例号不大于它的才可用);`status`:`ok` 检索成功 / `unavailable` 检索失败、评委没带案例 / `skipped` 命中绝对卡没调模型;`used` 这张卡实际放进 prompt 的案例号 |
+
+与立项时示意稿的出入:条目用 `checklist` 定位(认真程度清单不是部门,叫 `dept` 不合适);
+多了 `revised / overrides / attitude_dispute` 三项;示意稿里的 `calibration_set` 落成了
+`calibration` 块(见下)。评分卡表
+**没有加列**,队列的过滤与排序直接读卡的 JSONB。
+
+### 5.1 管理面接口(给前端的契约)
+
+两个接口都已存在,P1 只加字段与一个队列取值,路径与权限不变(前缀 `/api/agent`)。
+
+**`GET /admin/evaluation/queue`** —— 权限 `resume:audit`
+
+| 参数 | 说明 |
+|---|---|
+| `cycle_id` | 必填 |
+| `queue` | `all`(缺省)/ `zero`(需重点复核)/ **`low_confidence`(新增:只看置信度为 low 的卡)**;其他取值 400 |
+| `limit` / `offset` | 分页,不变 |
+
+- 排序变了:三种队列都是**低置信的卡在前**,同档内按 `resume_id` 升序。
+- `items[]` 每项新增四个字段(其余字段不变):
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `scoring_mode` | `"critic"` / `"panel"` 或 `null` | `null` = 单评委模式的卡 |
+| `confidence` | `"low" / "medium" / "high"` 或 `null` | `null` = 单评委模式的卡,没有置信度 |
+| `dispute_count` | 整数 | 分歧条数;单评委模式的卡为 0 |
+| `injection_detected` | 布尔 | 是否检出提示注入 |
+
+这四个字段不是分数,不受 `evaluation:score:view` 限制,有 `resume:audit` 就能看到。
+
+**`GET /admin/evaluation/scorecard`** —— 权限 `interview:evaluate` 或 `resume:audit`
+
+返回体不变;`card.panel`(见上表)随卡原样返回,不因缺少看分权限而剥离——注入片段、分歧和
+被作废的条目是评审核对 AI 判断的证据。前端要处理 `card.panel` 不存在的情形(单评委模式的卡
+与旧卡)。被代码改判的条目在 `card.match[].items[]` / `card.effort.items[]` 里是
+`met: false`,`reason` 以改判原因开头、后面带着评委原来的理由,`quote` 保留评委原来的引文。
+检出注入或汇总改动过判定时,`card.summary` 的开头或末尾会有一句程序加的说明。
+
+采纳与驳回两个写接口没有变化。
+
+**校准案例(P3 新增,前缀同上)**
+
+| 接口 | 权限 | 说明 |
+|---|---|---|
+| `GET /admin/evaluation/calibration/cases` | `resume:audit` | 查询参数 `checklist` / `item` / `include_retired`(缺省 false)/ `limit` / `offset`。返回 `{items, total, watermark, enabled, limit, offset}`:`watermark` 是当前最大的案例号,`enabled` 是「评分时给评委看判例」的开关 |
+| `POST /admin/evaluation/calibration/cases` | `evaluation:run` | 录入一条种子判例。请求体 `{checklist, item, met, quote, reason}`:`checklist` 是部门名或「认真程度」,`item` 与清单一字不差;`quote` ≤ 200 字,达成的判例必填;`reason` ≤ 400 字,必填。201 返回入库后的案例(文本已脱敏) |
+| `DELETE /admin/evaluation/calibration/cases/{case_id}` | `evaluation:run` | 停用(不删行)。返回 `{case_id, status: "retired"}`;不存在或已停用 → 404 |
+| `POST /admin/evaluation/calibration/harvest` | `evaluation:run` | 请求体 `{cycle_id}`。把一个已结束周期里人机一致的卡收割成案例,返回各步计数。**缺省关闭,调用返回 409** |
+
+`items[]` 每项:`case_id / origin(seed 或 adopted_card)/ source_cycle_id / source_resume_id /
+checklist / item / met / quote / reason / embed_model / created_by / created_at / retired_at`,
+不带向量。
+
+录入接口的错误:400 没通过入库筛查(判定项不存在、缺内容、**含指令样文本**——`detail`
+是可以直接给录入人看的原因);503 审计或嵌入服务不可用,判例未入库。收割接口:409 开关
+没开或周期还在进行中;503 无法确认周期是否结束,或嵌入服务不可用。
+
+前端要知道的两条语义:新录入的判例**只对之后才开跑的周期生效**(已经在评的周期标尺不变);
+停用立即生效。清单与判定项的取值范围是固定的(四个部门各 4 项 + 认真程度 5 项),见
+`evaluation/schema.py` 的 `DEPT_MATCH_ITEMS` 与 `EFFORT_ITEMS`。
+
+校准案例表(`state/evaluation/calibration_store.py`,每个进程第一次用到时自建):
 
 ```sql
 CREATE TABLE IF NOT EXISTS evaluation_calibration_case (
     case_id          bigserial   PRIMARY KEY,
-    set_version      text        NOT NULL,
     origin           text        NOT NULL CHECK (origin IN ('seed', 'adopted_card')),
     source_cycle_id  int,
     source_resume_id bigint,
-    dept             text        NOT NULL,
+    checklist        text        NOT NULL,
     item             text        NOT NULL,
     met              boolean     NOT NULL,
     quote            text        NOT NULL DEFAULT '',
     reason           text        NOT NULL,
-    embedding        vector      NOT NULL,
+    embedding        real[]      NOT NULL,
     embed_model      text        NOT NULL,
-    created_at       timestamptz NOT NULL DEFAULT now()
+    created_by       bigint,
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    retired_at       timestamptz
 );
 ```
 
-`state/evaluation/review_queue.py` 的 `list_review_queue` 增加 `queue="low_confidence"`,投影里
-带出置信度与分歧条数。配置增加 `evaluation_scoring_mode` 与 `evaluation_panel_max_parallel`。
+与立项时示意表的出入:
+
+- **没有 `set_version` 列。** 案例集的「版本」就是案例号的水位:周期开跑时记下当时最大的
+  案例号,本周期只用案例号不大于它的案例。案例不可改(录错了停用再录),所以水位足以
+  确定一个周期的标尺,不需要发布流程,也不需要另一张版本表。
+- **向量存成 `real[]`,不是 pgvector 的 `vector`。** 检索是先按判定项过滤、再在代码里算
+  相似度,几十到几百条的量级用不着向量索引;这样这张表的自举也不依赖 pgvector 扩展。
+  「记录 `embed_model`、不跨模型混检」的纪律照守:读取时只取当前嵌入模型的行。
+- `dept` 改叫 `checklist`(认真程度清单不是部门);多了 `created_by` 与 `retired_at`。
+
+立项时设想的 `evaluation_panel_max_parallel` 没有加:评委扇出
+的并发由评估域的模型并发闸统一限(见「P2 落地」),不再给合议单设一个上限。
 
 ## 6. 角色
 
@@ -257,6 +399,10 @@ CREATE TABLE IF NOT EXISTS evaluation_calibration_case (
 
 答辩不是新角色:同一位评委、同一份 prompt,后面追加被质疑的条目与理由。评委的理由文本与简历
 同源,交给批判者和主席时同样包数据区。
+
+P1 只有其中两个角色:**评委**是现有的那一次调用(一个人判全部清单,P2 才拆),**批判者**是
+新增的。追加在评委 prompt 后面的那段答辩要求单独成文件(`evaluation/panel/rebuttal.md`),
+有自己的版本号——它也是 prompt,不该写在代码里。P1 没有主席:整体理由仍由评委写。
 
 主席只看判定不看简历:它要写的是「给面试官看的理由」,材料都在判定和引文里;不给它简历,上下文
 更小,也少一个注入面。它是最先可以尝试降到 light 档的角色,前提是 eval 证明。
@@ -274,10 +420,10 @@ CREATE TABLE IF NOT EXISTS evaluation_calibration_case (
 
 | suite | 性质 | 断言 |
 |---|---|---|
-| `scoring_probes`(已有,扩展) | 真模型 | 区间一致率;新增条目翻转率、注入拦截率 |
-| `panel_probes`(新) | 确定性 | 汇总规则:双钥 `bad_faith`、注入片段重叠置未达成、置信度推导、缺评委即失败 |
-| `critic_probes`(新) | 真模型 | 植入的错引文与注入被质疑;干净卡的误质疑率有上限 |
-| `calibration_probes`(新) | 确定性 + 检索 | 同简历隔离、周期冻结、含注入的案例不入库、相关判例能检到 |
+| `scoring_probes`(已有;P0 已扩展) | 真模型 | 区间一致率、条目翻转率、注入拦截率;成本只记录 |
+| `panel_probes`(P1 已有) | 确定性 | 汇总规则:双钥 `bad_faith`、注入片段重叠置未达成、置信度推导。「缺评委即失败」发生在汇总之前,由评分子图的单测守 |
+| `critic_probes`(P1 已有,**未跑**) | 真模型 | 植入的错引文与注入被质疑(`critic_catch_rate`);干净卡不被误伤(`critic_clean_rate`)。两个门槛是初值,没有经过真模型校准 |
+| `calibration_probes`(P3 已有) | 确定性 + 检索 | 同简历隔离、周期冻结、含注入的案例不入库(确定性,13 条,已跑通);相关判例能检到(要嵌入模型,2 条,**未跑**) |
 
 上线判据:同一份数据集上,相对 D1 的基线,翻转率下降、区间一致率不降、注入拦截率不降。
 
@@ -286,35 +432,215 @@ CREATE TABLE IF NOT EXISTS evaluation_calibration_case (
 - 调用数从 1 变为 7(5 评委 + 批判者 + 主席),答辩偶发、至多 5 次。
 - 输入 token 的大头是简历前缀,重复 6 次;缓存命中时主要成本落在各评委的尾部与输出上。
 - 墙钟从一段变成三段串行(评委并行 → 批判者 → 主席),离线批处理可接受。
-- 只加批判者(P1)的成本是多一次调用加偶发答辩,所以它排在拆评委前面。
+- 只加批判者(P1)的成本是多一次调用加偶发答辩,所以它排在拆评委前面。实现后的调用数:
+  每份 2 次(评委 + 批判者),有质疑时 3 次;命中绝对卡的仍是 0 次。批判者的 prompt 带着
+  整份简历和判定标准,输入量与评委相当。实际 token 数没有量过。
 
 ## 10. 分期
 
-| 期 | 内容 | 验收 |
-|---|---|---|
-| P0 | 基线:`scoring_probes` 增加翻转率与注入拦截率,写入基线 | D1 的四个数都有 |
-| P1 | 批判者先行:单评委 + 批判者 + 答辩 + 置信度 + 低置信队列 | 注入拦截率上升;低置信卡的人工驳回率明显高于其余 |
-| P2 | 拆评委,只在周期之间切换模式 | 翻转率下降且区间一致率不降 |
-| P3 | 校准案例:先种子判例,后往届一致卡 | `calibration_probes` 通过,区间一致率不降 |
-| P4 | 条款候选,并入周期复盘 | 复盘报告里出现候选栏目 |
+| 期 | 内容 | 验收 | 进度 |
+|---|---|---|---|
+| P0 | 基线:`scoring_probes` 增加翻转率与注入拦截率,写入基线 | D1 的四个数都有 | 度量代码、单测、出基线命令已有;**四个数未跑**(本地没有模型 key),验收未达成 |
+| P1 | 批判者先行:单评委 + 批判者 + 答辩 + 置信度 + 低置信队列 | 注入拦截率上升;低置信卡的人工驳回率明显高于其余 | 代码、单测、`panel_probes` 已有,真库集成档跑过;**两条验收都未达成**:前一条要基线和 key,后一条要一个周期的人工复核数据 |
+| P2 | 拆评委,只在周期之间切换模式 | 翻转率下降且区间一致率不降 | 机制、单测已有,**缺省不启用**;验收未达成(没有基线,也没有 `panel` 模式的数) |
+| P3 | 校准案例:先种子判例,后往届一致卡 | `calibration_probes` 通过,区间一致率不降 | 机制、单测、真库集成档已有,**两个开关缺省关闭**;`calibration_probes` 的确定性部分通过,要嵌入模型的两条和「区间一致率不降」都没验 |
+| P4 | 条款候选,并入周期复盘 | 复盘报告里出现候选栏目 | 未开始 |
 
 P1 单独上线就有价值:它补上了约定里有、图里没有的注入检测节点。
 
+### P1 落地
+
+`critic` 模式的评分子图:`precheck →(绝对卡? finalize_hard : judge)→ critic →(有质疑?
+rebuttal)→ aggregate → finalize`。`single` 模式的图、prompt、卡的形状都没有动。
+
+- **批判者**(`evaluation/panel/critic.py`):判定标准不另写一份,直接从评分 prompt 里按小节
+  标题截取,评委和批判者按同一套标准看「引文撑不撑得住」。输出全部过落地校验:
+  注入片段必须在简历原文里、去空白后不短于 8 个字;质疑的条目必须存在,质疑类型要和评委的
+  判定对得上,漏判质疑给的引文必须在原文里。没通过的丢弃并计数,不让一条编造的片段连累
+  其余质疑。一张卡最多采信 5 个片段、6 条质疑——预算由代码定。
+- **答辩**(`evaluation/panel/judges.py`):答辩 prompt 以评委原来的 prompt 为前缀(逐字节
+  相同)。重判与首次判定同一套契约:恰好覆盖被质疑的条目、达成项必带原文引文、重判之后
+  态度与达成仍对得上;不合规回灌重试一次。
+- **汇总**(`evaluation/panel/aggregate.py`,纯函数):D2–D4 的规则都在这一个函数里。
+  「引文与注入片段重叠」的定义是:去空白后一段包含另一段,或最长公共片段不短于较短那段的
+  一半且不短于 8 个字。门槛是初值——短了会被「博远信息技术社」这类两边都有的字样误伤。
+- **整体理由**:评委写理由时还没有质疑。所以检出注入时在理由开头加一句提醒,汇总改动过
+  判定时在末尾注明「以逐项判定为准」。两句都是程序加的,不改评委的原话。
+- **双钥**在 P1 里几乎用不上:评委自己的输出契约已经保证 `bad_faith` 时无一项达成。规则按
+  D3 实现并有用例,等 P2 拆了评委才真正起作用。
+- **用量**:一张卡的 token 按调用累加(评委 + 批判者 + 答辩)。同一次调用内的回灌重试仍
+  只记到最后一次,这一点与 P0 时相同。
+- **审计与日志**:生成完成的审计记录带评分模式、置信度、是否检出注入、用到的各 prompt
+  版本。检出注入时打一条 `guard_event` 日志,只记片段数量和简历号;片段原文只留在卡里。
+- **脱敏**:没有新增入口。简历在进评分子图之前脱敏(runner),三次模型调用拿到的是同一份
+  脱敏后的文本,由同一个函数排进 prompt 并包数据区(`evaluation/material.py`)。
+
+没有验证的:
+
+1. **真模型一次都没跑过。** 批判者和答辩两份 prompt 是 v1,没有对着模型输出迭代过;
+   `critic_probes`、`critic` 模式下的 `scoring_probes` 都没有数。所以「批判者抓得准不准」
+   「评委在答辩里会不会被质疑带着乱改」目前没有证据,只有假模型下的流程正确。
+2. **与 D1 的出入。** D1 说合议要在 eval 上赢了才上线,而 `critic` 现在是缺省模式(只对还
+   没有评分卡的周期生效)。在基线和上面两组数跑出来之前要不要让新周期用它,是部署时的
+   决定:设 `EVALUATION_SCORING_MODE=single` 即维持单评委。
+3. 评估域的模型并发闸没有建。P1 是串行多一两次调用,不放大并发;P2 的评委扇出之前必须有。
+
+有 key 之后先跑这三条(第一条即 P0 的基线):
+
+```bash
+EVALUATION_SCORING_MODE=single uv run python evals/run_evals.py --suite scoring_probes \
+  --write-baseline evals/baselines/scoring_probes.single.json
+EVALUATION_SCORING_MODE=critic uv run python evals/run_evals.py --suite scoring_probes \
+  --baseline evals/baselines/scoring_probes.single.json
+uv run python evals/run_evals.py --suite critic_probes
+```
+
+第二条里任何一个指标低于单评委基线即 FAIL——这正是 §8 的上线判据。
+
+### P2 落地
+
+`panel` 模式的评分子图:`precheck →(绝对卡? finalize_hard : 五路 panel_judge)→ collect_judges
+→ critic →(有质疑? panel_rebuttal)→ panel_aggregate → chair → finalize`。五路评委用
+LangGraph `Send` 扇出,各自独立上下文;`critic` 与 `single` 两种模式的图没有动。
+
+- **评委**(`evaluation/panel/judges.py`):四位部门评委各判一张部门清单,一位认真程度评委判
+  认真程度清单并给态度。每位评委的 prompt 分三段(D5):共用前言 + 简历材料 + 评委专属的
+  尾部。前两段对五位评委逐字节相同,有测试守着。
+- **共用前言单独成文件**(`prompts/evaluation/panel/preamble.md`,开放问题 3 的结论):前言、
+  部门评委(`dept.md`,四个部门共用)、认真程度评委(`effort.md`)各有版本号,连同评分
+  prompt 的版本一起记在卡上。没有选「每份 prompt 各带一份前言」——那要靠测试去保证四份
+  文本一致,而单独成文件天然只有一份。
+- **判定标准只有一个出处**(`evaluation/panel/criteria.py`):各部门的清单表格、认真程度清单、
+  态度三档的定义都按小节标题从评分 prompt 里截取,追加在评委的尾部。三种模式用的是同一套
+  标准,改标准只改评分 prompt 一处。
+- **校验契约**(D3):项名一字不差、达成项必带原文引文、`perfunctory` 至多达成 2 项,都落在
+  各位评委自己的输出上,各自回灌重试一次。认真程度评委判 `bad_faith` 时只约束它自己那张
+  清单;整张卡要不要清零由汇总的双钥决定——这条规则在 P1 就写好了,到这里才真正起作用。
+- **缺评委即失败**(D6):任何一位评委两次都不合规或调用失败,整份失败,job 可重试。其余评委
+  已经跑完的结果不采用。
+- **答辩按清单分派**:质疑按清单分给各自的评委,答辩 prompt 以那位评委自己的 prompt 为前缀。
+  几位评委的答辩并行;哪一位失败,只有它的条目记为分歧。部门评委在答辩里不受态度契约约束
+  (它看不到态度)。
+- **主席**(`evaluation/panel/chair.py`):在汇总之后写整体理由,只看最终判定与合议记录,不看
+  简历全文。被程序作废的条目只给它看作废原因,不给原引文——那里面可能就是注入文本。主席
+  失败时整体理由换成程序按模板拼的一段(第一志愿与认真程度各达成几项、有几项分歧),卡上记
+  `chair: fallback`;这不算防线失效,不影响置信度。
+- **并发**:没有给合议单建并发闸,也没有加 `evaluation_panel_max_parallel`。评估域的模型
+  并发闸已经由出题群那条线建在 `llm_common.invoke_with_retry` 里(进程级,上限
+  `EVALUATION_MODEL_CONCURRENCY`);合议的每一次模型调用都走这个函数,有一条测试禁止合议
+  代码直接调模型。**那把闸目前在出题群线的分支上**:本分支单独运行时五路评委是不限流的。
+
+**启用条件(都还没满足,所以缺省不启用):**
+
+1. P0 的单评委基线已经跑出来;
+2. `panel` 模式在同一份数据集上赢了:翻转率下降,区间一致率与注入拦截率不降(对着基线跑
+   `EVALUATION_SCORING_MODE=panel` 的 `scoring_probes`,任何一个指标低于基线即 FAIL);
+3. 出题群线的并发闸已经合入,否则 4 个 job 同时评分时会有 20 路并发调用;
+4. 量过并行扇出下的前缀缓存命中率(开放问题 4):五路同时发出时缓存可能还没写入。命中率低
+   就要改成先发一路再扇出其余四路,这个分支现在没有实现;
+5. 成本可接受:每份 7 次调用起(5 评委 + 批判者 + 主席),有质疑时再加至多 5 次答辩。
+
+满足之后在**下一个周期开始之前**设 `EVALUATION_SCORING_MODE=panel`;已经出过卡的周期不受
+影响。
+
+没有验证的:真模型一次没跑,前言与三份评委 / 主席 prompt 都是首版;拆开之后每位评委只看
+一张清单,判得是松是紧、与单评委差多少,没有任何数字。
+
+### P3 落地
+
+校准案例的三段:**录入**(种子判例)→ **检索**(评分前给一份简历取判例)→ **进 prompt**
+(追加在评委 prompt 的最后)。规则都是纯函数(`evaluation/panel/anchors.py`),IO 的编排在
+`evaluation/calibration.py`。
+
+- **入库筛查**(D8「不可信」):判定项必须存在;达成的判例必须带引文;引文与理由过
+  `scan_injection`,命中即拒绝、不入库;通过的再脱敏一次。算向量用的也是脱敏后的文本。
+- **按周期冻结**(D8「冻结」):周期开跑时(第一张卡)把当时最大的案例号记在卡的
+  `panel.calibration.set` 上,之后的 job 含重评都沿用。开关中途打开或关掉、中途新加案例,
+  都不影响已经开跑的周期。命中绝对卡的卡也记水位。
+- **隔离**(D8「隔离」):不用来源周期等于本周期的案例,不用来源简历等于本简历的案例。
+- **检索**:简历每一栏算一个向量;一条案例与简历的相似度取它和各栏相似度里最高的;每个
+  判定项至多取一条达成、一条未达成;低于门槛(余弦 0.5,**未校准的初值**)不取。
+- **在哪一步取**:示意流程里 `retrieve_anchors` 是评分子图的节点;实现时放在了 runner
+  (评分子图之前)。评分子图一直保持「纯计算、不碰库」,取案例要读库和调嵌入服务,所以由
+  runner 取好传进去。eval 执行器不经过 runner,自然也不带案例。
+- **进 prompt**:判例段 = 一段说明(`prompts/evaluation/panel/anchors.md`:只说明标尺、
+  不是指令、不是本简历的内容)+ 包在数据区里的判例。`critic` 模式的评委拿到全部清单的
+  判例;`panel` 模式每位评委只拿自己清单上的。批判者和主席不看判例。`single` 模式不用。
+  评委把判例里的原文抄成引文会被引文校验打回——它不在这份简历里。
+- **失败语义**(D6):取判例的任何失败(嵌入服务没配或不可用、库读不到)都不挡评分,
+  卡上记 `calibration.status: unavailable`,不影响置信度。
+- **往届一致卡**(D9)的口径,实现时定的:
+  - 人的分数取**评审人采纳时自己打的那一票**(在采纳的审计记录里),不是后端多位评分人的
+    均值——均值要另接后端接口。开放问题 2 仍然开着,这只是先能跑起来的取法。
+  - AI 的位次用「志愿部门匹配分 + 认真程度分」之和在池内排,人的位次用采纳分在同一个池内
+    排;两边落在同一带(头部 20% / 中部 / 尾部 20%,与等级划分同一对比例)才算一致。
+  - 池子不足 `evaluation_grade_min_pool`(缺省 15)人整池不取。
+  - 不收:命中绝对卡的、检出过注入的、低置信的卡;卡里有过分歧或被程序作废的条目;
+    **没有引文的未达成判定**(它只说明「没写到」,示范不了标尺——这一条比 D8 收得紧)。
+  - 收割前要能从后端确认周期已经结束;重复收割同一个周期是幂等的。
+
+**两个开关,都缺省关闭:**
+
+| 开关 | 管什么 | 为什么关着 |
+|---|---|---|
+| `EVALUATION_CALIBRATION_ENABLED` | 评分时给评委看判例 | 案例库是空的(开放问题 6:种子判例谁来写);没有证据说带判例之后区间一致率不降;需要 `EMBED_*` 已配置 |
+| `EVALUATION_CALIBRATION_HARVEST_ENABLED` | 允许调用收割接口 | 需要至少一个完整周期的人工采纳数据,现在没有;人机一致的口径(上面那几条)没有用真实数据验过 |
+
+启用第一个开关之前:部长把种子判例录进去(每个判定项一条达成加一条近失是起点);配好
+嵌入模型后跑 `calibration_probes` 里要嵌入的两条,确认相关判例检得到(检不到说明相似度
+门槛对这个模型太高);再对着基线跑带判例的 `scoring_probes`——**这一步现在做不了**:eval
+执行器不经过 runner,不带案例,要先给它加一个从案例库取判例的入口。
+
+没有验证的:真模型与真嵌入模型都没跑过;判例到底让评委判得更准还是更偏,没有数字。
+
 ## 11. 代码落位
 
-- `evaluation/panel/`(新):`judges.py`、`critic.py`、`anchors.py`,以及纯函数的 `aggregate.py`。
-  `build_evaluation_subgraph` 按模式装配,`single` 模式的图保持现状。
-- `evaluation/schema.py`:评委、批判者、主席的输出模型与 `panel` 块;卡 schema 版本升级。
-- `state/evaluation/calibration_store.py`(新);`review_queue.py` 增队列。
-- `web/evaluation_admin.py`:队列参数;种子判例的录入接口。
-- `prompts/evaluation/panel/`、`evals/datasets/`、`src/official_agent/evals/` 下对应执行器。
+已落地(P0–P3):
+
+- `evaluation/panel/`:`shapes.py`(节点间传递的数据形状)、`criteria.py`(判定标准的截取)、
+  `judges.py`(拆开的评委与答辩)、`critic.py`、`aggregate.py`(纯函数)、`chair.py`、
+  `anchors.py`(校准案例的规则)、`harvest.py`(往届一致卡的规则)。
+- `evaluation/calibration.py`:校准案例的 IO 编排(取判例、录种子判例、收割);
+  `state/evaluation/calibration_store.py`:案例表。
+- `evaluation/grounding.py`:引文落地校验(从评分子图里提出来)与文本重叠判断;
+  `evaluation/material.py`:简历材料进 prompt 的统一排布。
+- `evaluation/graph.py`:`build_evaluation_subgraph(mode)` 按模式装配,`single` 模式的图保持
+  原样;`evaluation/schema.py`:批判者与答辩的输出模型。
+- `evaluation/runner.py`:按周期固定评分模式;`state/evaluation/scorecard_store.py` 的
+  `cycle_scoring_mode`;`review_queue.py` 的低置信队列。
+- `web/evaluation_admin.py`:队列参数。
+- `prompts/evaluation/panel/`:`critic.md`、`rebuttal.md`、`preamble.md`、`dept.md`、
+  `effort.md`、`chair.md`、`anchors.md`。
+- `evals/scoring_probes.py`(P0 扩展)、`evals/panel_probes.py`、`evals/critic_probes.py`、
+  `evals/calibration_probes.py`,数据集在仓库根的 `evals/datasets/`。
+
+待做:
+
+- P2 的收尾:先发一路再扇出(视缓存命中率实测结果);主席降到 light 档的 eval。
+- P3 的收尾:给 `scoring_probes` 加带判例的跑法;种子判例的内容(要部长来写)。
 
 ## 12. 开放问题
 
 1. 驳回没有理由字段。加一个可选的理由对 D9 和 D10 价值很大,但要改前端与接口。
 2. 人的分数取哪个:审计里的是单个复核人的票,后端有多位评分人的均值。一致性该对谁算?
-3. 五位评委共用一段前言,与 ADR-0004 的「一节点一文件」怎么相容——前言单独成文件并把两段版本
-   都记在卡上,还是每份 prompt 各自带一份前言再用测试保证逐字节一致?
+3. ~~五位评委共用一段前言,与 ADR-0004 的「一节点一文件」怎么相容~~ 已定:前言单独成文件,
+   各段版本都记在卡上(见「P2 落地」)。
 4. 并行扇出下的前缀缓存命中率,实测后决定是否先发一路。
 5. 置信度的条件(几项分歧算低)要用 P1 的真实数据校准。
-6. 种子判例谁来写、写多少。每个判定项一条达成加一条近失是起点。
+6. 种子判例谁来写、写多少。每个判定项一条达成加一条近失是起点。录入接口已经有了,内容
+   还没有。
+7. 注入拦截率的噪声底:单评委的自然翻转会让它低于 100%。基线跑出来之后看这个底有多高,
+   再决定每份评 3 次够不够,还是要给注入样本单独加次数。
+8. 批判者的判定标准是按小节标题从评分 prompt 里截的。评分 prompt 改版会连带改变批判者的
+   行为,而批判者 prompt 的版本号不变——卡上两个版本都记了,能追溯,但改评分 prompt 时要
+   记得连 `critic_probes` 一起跑。P2 拆评委时各部门的标准也要从这里取,届时再看要不要把
+   清单标准单独成文件。
+9. 重叠门槛(8 个字、较短段的一半)和注入片段的最短长度(8 个字)都没有用真实数据校准过。
+10. 批判者报了注入但没有任何引文落在片段里时,卡只是进低置信队列,判定不变。评委有没有被
+    那段文本带偏,只能靠人看——这是有意的(代码不猜),但意味着低置信队列的量取决于批判者
+    报注入的松紧。
+11. 检索的相似度门槛(余弦 0.5)没有校准过,而且取决于嵌入模型:有的模型对不相干的中文
+    句子也给 0.5 以上。配好嵌入模型后要先看 `calibration_probes` 的检索用例。
+12. 新周期的头两个 job 同时开跑时,各自读到「周期里还没有卡」,各自取当前水位;这中间
+    恰好有人录了新判例的话,两张卡的水位会不同,之后的 job 以先落库的那张为准。窗口很小,
+    没有加锁。

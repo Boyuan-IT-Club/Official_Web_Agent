@@ -30,7 +30,12 @@ def list_review_queue(
 ) -> list[dict[str, Any]]:
     """评审队列投影:每简历最新卡 + 关联 user_id(勾选重评需要)。
 
-    queue=zero → 仅需重点复核(hard_zero)子队列;all → 全部。
+    queue=zero → 仅需重点复核(hard_zero)子队列;low_confidence → 仅置信度为 low
+    的卡;all → 全部。三种队列都是低置信的卡排在前面,同档内按简历号。
+
+    scoring_mode/confidence/dispute_count/injection_detected 取自卡的 panel 块
+    (带批判者的评分模式才有):列表页据此标出最值得人看的卡。单评委模式的卡没有
+    这个块,前两项取出为 NULL,后两项为 0 / false。
 
     card_schema/intended_first/match_score/effort_score/transfer_hint 从卡内
     提出来,列表页据此分级与筛选,不必逐份拉整张卡。旧版卡没有这些键,取出为 NULL。
@@ -43,7 +48,10 @@ def list_review_queue(
     """
     _ensure_bootstrapped()
     with _connection._conn() as conn:
-        outer = "WHERE latest.hard_zero = TRUE" if queue == "zero" else ""
+        outer = {
+            "zero": "WHERE latest.hard_zero = TRUE",
+            "low_confidence": "WHERE latest.card->'panel'->>'confidence' = 'low'",
+        }.get(queue, "")
         rows = conn.execute(
             f"""
             SELECT latest.resume_id, latest.card_version, latest.status,
@@ -54,6 +62,12 @@ def list_review_queue(
                    (latest.card->>'match_score')::real AS match_score,
                    (latest.card->>'effort_score')::real AS effort_score,
                    latest.card->'transfer_hint' AS transfer_hint,
+                   latest.card->'panel'->>'mode' AS scoring_mode,
+                   latest.card->'panel'->>'confidence' AS confidence,
+                   COALESCE(jsonb_array_length(latest.card->'panel'->'disputes'), 0)
+                       AS dispute_count,
+                   COALESCE((latest.card->'panel'->'injection'->>'detected')::boolean, FALSE)
+                       AS injection_detected,
                    decided.status AS decided_status,
                    decided.card_version AS decided_version
             FROM (
@@ -75,7 +89,8 @@ def list_review_queue(
                 ORDER BY d.card_version DESC LIMIT 1
             ) decided ON TRUE
             {outer}
-            ORDER BY latest.resume_id
+            ORDER BY COALESCE(latest.card->'panel'->>'confidence' = 'low', FALSE) DESC,
+                     latest.resume_id
             LIMIT %s OFFSET %s
             """,  # noqa: S608
             (

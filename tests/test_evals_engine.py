@@ -186,3 +186,62 @@ def test_dump_json_shape(tmp_path: Path) -> None:
     payload = dump_json([result])
     assert payload["suites"][0]["name"] == "s"
     json.dumps(payload)  # 可序列化
+
+
+def _spec_with_context(dataset_sha: str):
+    from official_agent.evals.engine import SuiteSpec
+
+    async def run(path: Path, *, distribution: bool = False) -> SuiteResult:
+        return SuiteResult(
+            name=path.stem,
+            kind="fake",
+            source=path.name,
+            status="PASS",
+            metrics={"m": 0.9},
+            observations={"avg_seconds": 12.5},
+            context={"dataset_sha": dataset_sha},
+        )
+
+    return SuiteSpec(run=run, env_blocker=lambda: None)
+
+
+async def test_baseline_from_another_dataset_is_called_out(tmp_path: Path) -> None:
+    """数据集变了,指标高低就不说明行为好坏:照常对比,但要把不可比说出来。"""
+    tree = _make_tree(tmp_path)
+    registry = {"fake": _spec_with_context("aaaa")}
+
+    stale = {"foo": {"metrics": {"m": 0.5}, "context": {"dataset_sha": "bbbb"}}}
+    results = await run_suites(tree, registry=registry, baseline=stale, suite="foo")
+    assert results[0].status == "PASS"
+    assert any("另一版数据集" in note for note in results[0].notes)
+
+    same = {"foo": {"metrics": {"m": 0.5}, "context": {"dataset_sha": "aaaa"}}}
+    results = await run_suites(tree, registry=registry, baseline=same, suite="foo")
+    assert not any("另一版数据集" in note for note in results[0].notes)
+
+
+async def test_observations_are_never_compared_against_baseline(tmp_path: Path) -> None:
+    """成本、耗时这类量越低越好,拿「低于基线即回归」去比会把变便宜判成回归。"""
+    tree = _make_tree(tmp_path)
+    cheaper_now = {"foo": {"metrics": {"m": 0.9}, "observations": {"avg_seconds": 99.0}}}
+    results = await run_suites(
+        tree, registry={"fake": _spec_with_context("aaaa")}, baseline=cheaper_now, suite="foo"
+    )
+    assert results[0].status == "PASS"
+    assert not any("REGRESSION" in note for note in results[0].notes)
+
+
+def test_dump_json_carries_observations_and_context() -> None:
+    from official_agent.evals.engine import dump_json
+
+    result = SuiteResult(
+        name="s",
+        kind="k",
+        source="datasets/s.yaml",
+        status="PASS",
+        observations={"avg_input_tokens": 3200.0},
+        context={"repeats": 3},
+    )
+    suite = dump_json([result])["suites"][0]
+    assert suite["observations"] == {"avg_input_tokens": 3200.0}
+    assert suite["context"] == {"repeats": 3}

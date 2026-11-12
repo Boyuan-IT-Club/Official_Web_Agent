@@ -38,6 +38,31 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _baseline_entry(result: Any) -> dict[str, Any]:
+    entry: dict[str, Any] = {"metrics": dict(result.metrics), "status": result.status}
+    if result.observations:
+        entry["observations"] = dict(result.observations)
+    if result.context:
+        entry["context"] = dict(result.context)
+    return entry
+
+
+def _write_baseline(path: Path, results: list[Any]) -> None:
+    """把本次跑出的指标落成基线文件。
+
+    SKIP 的 suite 不记:它没有指标,记下来就是一条永远比得过的空基线。全部 SKIP 时
+    不写文件,已有的基线保持原样。
+    """
+    recorded = {r.name: _baseline_entry(r) for r in results if r.status != "SKIP"}
+    if not recorded:
+        print(f"没有跑出任何指标(全部 SKIP),未写基线 {path}")
+        return
+    payload = {"recorded_at": datetime.now(UTC).isoformat(timespec="seconds"), "suites": recorded}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"baseline → {path}")
+
+
 async def _run(
     args: argparse.Namespace,
     *,
@@ -67,16 +92,7 @@ async def _run(
         print(f"json report → {args.json}")
 
     if args.write_baseline:
-        payload = {
-            "recorded_at": datetime.now(UTC).isoformat(timespec="seconds"),
-            "suites": {
-                r.name: {"metrics": dict(r.metrics), "status": r.status} for r in results
-            },
-        }
-        args.write_baseline.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        print(f"baseline → {args.write_baseline}")
+        _write_baseline(args.write_baseline, results)
 
     if args.distribution:
         print("distribution 模式:不设门,退出码恒 0")

@@ -97,7 +97,15 @@ src/official_agent/
 │   └── copilot/            #   C:面试官 Copilot(预留)
 ├── evaluation/             # 评估域:流水线领域逻辑
 │   ├── runner.py           #   EvaluationRunner:submit/派发/_execute_job(评分段+题库段)
-│   ├── graph.py            #   评分子图:precheck→(hard_zero? finalize_hard : llm_score)→finalize
+│   ├── graph.py            #   评分子图,按评分模式装配:single = precheck→llm_score→finalize;
+│   │                       #   critic = precheck→judge→critic→(rebuttal)→aggregate→finalize;
+│   │                       #   panel = 五路评委→collect→critic→(rebuttal)→aggregate→chair(缺省不启用)
+│   ├── panel/              #   初筛合议:critic(批判者,只举手不改判)/ judges(拆开的评委与答辩)/
+│   │                       #   aggregate(纯函数汇总:分歧、作废项、置信度)/ chair(主席写整体理由)/
+│   │                       #   criteria(判定标准截自评分 prompt)/ anchors + harvest(校准案例的规则)/ shapes
+│   ├── calibration.py      #   校准案例(往届判例)的 IO 编排:取判例/录种子判例/收割往届一致卡(缺省关闭)
+│   ├── grounding.py        #   落地校验:引文是否在原文里、两段文本是否重叠
+│   ├── material.py         #   简历材料进 prompt 的统一排布(报名信息 + 简历全文,包数据区)
 │   ├── investigate_graph.py#   调查出题子图:route→explore→generate(含 skip/guided 分支)
 │   ├── bundle.py           #   出题证据线:仓线/评测错因线/奖项线并发跑,汇合后按需兜底 → qbank 信封
 │   ├── explore.py          #   受限 ReAct 仓探索(轮数/墙钟双闸 + dossier 槽位)
@@ -109,14 +117,16 @@ src/official_agent/
 │   ├── grading.py          #   同部门候选池内相对分级(优秀/良好/一般)+ 调剂建议/面试提示
 │   ├── applicant.py        #   报名信息解析(志愿部门/专业/年级)
 │   ├── schema.py           #   数据契约(ScorecardOutput/QbankV2/QuestionGroupV2...)
-│   ├── llm_common.py       #   共享小件:content_text/prompt_version/温度定档/invoke_with_retry/模型并发闸
+│   ├── llm_common.py       #   共享小件:content_text/extract_json/prompt_version/温度定档/
+│   │                       #   invoke_with_retry/add_usage/模型并发闸
 │   ├── runner 依赖的 github_client / autograding / attribution / dossier
 │   └── state/evaluation/(见 state/)
 ├── state/                  # 基础设施:Postgres 状态面(Repository 语义)
 │   ├── pg.py               #   checkpointer 连接 + 挂起载荷清理
 │   ├── threads.py          #   agent_threads:会话档案(建档/属主校验/硬删)
 │   ├── conversation.py     #   agent_conversation_log:对话日志 + usage 解包
-│   ├── evaluation/         #   包:scorecard_store / job_store / review_queue / bootstrap / _connection(池)
+│   ├── evaluation/         #   包:scorecard_store / job_store / review_queue / calibration_store /
+│   │                       #   bootstrap / _connection(池)
 │   ├── qbank.py            #   interview_qbank:题库 + pick_log
 │   ├── qbank_index.py      #   qbank_question_index:题目向量索引(pgvector,惰性自举)
 │   ├── audit.py            #   agent_audit_log:审计(五字段,ADR-0006)
@@ -254,16 +264,41 @@ stateDiagram-v2
     succeeded --> [*]
 ```
 
-### 6.2 评分子图(hard_zero 短路)
+### 6.2 评分子图(hard_zero 短路,按评分模式装配)
 
 ```mermaid
 flowchart LR
     PRE["precheck<br/>(确定性绝对卡规则)"] -->|"hard_zero"| FH["finalize_hard<br/>零卡不调模型<br/>(两张清单全未达成+命中原因)"]
-    PRE -->|"正常"| LS["llm_score<br/>(校验回灌重试 ×2)"]
-    LS --> FIN["finalize<br/>统一卡形状"]
+    PRE -->|"single"| LS["llm_score<br/>评委判定后直接组卡<br/>(校验回灌重试 ×2)"]
+    PRE -->|"critic"| J["judge<br/>评委判定<br/>(校验回灌重试 ×2)"]
+    J -->|"评委失败 = 整份失败"| FIN
+    J --> CR["critic<br/>批判者:注入片段 + 质疑清单<br/>(失败 → 卡照出,置信度 low)"]
+    CR -->|"有质疑"| RB["rebuttal<br/>评委重判被质疑的条目<br/>(失败 → 记为分歧)"]
+    CR -->|"无质疑"| AG["aggregate<br/>纯代码汇总:分歧/作废项/置信度"]
+    RB --> AG
+    AG --> FIN["finalize<br/>统一卡形状"]
+    LS --> FIN
     FH --> FIN
     FIN --> E(["END"])
 ```
+
+评分模式(`evaluation_scoring_mode`:`single` / `critic` / `panel`)**按周期固定**:一个周期最早落库
+的那张卡用了哪种模式,之后的 job(含重评)都沿用,不再读配置——等级是池内相对排名,同一个
+池里的卡必须出自同一种模式。`critic` 模式下批判者没有改判权:被质疑的条目交回评委重判,
+评委维持原判就只记为分歧。唯一由代码直接改判的情形是达成项的引文落在批判者指出的注入
+片段里。分歧只产出**置信度**(`low / medium / high`,落在卡的 `panel` 块里),不进分数与
+等级;评审队列按低置信在前排序,并有 `low_confidence` 子队列。
+
+`panel` 模式(上图未画,**缺省不启用**)在 `critic` 的基础上把评委拆开:四位部门评委各判一张
+部门清单、一位认真程度评委判认真程度清单并给态度,用 `Send` 五路并行、各自独立上下文;
+任何一位评委失败即整份失败。批判者之后的答辩按清单分派给各自的评委,整体理由改由主席在
+汇总之后写(只看最终判定,不看简历;失败则用程序模板)。启用条件见
+`docs/proposals/screening-panel.md`「P2 落地」。
+
+校准案例(往届判例,**缺省关闭**)是评委 prompt 末尾的一段参考:runner 在评分子图之前按
+判定项从案例库里取与简历最相似的判例(每项至多一条达成、一条未达成),传给评分子图。
+案例集按周期冻结(周期开跑时记下案例号水位),不用本周期与本简历的案例;判例入库时过
+注入扫描与脱敏,进 prompt 时包数据区。取不到判例不挡评分。
 
 初筛看两个维度,互不折算:**部门匹配度**(四个部门的录入标准清单都判,志愿部门那张
 决定匹配度,其余用于调剂建议)与**认真程度**(内容充实/了解社团部门/意愿真挚/成文/
@@ -371,8 +406,9 @@ flowchart TD
 |---|---|---|
 | `agent_threads` | 会话档案(thread_id/属主/状态) | thread_id 全局唯一;软删+保留期清理 |
 | `agent_conversation_log` | 对话日志(问题摘要/工具/耗时/usage/轮级 trace_id/守卫判定) | fail-open 写入 |
-| `evaluation_scorecard` | AI 参考分卡(card JSONB/total/hard_zero) | UNIQUE(resume,cycle,card_version);状态机 CHECK |
+| `evaluation_scorecard` | AI 参考分卡(card JSONB/total/hard_zero;critic / panel 模式的卡带 `panel` 块:模式/置信度/注入片段/分歧) | UNIQUE(resume,cycle,card_version);状态机 CHECK |
 | `evaluation_job` | 执行 job(状态机/attempts/qbank_status) | 部分唯一索引:活跃 job 每 (resume,cycle) 一条 |
+| `evaluation_calibration_case` | 初筛校准案例(条目级判例 + 向量 real[],记 embed_model) | 案例不可改,只能停用;同一张卡的同一判定项只入库一次;按周期用案例号水位冻结 |
 | `interview_qbank` | 题库信封(v2 JSONB) | 版本递增 |
 | `qbank_pick_log` | 面试官选题记录 | 服务端权威引用(防伪造证据路径) |
 | `qbank_question_index` | 题目向量索引(每道可挑的题一行) | 每行记 embed_model,不跨模型比较;一份简历只留最新一版 |
@@ -404,7 +440,7 @@ flowchart TD
 |---|---|---|
 | 单测 | `uv run pytest`(709+) | 确定性逻辑:工具/图结构/权限/脱敏/状态面(mock 连接) |
 | 集成 | pgvector 容器 + `POSTGRES_URL=... pytest tests/*_pg.py tests/test_kb_integration.py` | DDL 幂等/唯一索引/事务边界/锁纪律(自 SKIP 不算通过) |
-| eval | `python evals/run_evals.py` | 工具选择/参数红线(forbidden_tools)、阈值门禁、LLM-as-judge |
+| eval | `python evals/run_evals.py` | 工具选择/参数红线(forbidden_tools)、阈值门禁、LLM-as-judge、初筛评分基线(区间一致率/条目翻转率/注入拦截率) |
 | 机械 | `uv run ruff check .` | lint(line-length 100) |
 
 评分分级可见与客服面红线有专门保证测试:`test_no_role_assembles_score_tools`
