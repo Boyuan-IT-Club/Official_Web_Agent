@@ -389,3 +389,445 @@ def test_topics_failure_is_a_plain_500(
     monkeypatch.setattr(kb_ops_admin.kb_ops_state, "latest_succeeded_run", boom)
     resp = client.get(_TOPICS, headers=_AUTH)
     assert resp.status_code == 500 and resp.json()["detail"] == "查询失败,请稍后重试"
+
+
+# ── 草稿审核 ────────────────────────────────────────────
+
+from official_agent.kb.embedding import EmbeddingError, EmbeddingNotConfiguredError  # noqa: E402
+from official_agent.kb.store import KbValidationError, SourceRecord  # noqa: E402
+
+_DRAFTS = "/api/agent/admin/kb/ops/drafts"
+
+
+def _draft(**over) -> dict[str, Any]:
+    base = {
+        "draft_id": 17,
+        "run_id": "kbops_a",
+        "topic_rank": 1,
+        "kind": "new_faq",
+        "topic": "社团会费",
+        "question": "加入社团需要交费吗?",
+        "answer": "加入社团不收取任何费用。",
+        "evidence": [
+            {
+                "sentence": "加入社团不收取任何费用。",
+                "chunk_id": "kb_doc#2",
+                "quote": "本社团不向成员收取会费",
+                "source_id": "kb_doc",
+                "source_title": "社团章程",
+            }
+        ],
+        "target_source_id": None,
+        "cycle_id": None,
+        "conflict_with": [],
+        "support": {"query_count": 4, "thread_count": 3, "sample_query_ids": [11, 12]},
+        "review": {"revised": False, "downgraded": False},
+        "prompt_versions": {"draft": "kb_ops_draft/v1", "verify": "kb_ops_verify/v1"},
+        "status": "pending",
+        "edited_by": None,
+        "decided_by": None,
+        "decided_at": None,
+        "published_source_id": None,
+        "created_at": _T0,
+        "updated_at": _T0,
+    }
+    return {**base, **over}
+
+
+class _Lock:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _DraftBackend:
+    """草稿表、知识库写入与审计的替身;按调用顺序记下发生了什么。"""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, draft: dict | None) -> None:
+        self.draft = draft
+        self.lock: _Lock | None = _Lock()
+        self.events: list[str] = []
+        self.audits: list[dict] = []
+        self.published: list[tuple[dict, str]] = []
+        self.decisions: list[dict] = []
+        self.edits: list[dict] = []
+        self.audit_error: Exception | None = None
+        self.result_audit_error: Exception | None = None
+        self.publish_error: Exception | None = None
+        self.decide_result: bool | Exception = True
+
+        def try_acquire_draft_lock(draft_id: int):
+            self.events.append("lock")
+            return self.lock
+
+        def get_draft(draft_id: int):
+            return self.draft
+
+        def write_audit(**kw):
+            op = kw["action"]["op"]
+            failing = self.result_audit_error if op == "approve_kb_draft" else self.audit_error
+            if failing is not None:
+                raise failing
+            self.events.append(f"audit:{op}")
+            self.audits.append(kw)
+
+        async def publish_draft(draft, *, actor, embedder=None):
+            if self.publish_error is not None:
+                raise self.publish_error
+            self.events.append("publish")
+            self.published.append((draft, actor))
+            return "kb_draft17"
+
+        def decide_draft(draft_id: int, **kw):
+            if isinstance(self.decide_result, Exception):
+                raise self.decide_result
+            self.events.append(f"decide:{kw['status']}")
+            self.decisions.append({"draft_id": draft_id, **kw})
+            return self.decide_result
+
+        def update_draft_content(draft_id: int, **kw):
+            self.events.append("edit")
+            self.edits.append({"draft_id": draft_id, **kw})
+            return True
+
+        state = kb_ops_admin.kb_ops_state
+        monkeypatch.setattr(state, "try_acquire_draft_lock", try_acquire_draft_lock)
+        monkeypatch.setattr(state, "get_draft", get_draft)
+        monkeypatch.setattr(state, "decide_draft", decide_draft)
+        monkeypatch.setattr(state, "update_draft_content", update_draft_content)
+        monkeypatch.setattr(kb_ops_admin.audit, "write_audit", write_audit)
+        monkeypatch.setattr(kb_ops_admin.publish, "publish_draft", publish_draft)
+
+
+@pytest.mark.parametrize(
+    ("method", "url"),
+    [
+        ("get", _DRAFTS),
+        ("get", f"{_DRAFTS}/17"),
+        ("put", f"{_DRAFTS}/17"),
+        ("post", f"{_DRAFTS}/17/approve"),
+        ("post", f"{_DRAFTS}/17/reject"),
+    ],
+)
+def test_draft_endpoints_require_kb_manage(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, method: str, url: str
+) -> None:
+    backend = _DraftBackend(monkeypatch, _draft())
+    assert getattr(client, method)(url).status_code == 401
+    _login(monkeypatch, _identity("agent:monitor"))
+    resp = getattr(client, method)(
+        url, headers=_AUTH, **({"json": {"question": "问"}} if method == "put" else {})
+    )
+    assert resp.status_code == 403 and "kb:manage" in resp.json()["detail"]
+    assert backend.events == []  # 没有权限的人什么都触发不了
+
+
+def test_list_drafts_defaults_to_pending_and_resolves_samples(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def list_drafts(**kw):
+        seen.update(kw)
+        return {"items": [_draft()], "total": 1, "page": kw["page"], "size": kw["size"]}
+
+    monkeypatch.setattr(kb_ops_admin.kb_ops_state, "list_drafts", list_drafts)
+    monkeypatch.setattr(
+        kb_ops_admin.query_log,
+        "get_queries",
+        lambda ids: {11: {"query": "入社要交钱吗", "created_at": _T0}},  # 12 所在会话已删除
+    )
+    data = client.get(f"{_DRAFTS}?size=500", headers=_AUTH).json()
+    assert seen == {"status": "pending", "kind": None, "page": 1, "size": 100}
+    (item,) = data["items"]
+    assert (
+        item["question"] == "加入社团需要交费吗?"
+        and item["evidence"][0]["source_title"] == "社团章程"
+    )
+    assert [s["query"] for s in item["samples"]] == ["入社要交钱吗"]
+    assert item["support"] == {"query_count": 4, "thread_count": 3}  # 日志行 id 不出边界
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("status=all", {"status": None, "kind": None}),
+        ("status=rejected&kind=missing", {"status": "rejected", "kind": "missing"}),
+    ],
+)
+def test_list_drafts_filters(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None, query: str, expected: dict
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def list_drafts(**kw):
+        seen.update(kw)
+        return {"items": [], "total": 0, "page": 1, "size": 20}
+
+    monkeypatch.setattr(kb_ops_admin.kb_ops_state, "list_drafts", list_drafts)
+    monkeypatch.setattr(kb_ops_admin.query_log, "get_queries", lambda ids: {})
+    assert client.get(f"{_DRAFTS}?{query}", headers=_AUTH).status_code == 200
+    assert {k: seen[k] for k in expected} == expected
+
+
+@pytest.mark.parametrize("query", ["status=published", "kind=rewrite"])
+def test_list_drafts_rejects_unknown_filters(client: TestClient, admin: None, query: str) -> None:
+    assert client.get(f"{_DRAFTS}?{query}", headers=_AUTH).status_code == 400
+
+
+def test_draft_detail_shows_the_target_faq_for_alt_questions(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None
+) -> None:
+    _DraftBackend(monkeypatch, _draft(kind="alt_question", answer="", target_source_id="kb_fee"))
+    monkeypatch.setattr(kb_ops_admin.query_log, "get_queries", lambda ids: {})
+    target = SourceRecord(
+        source_id="kb_fee",
+        title="会费说明",
+        type="faq",
+        kind="normal",
+        tags=[],
+        enabled=True,
+        updated_by="user:1",
+        question="加入社团需要交费吗?",
+        answer="不收费。",
+        alt_questions=["入社要钱吗"],
+    )
+    monkeypatch.setattr(kb_ops_admin.kb_store, "get_source", lambda sid: target)
+    data = client.get(f"{_DRAFTS}/17", headers=_AUTH).json()
+    assert data["target"] == {
+        "source_id": "kb_fee",
+        "title": "会费说明",
+        "question": "加入社团需要交费吗?",
+        "answer": "不收费。",
+        "alt_questions": ["入社要钱吗"],
+        "enabled": True,
+    }
+    assert data["samples"] == []
+
+
+def test_draft_detail_missing_is_404(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None
+) -> None:
+    _DraftBackend(monkeypatch, None)
+    assert client.get(f"{_DRAFTS}/17", headers=_AUTH).status_code == 404
+
+
+# ── 修改 ──
+
+
+def test_edit_updates_a_pending_draft(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None
+) -> None:
+    backend = _DraftBackend(monkeypatch, _draft(kind="missing", answer=""))
+    resp = client.put(
+        f"{_DRAFTS}/17",
+        headers=_AUTH,
+        json={"question": " 社团有奖学金吗? ", "answer": " 没有。 ", "cycle_id": 12},
+    )
+    assert resp.status_code == 200 and resp.json() == {"draft_id": 17, "status": "pending"}
+    assert backend.edits == [
+        {
+            "draft_id": 17,
+            "question": "社团有奖学金吗?",
+            "answer": "没有。",
+            "cycle_id": 12,
+            "edited_by": 2,
+        }
+    ]
+    assert backend.events == ["lock", "edit"] and backend.lock.closed
+    assert backend.published == [] and backend.audits == []  # 改草稿不碰知识库
+
+
+def test_edit_refuses_decided_or_busy_drafts(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None
+) -> None:
+    backend = _DraftBackend(monkeypatch, _draft(status="approved"))
+    body = {"question": "问?", "answer": "答。"}
+    assert client.put(f"{_DRAFTS}/17", headers=_AUTH, json=body).status_code == 409
+    assert backend.edits == [] and backend.lock.closed
+
+    backend.lock = None  # 别人正在批准这份草稿
+    resp = client.put(f"{_DRAFTS}/17", headers=_AUTH, json=body)
+    assert resp.status_code == 409 and "正在被处理" in resp.json()["detail"]
+    assert client.put(f"{_DRAFTS}/17", headers=_AUTH, json={"question": ""}).status_code == 422
+
+
+# ── 批准 ──
+
+
+def test_approve_audits_then_publishes_then_marks_approved(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None
+) -> None:
+    backend = _DraftBackend(monkeypatch, _draft(edited_by=5))
+    resp = client.post(f"{_DRAFTS}/17/approve", headers=_AUTH)
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "draft_id": 17,
+        "status": "approved",
+        "published_source_id": "kb_draft17",
+        "audit_recorded": True,
+    }
+    # 顺序即保证:意图审计在发布之前,结果审计在状态落定之后
+    assert backend.events == [
+        "lock",
+        "audit:approve_kb_draft_intent",
+        "publish",
+        "decide:approved",
+        "audit:approve_kb_draft",
+    ]
+    assert backend.lock.closed
+    assert backend.published[0][1] == "user:2"  # 发布人是点批准的管理员
+    assert backend.decisions == [
+        {"draft_id": 17, "status": "approved", "decided_by": 2, "published_source_id": "kb_draft17"}
+    ]
+    intent, result = backend.audits
+    assert intent["acting_user_id"] == 2 and intent["decision"] == "u2:approve"
+    assert intent["channel"] == "kb_ops" and intent["agent"] == "kb-ops-reviewer"
+    assert intent["thread_id"] == "kbdraft:17"
+    assert intent["action"] == {
+        "op": "approve_kb_draft_intent",
+        "draft_id": 17,
+        "kind": "new_faq",
+        "question": "加入社团需要交费吗?",
+        "target_source_id": None,
+        "prompt_versions": {"draft": "kb_ops_draft/v1", "verify": "kb_ops_verify/v1"},
+        "edited_by": 5,
+    }
+    assert result["action"]["source_id"] == "kb_draft17"
+
+
+def test_approve_does_nothing_when_intent_audit_cannot_be_written(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None
+) -> None:
+    """写路径 fail-closed:审计写不进,就不发布。"""
+    backend = _DraftBackend(monkeypatch, _draft())
+    backend.audit_error = RuntimeError("pg down")
+    resp = client.post(f"{_DRAFTS}/17/approve", headers=_AUTH)
+    assert resp.status_code == 503 and "草稿未发布" in resp.json()["detail"]
+    assert backend.published == [] and backend.decisions == [] and backend.lock.closed
+
+
+@pytest.mark.parametrize(
+    ("draft", "status", "fragment"),
+    [
+        (None, 404, "草稿不存在"),
+        (_draft(status="approved"), 409, "草稿已处理"),
+        (_draft(status="superseded"), 409, "草稿已处理"),
+        (_draft(kind="missing", answer=""), 400, "还没有答案"),
+        (_draft(kind="alt_question", target_source_id=None), 400, "缺少目标条目"),
+    ],
+)
+def test_approve_validates_before_any_side_effect(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    admin: None,
+    draft: dict | None,
+    status: int,
+    fragment: str,
+) -> None:
+    backend = _DraftBackend(monkeypatch, draft)
+    resp = client.post(f"{_DRAFTS}/17/approve", headers=_AUTH)
+    assert resp.status_code == status and fragment in resp.json()["detail"]
+    assert backend.events == ["lock"] and backend.lock.closed  # 没有审计、没有发布
+
+
+def test_concurrent_approval_of_the_same_draft_is_refused(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None
+) -> None:
+    backend = _DraftBackend(monkeypatch, _draft())
+    backend.lock = None
+    resp = client.post(f"{_DRAFTS}/17/approve", headers=_AUTH)
+    assert resp.status_code == 409 and "正在被处理" in resp.json()["detail"]
+    assert backend.published == [] and backend.audits == []
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "detail"),
+    [
+        (KbValidationError("条目 kb_fee 不存在或不是 FAQ,无法添加问法"), 400, "无法添加问法"),
+        (EmbeddingNotConfiguredError("embedding 未配置"), 503, "embedding 未配置"),
+        (EmbeddingError("embedding 端点连不上"), 502, "embedding 端点连不上"),
+        (RuntimeError("connection to postgresql://u:secret@db failed"), 500, "知识库未改动"),
+    ],
+)
+def test_publish_failure_leaves_the_draft_pending(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    admin: None,
+    error: Exception,
+    status: int,
+    detail: str,
+) -> None:
+    backend = _DraftBackend(monkeypatch, _draft())
+    backend.publish_error = error
+    resp = client.post(f"{_DRAFTS}/17/approve", headers=_AUTH)
+    assert resp.status_code == status and detail in resp.json()["detail"]
+    assert "secret" not in resp.json()["detail"]
+    assert backend.decisions == [] and backend.lock.closed  # 草稿仍是待审,可以重试
+
+
+@pytest.mark.parametrize("decide_result", [False, RuntimeError("pg down")])
+def test_published_but_unmarked_is_reported_honestly(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None, decide_result: Any
+) -> None:
+    backend = _DraftBackend(monkeypatch, _draft())
+    backend.decide_result = decide_result
+    resp = client.post(f"{_DRAFTS}/17/approve", headers=_AUTH)
+    assert resp.status_code == 500
+    detail = resp.json()["detail"]
+    assert "已写入知识库(条目 kb_draft17)" in detail and "重试不会重复发布" in detail
+    assert len(backend.published) == 1 and backend.lock.closed
+
+
+def test_missing_result_audit_is_visible_but_does_not_fail_a_published_draft(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None, caplog
+) -> None:
+    backend = _DraftBackend(monkeypatch, _draft())
+    backend.result_audit_error = RuntimeError("pg down")
+    resp = client.post(f"{_DRAFTS}/17/approve", headers=_AUTH)
+    assert resp.status_code == 200 and resp.json()["audit_recorded"] is False
+    assert backend.decisions[0]["status"] == "approved"
+    assert "结果审计写入失败 draft_id=17 source_id=kb_draft17" in caplog.text
+
+
+# ── 驳回 ──
+
+
+def test_reject_audits_then_archives_without_publishing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None
+) -> None:
+    backend = _DraftBackend(monkeypatch, _draft())
+    resp = client.post(f"{_DRAFTS}/17/reject", headers=_AUTH)
+    assert resp.status_code == 200 and resp.json() == {"draft_id": 17, "status": "rejected"}
+    assert backend.events == ["lock", "audit:reject_kb_draft", "decide:rejected"]
+    assert backend.decisions == [{"draft_id": 17, "status": "rejected", "decided_by": 2}]
+    assert backend.published == [] and backend.lock.closed
+    assert backend.audits[0]["decision"] == "u2:reject"
+
+
+def test_reject_is_fail_closed_on_audit_and_refuses_decided_drafts(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None
+) -> None:
+    backend = _DraftBackend(monkeypatch, _draft())
+    backend.audit_error = RuntimeError("pg down")
+    resp = client.post(f"{_DRAFTS}/17/reject", headers=_AUTH)
+    assert resp.status_code == 503 and backend.decisions == []
+
+    decided = _DraftBackend(monkeypatch, _draft(status="rejected"))
+    assert client.post(f"{_DRAFTS}/17/reject", headers=_AUTH).status_code == 409
+    assert decided.audits == []
+
+    busy = _DraftBackend(monkeypatch, _draft())
+    busy.lock = None  # 另一个请求正在批准它:不能一边发布一边被驳回
+    assert client.post(f"{_DRAFTS}/17/reject", headers=_AUTH).status_code == 409
+    assert busy.decisions == []
+
+
+def test_topics_carry_draft_status_and_draft_id(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None
+) -> None:
+    _patch_topics(monkeypatch, latest=_run(), topics=[_topic(draft_status="drafted", draft_id=17)])
+    (item,) = client.get(_TOPICS, headers=_AUTH).json()["items"]
+    assert (item["draft_status"], item["draft_id"]) == ("drafted", 17)

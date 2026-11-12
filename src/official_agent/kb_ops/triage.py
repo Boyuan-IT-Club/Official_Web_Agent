@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Sequence
 from typing import Any, Literal
@@ -18,6 +17,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from official_agent.evaluation.llm_common import invoke_with_retry, prompt_version
+from official_agent.kb_ops.parsing import first_json_object
 from official_agent.prompt_loader import load_prompt
 from official_agent.security.injection_guard import scan_injection, wrap_data_zone
 from official_agent.security.pii import mask_pii
@@ -77,14 +77,7 @@ def parse_verdict(text: str) -> TriageVerdict:
 
     回复里第一个完整的 JSON 对象算数,前后的围栏与杂文忽略。
     """
-    start = text.find("{")
-    if start == -1:
-        raise ValueError("回复里没有 JSON 对象")
-    try:
-        obj, _ = json.JSONDecoder().raw_decode(text, start)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"JSON 解析失败:{exc.msg}") from exc
-    verdict = TriageVerdict.model_validate(obj)
+    verdict = TriageVerdict.model_validate(first_json_object(text))
     for name in ("topic", "canonical_question", "reason"):
         hit, matched = scan_injection(getattr(verdict, name))
         if hit:

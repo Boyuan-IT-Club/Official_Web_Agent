@@ -49,7 +49,14 @@ def ops_db(monkeypatch) -> Settings:
     dbname = psycopg.conninfo.conninfo_to_dict(_url()).get("dbname") or ""
     if dbname == _PROD_DB_NAME:
         pytest.skip(f"拒绝在 agent 服务库 {_PROD_DB_NAME!r} 上跑本档:会清空并重建运营表")
-    settings = Settings(_env_file=None, postgres_url=_url(), embed_model="it-fake-model")
+    # 起草关着(也是默认值):这些用例验证的是主题清单;
+    # 带起草的端到端在 test_kb_ops_drafts_integration.py
+    settings = Settings(
+        _env_file=None,
+        postgres_url=_url(),
+        embed_model="it-fake-model",
+        kb_ops_drafting_enabled=False,
+    )
     for module in ("state.kb_ops", "state.pools", "kb.query_log"):
         monkeypatch.setattr(f"official_agent.{module}.get_settings", lambda: settings)
     # 运行器读的是合并了库内覆盖的配置;固定成测试配置,不去连默认库
@@ -391,6 +398,9 @@ async def test_execute_run_end_to_end_on_synthetic_log(log) -> None:
         "below_support": 2,
         "topics": 2,
         "triage": {"done": 2},
+        "drafts": {},
+        "draft_kinds": {},
+        "drafts_deduped": True,
         "budget_exhausted": False,
         "input_tokens": 400,
         "output_tokens": 60,

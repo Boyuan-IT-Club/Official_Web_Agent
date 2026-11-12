@@ -1,7 +1,8 @@
-"""知识库运营的确定性门禁执行器:聚类、近失判定、缺口提示、样本过滤。
+"""知识库运营的确定性门禁执行器:聚类、近失判定、缺口提示、样本过滤、引文复核、
+草稿裁决、查重。
 
-数据集 evals/datasets/kb_ops_probes.yaml。全部是纯函数断言:聚类用数据集里写死的
-向量,不调嵌入端点也不调模型,任何环境都能跑。
+数据集 evals/datasets/kb_ops_probes.yaml。全部是纯函数断言:聚类与查重用数据集里
+写死的向量,审核者的判断也写死在数据集里,不调嵌入端点也不调模型,任何环境都能跑。
 """
 
 from __future__ import annotations
@@ -11,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from official_agent.evals.engine import CaseResult, SuiteResult
+from official_agent.evals.kb_ops_fixtures import chunk_records, proposal_of
+from official_agent.kb_ops.citation import quote_in_text
 from official_agent.kb_ops.cluster import (
     ClusterPolicy,
     ClusterResult,
@@ -20,7 +23,15 @@ from official_agent.kb_ops.cluster import (
     is_near_miss,
     normalize_query,
 )
+from official_agent.kb_ops.dedupe import KnownQuestion, most_similar
 from official_agent.kb_ops.triage import looks_like_instruction
+from official_agent.kb_ops.verify import (
+    ReviewOutput,
+    SentenceVerdict,
+    apply_review,
+    precheck,
+    ruling,
+)
 
 
 def _load_yaml(path: Path) -> Any:
@@ -102,9 +113,47 @@ def _value_cases(prefix: str, rows: list[dict[str, Any]], compute: Any) -> list[
     return cases
 
 
+def _review_outcome(case: dict[str, Any], chunks: dict[str, Any]) -> dict[str, Any]:
+    """一份草稿经代码复核后的裁决与逐句原因。case 里没有 review 表示只做代码预检。"""
+    proposal = proposal_of(case["draft"])
+    if "review" in case:
+        review = ReviewOutput(
+            sentences=[
+                SentenceVerdict(index=i, verdict=v["verdict"], quote=v.get("quote", ""))
+                for i, v in enumerate(case["review"], start=1)
+            ]
+        )
+        findings = apply_review(proposal, chunks, review)
+    else:
+        findings = precheck(proposal, chunks)
+    return {"ruling": ruling(findings), "reasons": [f.reason for f in findings]}
+
+
+def _dedupe_match(case: dict[str, Any], spec: dict[str, Any]) -> str | None:
+    known = [
+        KnownQuestion(ref=str(k["ref"]), text="", vector=list(k["vector"])) for k in spec["known"]
+    ]
+    match = most_similar(list(case["vector"]), known, float(spec["threshold"]))
+    return match.ref if match else None
+
+
 async def run_suite(path: Path, *, distribution: bool = False, **_: Any) -> SuiteResult:
     data = _load_yaml(path) or {}
     cases = _clustering_cases(data["clustering"])
+    cases += _value_cases(
+        "citation",
+        data.get("citation") or [],
+        lambda row: quote_in_text(str(row["quote"]), str(row["text"])),
+    )
+    review_spec = data.get("review") or {}
+    review_chunks = chunk_records(review_spec.get("chunks") or {})
+    cases += _value_cases(
+        "review", review_spec.get("cases") or [], lambda row: _review_outcome(row, review_chunks)
+    )
+    dedupe_spec = data.get("dedupe") or {}
+    cases += _value_cases(
+        "dedupe", dedupe_spec.get("cases") or [], lambda row: _dedupe_match(row, dedupe_spec)
+    )
     cases += _value_cases(
         "near_miss",
         data.get("near_miss") or [],

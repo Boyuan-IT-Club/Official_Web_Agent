@@ -468,3 +468,54 @@ def test_kb_detail_and_reembed_keep_cycle_binding(
     resp = client.post("/api/agent/admin/kb/sources/kb_abc123/reembed", headers=_AUTH)
     assert resp.status_code == 200
     assert captured["source"].cycle_id == 12
+
+
+# ── FAQ 附加问法(alt_questions)──────────────────────────
+
+
+def test_kb_create_passes_alt_questions(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_resolve(monkeypatch, _kb_admin_identity())
+    captured = _capture_ingest(monkeypatch)
+    body = {
+        "title": "会费说明",
+        "type": "faq",
+        "question": "加入社团需要交费吗?",
+        "answer": "不收费。",
+        "alt_questions": ["入社要钱吗", "社团收会费吗"],
+    }
+    resp = client.post("/api/agent/admin/kb/sources", headers=_AUTH, json=body)
+    assert resp.status_code == 201
+    assert captured["source"].alt_questions == ("入社要钱吗", "社团收会费吗")
+
+
+def test_kb_create_without_alt_questions_and_too_many(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_resolve(monkeypatch, _kb_admin_identity())
+    captured = _capture_ingest(monkeypatch)
+    body = {"title": "会费说明", "type": "faq", "question": "问?", "answer": "答。"}
+    assert client.post("/api/agent/admin/kb/sources", headers=_AUTH, json=body).status_code == 201
+    assert captured["source"].alt_questions == ()  # 不带该字段的请求体照常可用
+
+    body["alt_questions"] = [f"问法{i}" for i in range(21)]
+    assert client.post("/api/agent/admin/kb/sources", headers=_AUTH, json=body).status_code == 422
+
+
+def test_kb_detail_and_reembed_keep_alt_questions(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from official_agent.web import kb_admin
+
+    _install_resolve(monkeypatch, _kb_admin_identity())
+    captured = _capture_ingest(monkeypatch)
+    record = _record(
+        type="faq", question="问?", answer="答。", content_md="", alt_questions=["另一种问法"]
+    )
+    monkeypatch.setattr(kb_admin.kb_store, "get_source", lambda sid: record)
+    detail = client.get("/api/agent/admin/kb/sources/kb_abc123", headers=_AUTH)
+    assert detail.json()["alt_questions"] == ["另一种问法"]
+    resp = client.post("/api/agent/admin/kb/sources/kb_abc123/reembed", headers=_AUTH)
+    assert resp.status_code == 200
+    assert captured["source"].alt_questions == ("另一种问法",)  # 重嵌不丢问法

@@ -1,12 +1,14 @@
 """KB 结构分块(选型依据 docs/research/rag-kb-survey.md)。
 
-- FAQ 对 = 1 chunk(Q/A 拼接);自由正文按 Markdown 标题层级切
+- FAQ 一种问法一块(Q/A 拼接;附加问法各自成块,答案在每块里重复);
+  自由正文按 Markdown 标题层级切
 - 超长段落按句末标点细分,单 chunk 硬上限 MAX_CHUNK_CHARS
 - chunk 携带 heading_path(标题链);引用粒度条目级,块只影响检索粒度
 - 纯函数,无 IO——入库与检索两侧共用,行为变化即召回变化
 """
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 MAX_CHUNK_CHARS = 800
@@ -25,10 +27,16 @@ class KbChunk:
     heading_path: str
 
 
-def split_faq(question: str, answer: str) -> list[KbChunk]:
-    """FAQ 对整条一块:问/答拼接保证「问题词」进同一向量。"""
-    text = f"Q: {question.strip()}\nA: {answer.strip()}"
-    return [KbChunk(ordinal=0, text=text, heading_path="")]
+def split_faq(question: str, answer: str, alt_questions: Sequence[str] = ()) -> list[KbChunk]:
+    """FAQ 一种问法一块:问/答拼接保证「问题词」进同一向量。
+
+    主问法是第 0 块,附加问法依次往后。答案在每块里重复:用户的说法命中哪一种
+    问法,检索回来的那一块都带着完整答案。
+    """
+    return [
+        KbChunk(ordinal=i, text=f"Q: {q.strip()}\nA: {answer.strip()}", heading_path="")
+        for i, q in enumerate([question, *alt_questions])
+    ]
 
 
 def split_doc(content_md: str) -> list[KbChunk]:

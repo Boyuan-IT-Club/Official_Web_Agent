@@ -1,9 +1,9 @@
 # 知识库运营闭环(离线多 agent)
 
-> 提案 v0.2 · 2026-11-11 · 状态:**P0、P1 已实现**(检索信号落库、周期过滤;聚类、缺口甄别与
-> 管理面只读的主题清单,见 §10 进度);P2–P3 未开工。范围 = 知识库(`kb/` 与
-> `tools/knowledge.py`)的内容运营和检索质量;**不改 A 模块的在线编排**。共同约束见
-> [README](README.md)。
+> 提案 v0.3 · 2026-11-12 · 状态:**P0、P1、P2 已实现**(检索信号落库、周期过滤;聚类、缺口
+> 甄别与主题清单;起草、审核、查重、草稿审核接口与问法扩展,见 §10 进度);P3 未开工。
+> 范围 = 知识库(`kb/` 与 `tools/knowledge.py`)的内容运营和检索质量;**不改 A 模块的在线
+> 编排**。共同约束见 [README](README.md)。
 
 ## 1. 背景与问题
 
@@ -64,9 +64,9 @@ flowchart TD
     H -->|驳回| X[归档]
 ```
 
-已落地的是 collect → cluster → 缺口甄别这一段,产出存成主题清单(`kb_ops_run` /
-`kb_ops_topic`,见 §5)而不是草稿;起草之后的环节属 P2。现在的取数只读 `kb_query_log`,
-对话日志里的守卫判定到 P3 再接进来。
+整条流水线已落地:collect → cluster → 缺口甄别的产出存成主题清单(`kb_ops_run` /
+`kb_ops_topic`),其中判为 `official_knowledge` 的主题接着走起草 → 审核 → 查重,产出存进
+`kb_draft`(见 §5)。现在的取数只读 `kb_query_log`,对话日志里的守卫判定到 P3 再接进来。
 
 ## 4. 关键决策
 
@@ -153,6 +153,22 @@ fail-open)。`query` 落库前过 `mask_pii`。
 | `new_faq` | 答案散在官方文档里,没有对应 FAQ | 问题 + 答案,每句带 `source_id` 与引文 |
 | `missing` | 官方材料里找不到 | 只有问题,答案留空,交给人写 |
 
+实现(`kb_ops/draft.py`、`kb_ops/reader.py`)里定下来的细节:
+
+- 两个工具是 `search_kb(query)` 与 `read_source(source_id)`,返回里每一块都带 `chunk_id`。
+  检索不设门槛、每次给最相近的 5 块(起草要读到「差一点」的条目才学得到官方用词),但
+  **周期过滤照旧**:开放周期由代码读出来传给检索,往届的时间地点起草不到。模型没有任何
+  写工具,调未知工具只会得到一句「未知工具」。
+- 草稿的每一句只带 `chunk_id` 与逐字引文 `quote`;`source_id` 由代码从块反查,不让模型
+  同时报两个可能对不上的标识。`alt_question` 的句子是「这条 FAQ 为什么能回答这个问题」的
+  理由,答案沿用目标 FAQ 的。
+- 预算由代码定:模型回复至多 6 次、墙钟 60 秒,还受整次运行截止时间约束;触顶就没有草稿
+  (主题记为 `out_of_budget`),不拿一份「待补充」冒充结论。最终输出不合规时带诊断重写一次。
+- 起草的输出也过闸:strict 校验(类型与字段对不上的不收),问题或句子里出现指令样文本的
+  整份不收,个人信息掩掉——引文除外,它要与原文逐字比对。
+- 起草由配置项 `kb_ops_drafting_enabled` 控制,**默认关闭**:不打开时离线分析只出主题清单,
+  没有起草与审核的模型调用。打开的前提见 §10。
+
 ### D4 · 审核者独立于起草者;引文由代码复核
 
 审核 agent 是单次调用、没有工具。它拿到的是草稿和**代码按 `chunk_id` 重新取出的原文**——不是
@@ -163,6 +179,28 @@ fail-open)。`query` 落库前过 `mask_pii`。
 - 任何一句 `contradicted` → 整份草稿驳回;
 - 有 `unsupported` → 打回起草者一次,要么删掉该句,要么换出处;
 - 打回后仍有无出处句 → 降级为 `missing`,答案清空。
+
+实现(`kb_ops/verify.py`、`kb_ops/citation.py`、`kb_ops/drafting.py`)与上面的出入:
+
+- **引文复核没有复用评分子图的 `_evidence_in`**。那个校验容忍「带叙述的转述」;这里的引文
+  要支撑一句会进知识库的话,判据是逐字包含,只放过空白、全半角、标点的差异(引文至少
+  6 个字,省略号两侧各自命中且顺序一致)。宁可因为模型改了一个字而打回。
+- **先由代码预检,再决定要不要花一次审核调用。** 块不存在或已不可检索、补问法引了别的条目
+  的块、起草者的引文不在原文里——这些代码自己看得出来,直接打回,不问审核者。
+- **多一道数字复核**:句子里的每个阿拉伯数字都必须在所引的那一块原文里原样出现。引文复核
+  只能证明「引的那段话存在」,证明不了句子没有比原文多说什么;而金额、日期、时长正是最容易
+  被塞进来、也最伤人的那一类(「入社要交 500 元」)。这一条即便审核者放行也不放行。代价是
+  原文写「三十分钟」而句子写「30 分钟」会被打回,所以 prompt 要求数字照原文的写法。
+- 审核者判 `supported` 时它给的引文也要在**这一句所引的那一块**里找得到,否则按无出处算。
+- 修订(打回的那一次)没有工具,只能用草稿已经引用过的块;它不能换类型(只许改成
+  `missing`)、不能改问题、不能改补问法的目标条目——这三样由代码按原稿保留。
+- 被整份驳回的草稿以 `rejected` 落库(没有处理人),不进待审列表:留着是为了让人看见
+  「起草者与官方原文矛盾」这件事本身。
+
+**代码能保证到哪里。** 引文确实在原文里、数字确实在原文里、类型与目标没被偷换——这些
+不依赖模型。它保证不了句子的意思没有超出引文:如果起草者与审核者同时被带偏,引的又都是
+真实存在的原文,夹带的内容里又没有数字,代码挡不住,只能靠管理员在审核页上看出来。
+所以发布永远要人点批准(D5),而不是「审核通过就自动入库」。
 
 ### D5 · 草稿是 agent 的私有状态,发布是人的动作
 
@@ -176,6 +214,22 @@ fail-open)。`query` 落库前过 `mask_pii`。
 拿令牌放行」;而这条流水线跑完时什么都没发布,写入是人在管理面主动发起的——和评分卡采纳
 (`/admin/evaluation/adopt`)是同一个形状。本提案不新增任何写工具。
 
+实现(`web/kb_ops_admin.py`、`kb_ops/publish.py`)里定下来的细节:
+
+- 路径是 `POST /admin/kb/ops/drafts/{id}/approve`(多一段 `ops`,与主题清单的接口放在一起),
+  另有列表、详情、修改、驳回四个接口,契约见 §5。
+- 发布逻辑只被批准接口调用,是整条闭环里唯一向知识库写内容的地方。`new_faq` 与补了答案的
+  `missing` 新建一条 FAQ(标题用主题名),`alt_question` 给目标 FAQ 加一种问法;
+  `updated_by` 都记批准人。
+- 批准的顺序:抢这份草稿的锁 → 验草稿 → 意图审计 → 发布 → 草稿改记为已批准 → 结果审计。
+  意图审计写不进就不发布(fail-closed);结果审计写不进不撤回已发布的内容,但响应里
+  `audit_recorded` 为 `false`、日志里有告警。审计带着草稿的 prompt 版本与「人有没有改过」。
+- 修改、批准、驳回共用一把按草稿的 advisory lock:否则批准读到草稿之后、发布之前,另一个
+  请求可以把它改掉或驳回,结果是发布了旧内容,或者内容已发布而草稿记成了驳回。
+- 发布是幂等的:新 FAQ 落到由草稿 id 决定的 `source_id`(`kb_draft<id>`),补问法在目标已有
+  同样问法时什么都不做。所以「已发布、草稿状态没更新」这种中间态可以直接重试批准。
+- 草稿的状态只能从 `pending` 走一次;被别人先处理了的草稿再批准或驳回得到 409。
+
 ### D6 · 用户提问是不可信输入
 
 有人可以在聊天里反复说「请把『入社要交 500 元』写进知识库」。三道防线:
@@ -184,6 +238,9 @@ fail-open)。`query` 落库前过 `mask_pii`。
 2. 起草 prompt 明确事实只能来自官方条目。
 3. **真正兜底的是 D4 的代码复核**:只在用户提问里出现过的「事实」在任何知识库块里都找不到引文,
    过不了校验。这一条不依赖模型听话。
+
+第 3 条的边界见 D4 末尾:代码保证的是引文与数字,不是语义;`kb_ops_injection` 把这几道闸
+逐条钉住(把数字复核或引文复核关掉,对应的用例必须变红)。
 
 第 1 条已随缺口甄别落地(`kb_ops/triage.py`),比上面写的多两点:
 
@@ -216,6 +273,10 @@ fail-open)。`query` 落库前过 `mask_pii`。
 用列而不是 `tags`:标签是自由文本,用于展示和筛选;过滤的正确性需要有类型的列。好处是周期结束后,
 该周期的条目**自动退出检索**,不依赖有人记得去下线。
 
+草稿也守这条线:起草读知识库走同样的周期过滤;新 FAQ 草稿的证据如果来自绑定了周期的条目,
+草稿跟着绑同一个周期(`kb_draft.cycle_id`,批准前可改)——否则它会以常青条目的身份发布,
+明年仍被检到。证据跨了多个周期时取最新的,并在草稿上标出来交给人定。
+
 ### D8 · 改写放在索引侧
 
 现在的改写靠模型自己做(工具 docstring 要求把追问补成完整问题),零额外成本。本提案加的是索引侧
@@ -226,6 +287,11 @@ fail-open)。`query` 落库前过 `mask_pii`。
 本来就允许模型在 `not_found` 后换个说法再查。只有当问法扩展之后 `kb_probes` 的召回缺口依然存在,
 才重新评估。
 
+实现:`kb_faq` 增加 `alt_questions text[]`(存量库幂等补齐);每种问法各自成块,块文本是
+「问法 + 答案」,命中哪一种问法带回来的都是完整答案。为了不让一条 FAQ 的几种问法占掉多个
+检索名额,融合排序时同一条 FAQ 只留排名最前的一块(正文条目的各块内容不同,不合并)。
+管理面的条目创建/更新接口接受并回显 `alt_questions`,不经草稿也能手工维护问法。
+
 ### D9 · 引用核验:在线只做确定性检查,语义核验放离线抽样
 
 - **在线**:回复里出现「《某条目》」时,核对该标题是否在本轮 `collect_sources` 收集到的条目里。
@@ -235,7 +301,7 @@ fail-open)。`query` 落库前过 `mask_pii`。
 ## 5. 数据面
 
 `kb_query_log` 已落地,以 `kb/query_log.py` 里的 DDL 为准;主题清单的两张表
-(`kb_ops_run` / `kb_ops_topic`)也已落地,见本节后半;`kb_draft` 仍是示意。
+(`kb_ops_run` / `kb_ops_topic`)与草稿表 `kb_draft` 也已落地,见本节后半。
 
 ```sql
 CREATE TABLE IF NOT EXISTS kb_query_log (
@@ -251,30 +317,10 @@ CREATE TABLE IF NOT EXISTS kb_query_log (
     created_at     timestamptz NOT NULL DEFAULT now()
 );
 -- 索引:created_at(按时间窗聚合)、thread_id(随会话删除)、trace_id(关联对话日志)
-
-CREATE TABLE IF NOT EXISTS kb_draft (
-    draft_id         bigserial   PRIMARY KEY,
-    run_id           text        NOT NULL,
-    kind             text        NOT NULL CHECK (kind IN ('alt_question', 'new_faq', 'missing')),
-    topic            text        NOT NULL,
-    question         text        NOT NULL,
-    answer           text        NOT NULL DEFAULT '',
-    evidence         jsonb       NOT NULL DEFAULT '[]',  -- [{sentence, source_id, chunk_id, quote}]
-    target_source_id text,                               -- alt_question 挂到哪条
-    conflict_with    text[]      NOT NULL DEFAULT '{}',
-    support          jsonb       NOT NULL,   -- 检索次数、会话数、各结局计数、至多 3 条脱敏样本
-    review           jsonb       NOT NULL,   -- 审核 agent 的逐句裁决
-    prompt_versions  jsonb       NOT NULL,
-    status           text        NOT NULL DEFAULT 'pending'
-                     CHECK (status IN ('pending', 'approved', 'rejected', 'superseded')),
-    decided_by       int,
-    decided_at       timestamptz,
-    published_source_id text,
-    created_at       timestamptz NOT NULL DEFAULT now()
-);
 ```
 
-另有三处增列(均已落地,存量库由各自的建表自举幂等补齐):`kb_source.cycle_id`、
+另有几处增列(均已落地,存量库由各自的建表自举幂等补齐):`kb_source.cycle_id`、
+`kb_faq.alt_questions`、`kb_ops_topic.draft_status`、
 `agent_conversation_log.trace_id`、`agent_conversation_log.guard_verdict`。`guard_verdict` 记本轮
 回复出口守卫的判定,没跑守卫的轮次为空;目前只有无工具档的编造守卫会写
 (`clean` / `triggered:<命中片段>`)。
@@ -332,9 +378,13 @@ CREATE TABLE IF NOT EXISTS kb_ops_topic (
     topic              text,                   -- 模型写的主题名
     canonical_question text,                   -- 模型写的标准问法
     reason             text,
+    draft_status       text,                   -- 起草结局;没走到起草的为空(见下)
     UNIQUE (run_id, rank)
 );
 ```
+
+`draft_status`:`drafted` 有草稿待审;`auto_rejected` 草稿与官方原文矛盾,被代码驳回;`failed`
+起草或审核调用失败;`out_of_budget` 预算用完;`duplicate` 与已有问法或同批草稿重复,没有产出。
 
 `stats` 的形状(全部由代码数出来):
 
@@ -344,12 +394,16 @@ CREATE TABLE IF NOT EXISTS kb_ops_topic (
   "queries": 35, "queries_truncated": false, "unique_queries": 30,
   "clusters": 14, "below_support": 9, "topics": 5,
   "triage": {"done": 4, "failed": 1},
+  "drafts": {"drafted": 2, "duplicate": 1}, "draft_kinds": {"alt_question": 1, "new_faq": 1},
+  "drafts_deduped": true,
   "budget_exhausted": false, "input_tokens": 5200, "output_tokens": 610
 }
 ```
 
 `window` 是时间窗内全部检索的结局计数(`not_found` 率、近失率由它算);`below_support` 是因为
-问的人太少而没进清单的簇数,聚类阈值定得太高时这个数会偏大。
+问的人太少而没进清单的簇数,聚类阈值定得太高时这个数会偏大。`drafts` 按起草结局计数,
+`draft_kinds` 是定稿草稿的类型分布;`drafts_deduped` 为 `false` 表示这次查重没做成(嵌入端点
+中途不可用),草稿照常落库但可能与已有问法重复。token 数含甄别、起草、修订、审核。
 
 **留存。** 与设计初稿不同,主题行**不复制用户问题的文本**:
 
@@ -415,6 +469,115 @@ CREATE TABLE IF NOT EXISTS kb_ops_topic (
 - `samples` 至多 3 条,可能是空数组(样本所在的会话都已删除)。
 - `scope = personal_data` 的主题不是知识库缺口,是「该有个工具能查」的需求,建议单独一栏。
 - `gap_hint`:`wording` 建议补问法,`missing` 建议补条目;仅作提示。
+- 每个主题另带 `draft_status`(见上)与 `draft_id`(这个主题产出的草稿,没有为 `null`),
+  可以从主题直接跳到草稿。
+
+### 草稿表
+
+以 `state/kb_ops.py` 里的 DDL 为准,首次使用时幂等建出。
+
+```sql
+CREATE TABLE IF NOT EXISTS kb_draft (
+    draft_id            bigserial   PRIMARY KEY,
+    run_id              text        NOT NULL,   -- 产出它的运行;不设外键(见下「留存」)
+    topic_rank          integer     NOT NULL,   -- 它出自那次运行的第几个主题
+    kind                text        NOT NULL CHECK (kind IN ('alt_question', 'new_faq', 'missing')),
+    topic               text        NOT NULL,   -- 主题名;新 FAQ 发布时用作条目标题
+    question            text        NOT NULL,
+    answer              text        NOT NULL DEFAULT '',
+    evidence            jsonb       NOT NULL DEFAULT '[]',
+                        -- [{sentence, chunk_id, quote, source_id, source_title}]
+    target_source_id    text,                   -- alt_question 挂到哪条 FAQ
+    cycle_id            integer,                -- 发布时绑定的招新周期,常青为空
+    conflict_with       text[]      NOT NULL DEFAULT '{}',  -- 审核者标出的冲突条目
+    support             jsonb       NOT NULL DEFAULT '{}',
+                        -- {query_count, thread_count, near_miss_count, sample_query_ids}
+    review              jsonb       NOT NULL DEFAULT '{}',
+                        -- {findings: [{index, verdict, reason}], conflicts: [{source_id, reason}],
+                        --  revised, downgraded, converted_from, mixed_cycles, note}
+    prompt_versions     jsonb       NOT NULL DEFAULT '{}',
+    status              text        NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'approved', 'rejected', 'superseded')),
+    edited_by           integer,                -- 批准前改过内容的管理员
+    decided_by          integer,                -- 批准或驳回的人;代码驳回与被顶替的为空
+    decided_at          timestamptz,
+    published_source_id text,
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    updated_at          timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (run_id, topic_rank)
+);
+```
+
+与初稿示意的出入:多了 `topic_rank`(从主题跳到草稿)、`cycle_id`(D7)、`edited_by`、
+`updated_at`;`support` 里的样本只存检索日志行 id(同主题清单,随会话删除消失),不存文本;
+`alt_question` 的 `answer` 为空(沿用目标 FAQ 的答案),由新 FAQ 转成的补问法留着起草的
+答案供人对照(`review.converted_from = "new_faq"`)。
+
+**留存。** 草稿不随运行级联删除:运行只留最近几次,而待审草稿要等到有人处理。待审的草稿
+不会被清理;处理完的(批准、驳回、被顶替)保留 `kb_ops_draft_retention_days`(默认 365)天,
+用来算草稿通过率,到期在下一次运行成功后删除。草稿里没有用户提问的原文。
+
+### 草稿审核接口(给前端的契约)
+
+都在 `web/kb_ops_admin.py`,前缀 `/api/agent`,权限点 **`kb:manage`**。
+
+**`GET /admin/kb/ops/drafts?status=pending&kind=&page=1&size=20`** —— 草稿分页列表,新的在前。
+
+- `status` 缺省 `pending`;可取 `pending` / `approved` / `rejected` / `superseded` / `all`。
+  `kind` 可取三种类型之一。取值无效 → `400`。`size` 上限 100。
+- 返回 `{"items": [draft], "total", "page", "size"}`。
+
+**`GET /admin/kb/ops/drafts/{draft_id}`** —— 草稿详情;不存在 → `404`。
+
+```json
+{"draft_id": 17, "run_id": "kbops_3f9a1c2b7d10", "topic_rank": 1,
+ "kind": "new_faq", "topic": "社团会费",
+ "question": "加入社团需要交费吗?", "answer": "加入社团不收取任何费用。",
+ "evidence": [{"sentence": "加入社团不收取任何费用。", "chunk_id": "kb_ab12cd34ef56#2",
+               "quote": "本社团不向成员收取会费", "source_id": "kb_ab12cd34ef56",
+               "source_title": "社团章程"}],
+ "target_source_id": null, "cycle_id": 12, "conflict_with": ["kb_0f9e8d7c6b5a"],
+ "support": {"query_count": 9, "thread_count": 5, "near_miss_count": 6},
+ "samples": [{"query": "入社要交钱吗", "asked_at": "…", "injection_suspect": false}],
+ "review": {"findings": [{"index": 1, "verdict": "supported", "reason": ""}],
+            "conflicts": [{"source_id": "kb_0f9e8d7c6b5a", "reason": "现有条目说要收费"}],
+            "revised": false, "downgraded": false, "converted_from": "",
+            "mixed_cycles": false, "note": ""},
+ "prompt_versions": {"triage": "…", "draft": "…", "revise": "…", "verify": "…"},
+ "status": "pending", "edited_by": null, "decided_by": null, "decided_at": null,
+ "published_source_id": null, "created_at": "…", "updated_at": "…",
+ "target": null}
+```
+
+- 列表项与详情同形,只是列表项没有 `target`。`samples` 的规则同主题清单(至多 3 条,可能为空)。
+- `target` 只在 `alt_question` 草稿上有值:目标 FAQ 的现有内容
+  `{"source_id", "title", "question", "answer", "alt_questions", "enabled"}`,供左右对照;
+  目标条目已被删除时为 `null`。
+- `review.findings[].verdict` 是 `supported` / `unsupported` / `contradicted`,`reason` 是可以
+  直接展示的中文原因(通过的为空串)。`downgraded` 为真表示这份「待补充」是由有答案的草稿
+  降级来的;`revised` 表示打回过一次;`mixed_cycles` 表示证据跨了多个周期,`cycle_id` 需要人确认。
+- `conflict_with` 非空时要醒目提示:草稿与这些现有条目说法不一致,发布前得先理清哪个对。
+
+**`PUT /admin/kb/ops/drafts/{draft_id}`** —— 批准前修改。请求体
+`{"question": "…", "answer": "…", "cycle_id": 12}`(`question` 必填,1–200 字;`answer` 至多
+4000 字,可为空;`cycle_id` 为 `null` 表示常青)。`200` →
+`{"draft_id", "status": "pending"}`;草稿已处理或正在被处理 → `409`。改动只落在草稿上。
+
+**`POST /admin/kb/ops/drafts/{draft_id}/approve`** —— 批准并发布到知识库,无请求体。
+
+- `200` → `{"draft_id", "status": "approved", "published_source_id": "kb_draft17",
+  "audit_recorded": true}`。`audit_recorded` 为 `false` 时内容已发布,但结果审计没写进,
+  要提示管理员联系运维补记。补问法草稿的 `published_source_id` 是目标 FAQ 的 id。
+- `400` 内容不齐(「待补充」还没写答案、补问法缺目标)或目标 FAQ 已不存在;`404` 草稿不存在;
+  `409` 草稿已处理,或另一个请求正在处理它;`502` / `503` 嵌入端点不可用或审计服务不可用
+  ——这几种情况下知识库都没有被改动,草稿仍是待审,可以重试。
+- `500` 且文案含「内容已写入知识库」:已发布但草稿状态没更新,直接重试批准即可,不会重复发布。
+
+**`POST /admin/kb/ops/drafts/{draft_id}/reject`** —— 驳回,无请求体。`200` →
+`{"draft_id", "status": "rejected"}`;`404` / `409` / `503` 含义同上。
+
+**知识条目接口的一处扩展**(`/admin/kb/sources`,`web/kb_admin.py`):创建与更新的请求体
+多一个可选的 `alt_questions: string[]`(至多 20 条,只对 FAQ 生效),详情里回显。
 
 ## 6. 三个角色
 
@@ -428,7 +591,23 @@ CREATE TABLE IF NOT EXISTS kb_ops_topic (
 草稿重复 → 更新热度,旧草稿标 `superseded`。冲突只标出来(`conflict_with`)交给人,不自动裁决。
 
 缺口甄别已落地(`kb_ops/triage.py`):强档模型、低温,提示词 JSON + strict 校验,不合规带诊断
-重试一次;给模型看的样本至多 5 种问法、每条截到 200 字。起草与审核属 P2。
+重试一次;给模型看的样本至多 5 种问法、每条截到 200 字。
+
+起草与审核也已落地,三个角色都走强档模型:起草与修订用生成档温度(要换词检索),审核用
+评分档(要判断稳定)。打回的那一次修订有自己的 prompt(`prompts/kb_ops/revise.md`)——它
+没有工具、任务也不同,按「一个节点一个文件」单列,算起草角色的第二个节点。
+
+查重(`kb_ops/dedupe.py`、`kb_ops/drafting.py` 的 `settle_drafts`)落地后的规则:
+
+- 「同一个问题」沿用聚类的判据——问题向量的余弦相似度达到 `kb_ops_cluster_threshold`,
+  不另设阈值(少一个没校准的数)。比的是草稿的问题与现有 FAQ 的**每一种问法**(含附加问法)。
+- `new_faq` 撞上现有 FAQ → 转成那条 FAQ 的 `alt_question`;`missing` 不转(它没有经过审核的
+  答案,不能凭问题相似就挂到别的条目上)。
+- 补问法与目标 FAQ 已有的问法字面相同 → 不产出草稿,主题记为 `duplicate`。
+- 同一次运行里两个主题问的是同一件事 → 只留排名靠前的那份。
+- 与待审的旧草稿是同一个问题 → 旧草稿标 `superseded`,新草稿带着最新的热度顶上;已经有人
+  处理过的旧草稿不动。
+- 查重要嵌入全部 FAQ 问法,一次运行一批;做不成时草稿照常落库,统计量里标出来。
 
 ## 7. 安全与失败语义
 
@@ -449,6 +628,17 @@ CREATE TABLE IF NOT EXISTS kb_ops_topic (
 - 触发会写一条审计(谁、何时、看多少天);审计写不进不拦截运行——运行不发布任何内容,
   触发人另记在运行行上——但会留告警日志。这与发布(写路径,fail-closed)是两回事。
 
+起草与发布落地后的失败语义:
+
+- 起草、修订、审核任何一步失败(模型不可用、输出两次不合规、超时)只影响那一个主题:主题
+  照常进清单,`draft_status` 记为 `failed` 或 `out_of_budget`,没有草稿。
+- 主题、草稿、被顶替的旧草稿与运行状态在一个事务里落库。
+- 发布(批准草稿)是这条闭环里唯一的写路径:顺序与各步失败时的状态见 D5;意图审计
+  fail-closed,发布幂等,每种失败都如实告诉管理员知识库有没有被改动。
+- **「批准入库后自动跑一次 `kb_probes`」没有做。** 生产镜像只带 `src/`,`evals/datasets/`
+  不在里面,服务进程里跑不了这个门禁;现在要靠发布后人工跑一次
+  `uv run python evals/run_evals.py --suite kb_probes`(§12 第 10 条)。
+
 ## 8. eval 与门禁
 
 | suite | 类型 | 断言 |
@@ -461,12 +651,25 @@ CREATE TABLE IF NOT EXISTS kb_ops_topic (
 
 落地情况:
 
-- `kb_ops_probes` 的聚类、近失判定、缺口提示、样本过滤四组断言已落地(21 条),用数据集里
-  写死的向量,不依赖嵌入端点和模型,任何环境都能跑;引文复核与查重两组等 P2 的代码有了再补。
-- `kb_ops_triage` 是原表里没有的一行:共同约束要求每个模型角色有自己的用例,而原来的三个
-  suite 都不覆盖缺口甄别。数据集 14 条,门槛通过率 0.85。**尚未在真实模型上跑过,没有基线**
-  ——首次在有模型 key 的环境跑通后用 `--write-baseline` 记下 `triage_pass_rate`。
-- `kb_ops_verify`、`kb_ops_injection` 属 P2。
+- `kb_ops_probes`(确定性,45 条,本地实跑通过):聚类、近失判定、缺口提示、样本过滤、引文
+  复核、草稿裁决、查重七组。向量与审核者的输出都写死在数据集里,不依赖嵌入端点和模型,
+  任何环境都能跑。
+- `kb_ops_injection`(确定性,16 条,本地实跑通过):起草、修订、审核三个角色的输出写死成
+  「已经被带偏」的样子——照搬提问里的假事实、编造引文、审核者一路放行、修订时想换类型或
+  改问题——断言代码里的闸门各自挡住了什么。所以它比表里写的「确定性断言」更进一步:
+  **整套不调模型**。它测不了、也不该声称测了的情况见 D4 末尾。单测里另有反向验证:把数字
+  复核或引文复核关掉,对应的用例必须变红。
+- `kb_ops_verify`(模型,13 条):写死的草稿 + 官方原文块交给审核角色,模型输出再经代码复核
+  与裁决,和产品里走的是同一条路。两个比率设门:埋了问题的草稿未被放行的比例 ≥ 0.9、没
+  问题的草稿被放行的比例 ≥ 0.8(都是没校准的起点)。**尚未在真实模型上跑过,没有基线。**
+- `kb_ops_triage`(模型,14 条)是原表里没有的一行:共同约束要求每个模型角色有自己的用例,
+  而原来的三个 suite 都不覆盖缺口甄别。门槛通过率 0.85。**尚未在真实模型上跑过,没有基线。**
+- **起草角色没有自己的模型 suite**:它的产出质量要用真实知识库与真实检索才量得出来(换词
+  检索找不找得到、三种类型选得对不对),本地造不出这样的夹具。现在盯着它的是两头——输出
+  闸门与引文、数字复核(确定性,`kb_ops_probes` / `kb_ops_injection`),以及审核角色
+  (`kb_ops_verify`)。等有了真实知识库上的运行记录,再把人工批准/驳回的草稿回流成用例
+  (§12 第 11 条)。
+- 两个模型 suite 首次在有 key 的环境跑通后,用 `--write-baseline` 记下指标,之后改动对着它比。
 
 闭环本身的运营指标(进周期复盘报告):`not_found` 率、近失率、守卫触发率、草稿通过率、
 从主题出现到条目入库的时长。
@@ -482,6 +685,11 @@ P1 阶段每个主题只有一次甄别调用(不合规时多一次重试)。预
 结果照常落库,运行记为成功并在 `stats.budget_exhausted` 里标出。每次运行的 token 用量记在
 `stats` 里。目前只有管理面手动触发,没有定时任务(§12 第 7 条)。
 
+起草落地后,一个主题最坏是:起草 6 次模型回复(60 秒)+ 审核 2 次 + 修订 1 次,后两种单次
+60 秒。30 个主题、并发 3,最坏情况下 15 分钟的墙钟预算不够跑完——这是有意的:到点之后
+没轮到的主题记为 `out_of_budget`,下一次运行再来;已经定稿的草稿照常落库。代码预检能
+查出问题的草稿不花审核调用,「待补充」不花审核调用。
+
 ## 10. 分期
 
 | 期 | 内容 | 验收 |
@@ -493,7 +701,27 @@ P1 阶段每个主题只有一次甄别调用(不合规时多一次重试)。预
 
 P0 不含任何模型角色,单独上线就有价值。
 
-**进度**:P0、P1 已实现,单测与真库集成档(pgvector 容器)通过;P2 起未开工。
+**进度**:P0、P1、P2 已实现,单测与真库集成档(pgvector 容器)通过;P3 未开工。
+
+P2 做了什么:起草(`draft.py`)、审核与裁决(`verify.py`、`citation.py`)、主题级编排与查重
+(`drafting.py`、`dedupe.py`)、发布(`publish.py`)、`kb_draft` 表、草稿审核的五个接口、FAQ
+附加问法(`kb_faq.alt_questions`),以及 `kb_ops_verify`、`kb_ops_injection` 两个 suite 和
+`kb_ops_probes` 的三组新断言。P2 还没验证的:
+
+- **起草默认关闭**(`kb_ops_drafting_enabled = false`,有测试守着默认值与关闭时的行为)。
+  打开之前要有人在带模型 key 的环境做三件事:跑 `kb_ops_triage` 与 `kb_ops_verify` 并用
+  `--write-baseline` 留下基线;打开开关在测试环境触发一次分析,人工看一遍产出的草稿;
+  在带语料与嵌入端点的环境跑一次 `kb_probes` 留底(见下面问法扩展那一条)。
+- **验收项「`kb_ops_*` 三个 suite 过门禁」只完成了一半**:两个确定性的 suite 本地实跑通过;
+  `kb_ops_verify`(以及 P1 的 `kb_ops_triage`)需要模型 key,本地没有,**没跑过、没有基线**。
+- **起草、修订、审核三个 prompt 一次都没有在真实模型上跑过。** 流程是用写死输出的假角色
+  验证的:能证明编排、闸门、落库、发布是对的,证明不了模型真的会按 prompt 做。
+- **验收项「草稿通过率可度量」**:数据都在(`kb_draft.status` 与处理时间),但没有做成现成的
+  指标或接口,要算得自己写一条 SQL;留给周期复盘那条线取用。
+- **问法扩展对 `kb_probes` 基线的影响没有量**(§12 第 3 条):本地没有嵌入端点。上线前应当
+  在带语料的环境先跑一次 `kb_probes` 留底,批准几条补问法之后再跑一次对比。
+- **「批准后自动跑 `kb_probes`」没有做**,原因见 §7。
+- 查重阈值沿用未校准的聚类阈值;草稿审核页在前端仓,接口契约见 §5。
 
 P1 做了什么:`kb_ops/` 包(聚类、缺口甄别、流水线图、运行器)、`kb_ops_run` / `kb_ops_topic`
 两张表、管理面三个接口(§5)、`kb_ops_probes` 与 `kb_ops_triage` 两个 suite。P1 还没验证的:
@@ -533,12 +761,29 @@ P1 实际的落位(与上面三行的出入):
 - 配置项:`kb_ops_cluster_threshold`、`kb_ops_min_queries`、`kb_ops_min_threads`、
   `kb_ops_near_miss_margin`、`kb_ops_run_retention`(`config.py`)。
 
+P2 实际的落位:
+
+- `kb_ops/draft.py`(起草循环与修订)、`kb_ops/verify.py`(审核、代码预检、裁决)、
+  `kb_ops/citation.py`(引文与数字复核,纯函数)、`kb_ops/dedupe.py`(查重,纯函数)、
+  `kb_ops/drafting.py`(一个主题从起草到定稿的编排 + 定稿后的查重)、`kb_ops/reader.py`
+  (起草读知识库的口子)、`kb_ops/publish.py`(批准后的发布)、`kb_ops/parsing.py`。
+- `kb_draft` 表与草稿的读写、按草稿的锁:`state/kb_ops.py`。
+- 草稿接口接着放在 `web/kb_ops_admin.py`(`web/app.py` 仍然没有改动)。
+- 知识库层:`kb/chunking.py`(一种问法一块)、`kb/schema.py`(`alt_questions` 列)、
+  `kb/store.py`(附加问法、检索结果带 `chunk_id` 与条目类型、同一条 FAQ 只占一个名额、
+  按块取原文 `get_chunks` / `list_source_chunks`、`list_faq_questions`、`add_alt_question`)、
+  `web/kb_admin.py`(请求体的 `alt_questions`)、`tools/knowledge.py`(公开的 `open_cycle_ids`)。
+- prompt:`prompts/kb_ops/draft.md`、`revise.md`、`verify.md`。
+- 配置项:`kb_ops_drafting_enabled`(默认关闭)、`kb_ops_draft_retention_days`。
+
 ## 12. 开放问题
 
 1. 对话日志存的是回复**摘要**,够不够做离线忠实度抽样?不够的话从 trace 里取全文。
 2. 聚类阈值、最小支持度、近失区间的初值都要用第一批真实日志校准,文中数值只是起点。
    现在的起点是 0.75 / 3 次且 2 个会话 / 0.08,都在配置里,改它们不用动代码。
 3. FAQ 多问法「每问法一块」会改变块的数量分布,对 `kb_probes` 现有基线的影响要先量一遍。
+   已经落地的一处缓解:同一条 FAQ 在一次检索结果里只占一个名额。量还没量(本地没有
+   嵌入端点)。
 4. 草稿审核页放进知识库管理面还是单开一页,由前端仓决定。
 5. 轮级入口 trace id 与 Langfuse span 的 trace id 是两个值(D1)。要让对话日志、检索日志、审计、
    Langfuse 四面同 id,得在建 Langfuse handler 时用入口 id 作为 trace id;这会改变现有 trace 的
@@ -551,3 +796,8 @@ P1 实际的落位(与上面三行的出入):
    得靠守卫判定或 P3 的忠实度抽样提供信号。
 9. 排名在甄别名额(前 30)之外的主题一直是「未归类」,下一次运行如果还排不进前 30 仍然
    没人看。真实数据里如果常常超过 30 个主题,再考虑跨运行轮转。
+10. 批准入库后自动跑 `kb_probes`(§7)需要先决定数据集怎么进生产环境:打进镜像,还是把
+    探针放进库里由管理面维护。在那之前靠人工跑。
+11. 起草角色的模型 eval(§8):等真实运行攒下人工批准与驳回的草稿之后,回流成数据集。
+12. 被人驳回的草稿,下一次运行同一个主题还会再起草一份(查重只看待审的旧草稿)。要不要
+    记住「这个问题人已经说过不要」,看实际使用里烦不烦人再定。

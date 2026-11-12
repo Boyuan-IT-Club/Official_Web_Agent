@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     kb_ops_near_miss_margin: float = 0.08
     # 主题清单只保留最近这么多次运行,更早的随下一次运行清掉
     kb_ops_run_retention: int = 8
+    # 是否为「该由知识库回答」的主题起草带出处的草稿。默认关闭:离线分析只出主题清单,
+    # 没有起草与审核的模型调用。打开之前先在真实模型上跑过 kb_ops_triage 与
+    # kb_ops_verify 两个 eval 并留下基线(ADR-0004:新模型角色先有 eval 再上线)
+    kb_ops_drafting_enabled: bool = False
+    # 处理完(批准/驳回/被顶替)的草稿保留这么多天;待审的草稿不清
+    kb_ops_draft_retention_days: int = 365
 
     # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)
     postgres_url: str = "postgresql://localhost:5432/official_agent"

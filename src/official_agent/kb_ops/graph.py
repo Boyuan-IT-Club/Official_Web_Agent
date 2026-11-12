@@ -1,10 +1,10 @@
-"""挖掘流水线图:聚类 → 逐主题甄别(并行扇出)。只做计算,不碰数据库。
+"""挖掘流水线图:聚类 → 逐主题甄别,该由知识库回答的主题接着起草(并行扇出)。
 
-取数与落库在 runner。这里的节点拿到的是已经读出来的检索记录,产出主题与各主题的
-甄别结局。嵌入函数与甄别函数由调用方注入:图本身不知道模型和端点怎么配,测试
-直接换成假实现。
+只做计算,不落库:取数与落库在 runner。这里的节点拿到的是已经读出来的检索记录,
+产出主题与各主题的甄别、起草结局。嵌入、甄别、起草三个能力由调用方注入:图本身
+不知道模型和端点怎么配,测试直接换成假实现。
 
-预算:甄别是唯一花钱也是唯一慢的环节。每个主题开始前看一眼整次运行的截止时间,
+预算:甄别与起草是花钱也是慢的环节。每个主题开始前看一眼整次运行的截止时间,
 过了就不再调模型,把这个主题记成「预算用完」——聚类结果照常产出,不判失败。
 """
 
@@ -29,6 +29,7 @@ from official_agent.kb_ops.cluster import (
     build_topics,
     normalize_query,
 )
+from official_agent.kb_ops.drafting import DraftOutcome
 from official_agent.kb_ops.triage import TriageVerdict, safe_samples
 from official_agent.state.kb_ops import (
     TRIAGE_DONE,
@@ -51,20 +52,26 @@ TRIAGE_CALL_TIMEOUT_SECONDS = 60.0
 #: 每批送给嵌入端点的问题数
 _EMBED_BATCH_SIZE = 64
 
+#: 只有这一类主题进入起草:社团的公开信息,答案该由知识库给
+_DRAFTABLE_SCOPE = "official_knowledge"
+
 #: 甄别函数:(样本, 检索次数, 会话数) → (结论, token 用量)
 TriageFn = Callable[
     [Sequence[str], int, int], Awaitable[tuple[TriageVerdict, dict[str, int | None] | None]]
 ]
+#: 起草函数:(标准问法, 主题名) → 起草结局。不抛异常,失败也落成一个结局
+DraftingFn = Callable[[str, str], Awaitable[DraftOutcome]]
 
 
 @dataclass(frozen=True)
 class TopicTriage:
-    """一个主题的甄别结局。verdict 只在 status=done 时有值。"""
+    """一个主题的甄别结局。verdict 只在 status=done 时有值;draft 只在走到起草时有值。"""
 
     rank: int
     status: str
     verdict: TriageVerdict | None = None
     usage: dict[str, int | None] | None = None
+    draft: DraftOutcome | None = None
 
 
 @dataclass(frozen=True)
@@ -82,14 +89,16 @@ class MiningResult:
 class MiningDeps:
     """图运行所需的外部能力与预算。
 
-    deadline 是 time.monotonic() 时刻。callbacks 与 correlation_id 只用于 trace:
-    前者是观测回调,后者写进 trace 的 metadata,用来从一次运行找到它的模型调用。
+    deadline 是 time.monotonic() 时刻。drafting 为 None 时只出主题清单、不起草。
+    callbacks 与 correlation_id 只用于 trace:前者是观测回调,后者写进 trace 的
+    metadata,用来从一次运行找到它的模型调用。
     """
 
     embed: Embedder
     triage: TriageFn
     policy: ClusterPolicy
     deadline: float
+    drafting: DraftingFn | None = None
     callbacks: list[Any] = field(default_factory=list)
     correlation_id: str = ""
 
@@ -172,7 +181,12 @@ async def _triage_one(topic: Topic, deps: MiningDeps) -> TopicTriage:
         # 看到它的热度与样本;模型端点不可用时整份清单退化为纯聚类结果
         logger.warning("kb_ops 甄别失败 rank=%s", topic.rank, exc_info=True)
         return TopicTriage(rank=topic.rank, status=TRIAGE_FAILED)
-    return TopicTriage(rank=topic.rank, status=TRIAGE_DONE, verdict=verdict, usage=usage)
+    draft = None
+    if deps.drafting is not None and verdict.scope == _DRAFTABLE_SCOPE:
+        draft = await deps.drafting(verdict.canonical_question, verdict.topic)
+    return TopicTriage(
+        rank=topic.rank, status=TRIAGE_DONE, verdict=verdict, usage=usage, draft=draft
+    )
 
 
 async def run_mining(records: Sequence[QueryRecord], deps: MiningDeps) -> MiningResult:

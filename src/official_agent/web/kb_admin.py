@@ -35,6 +35,7 @@ class KbSourceUpsert(BaseModel):
 
     cycle_id 不填(null)= 常青条目;填招新周期 id = 只在该周期开放期间可被检索,
     周期结束后自动退出检索(条目本身保留,可改回常青或换绑下一届)。
+    alt_questions 只对 FAQ 生效:同一个答案的其他问法,每种问法都参与检索。
     """
 
     title: str = Field(min_length=1)
@@ -45,6 +46,7 @@ class KbSourceUpsert(BaseModel):
     answer: str = ""
     content_md: str = ""
     cycle_id: int | None = Field(default=None, ge=1)
+    alt_questions: list[str] = Field(default_factory=list, max_length=20)
 
 
 class KbEnabledBody(BaseModel):
@@ -67,6 +69,7 @@ def _to_input(body: KbSourceUpsert, identity: ResolvedIdentity) -> kb_store.Sour
         content_md=body.content_md,
         updated_by=_actor(identity),
         cycle_id=body.cycle_id,
+        alt_questions=tuple(body.alt_questions),
     )
 
 
@@ -204,6 +207,7 @@ async def reembed_kb_source(
         content_md=record.content_md,
         updated_by=_actor(identity),
         cycle_id=record.cycle_id,
+        alt_questions=tuple(record.alt_questions),
     )
     try:
         await kb_store.ingest_source(source, source_id=source_id)
