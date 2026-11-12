@@ -39,6 +39,7 @@ from official_agent.graphs.assistant.compression import (
 from official_agent.graphs.identity import ResolvedIdentity
 from official_agent.memory import recall as memory_recall
 from official_agent.observability import langfuse_callbacks
+from official_agent.security.guard_verdict import format_verdicts
 from official_agent.security.pii import ReplyPiiMasker
 from official_agent.state.threads import create_thread, new_thread_id, resolve_thread
 from official_agent.tools.client import BackendError, BackendUnavailableError
@@ -412,8 +413,10 @@ class _TurnAccum:
     )
     # 本轮停在写操作确认处(interrupt 挂起):载荷原样给前端渲染确认卡片
     confirm: dict[str, Any] | None = None
-    # 回复出口守卫的判定,随对话日志落库;没跑守卫的轮次保持 None
-    guard_verdict: str | None = None
+    # 本轮是否调用过知识库检索(引用核验要区分「查了没引对」与「根本没查」)
+    kb_searched: bool = False
+    # 回复出口各守卫的判定 {守卫名: 判定},随对话日志落库;没跑的守卫不在里面
+    guard_verdicts: dict[str, str] = field(default_factory=dict)
 
 
 def _feed_text_chunk(
@@ -479,6 +482,7 @@ def _drain_updates(payload: Any, acc: _TurnAccum) -> list[dict[str, Any]]:
                 events.append({"type": "tool", "role": "tool", "name": tc.get("name")})
             # search_knowledge 的结果收集为引用锚(轮末随 delta.sources 下发)
             if isinstance(m, ToolMessage) and getattr(m, "name", "") == "search_knowledge":
+                acc.kb_searched = True
                 telemetry.collect_sources(m, acc.sources, acc.seen_sources)
     return events
 
@@ -523,13 +527,13 @@ async def _toolless_guarded_reply(
 
     守卫在一切持久化之前——直播、conversation_log、checkpointer 三面同用
     改写文本;压缩必须排在其后,否则编造原文会被压进摘要。
-    判定写进 acc.guard_verdict,随本轮对话日志落库。
+    判定写进 acc.guard_verdicts,随本轮对话日志落库。
     """
-    from official_agent.security.fabrication_guard import guard_empty_tools_reply
+    from official_agent.security.fabrication_guard import GUARD_NAME, guard_empty_tools_reply
     from official_agent.security.pii import mask_pii_output
 
     final_reply, verdict = guard_empty_tools_reply("".join(acc.reply_chunks))
-    acc.guard_verdict = verdict
+    acc.guard_verdicts[GUARD_NAME] = verdict
     # toolless 回复出口同过 PII 掩(与 cli 对称;掩后文本进回写)
     final_reply, _pii_trace = mask_pii_output(final_reply)
     if verdict != "clean":
@@ -542,6 +546,34 @@ async def _toolless_guarded_reply(
         await _rewrite_last_ai_message(agent, config, final_reply)
     if final_reply:
         yield _sse({"type": "delta", "role": "assistant", "content": final_reply})
+
+
+def _check_kb_citations(acc: _TurnAccum) -> None:
+    """引用核验(只观测):把判定记进 acc.guard_verdicts,不改回复。配置没打开时什么都不做。"""
+    from official_agent.config import get_settings
+    from official_agent.security import citation_guard
+
+    if not get_settings().kb_citation_check_enabled:
+        return
+
+    try:
+        verdict = citation_guard.check_citations(
+            "".join(acc.reply_chunks),
+            [s.get("title", "") for s in acc.sources],
+            searched=acc.kb_searched,
+        )
+    except Exception:  # noqa: BLE001
+        # 观测面 fail-open(ADR-0005):核验只是多记一项判定,它出错不能影响已经
+        # 发给用户的这一轮;代价是这一轮没有引用核验的判定
+        logging.getLogger(__name__).warning("引用核验失败(已忽略)", exc_info=True)
+        return
+    if verdict is None:
+        return
+    acc.guard_verdicts[citation_guard.GUARD_NAME] = verdict
+    if verdict != citation_guard.VERDICT_CLEAN:
+        logging.getLogger(__name__).info(
+            "guard_event guard_name=%s verdict=%s", citation_guard.GUARD_NAME, verdict
+        )
 
 
 def _usage_out(usage_acc: dict[str, int | None]) -> dict[str, int | None]:
@@ -789,6 +821,9 @@ async def _stream_turn(
             if tail:
                 yield _sse({"type": "delta", "role": "assistant", "content": tail})
 
+        if error_code is None:
+            _check_kb_citations(acc)
+
         # 轮末按需压缩(先压缩后落行,同一行携带 compress_event)。
         # 在 done 事件前执行:失败 fail-open 返回 None,不阻断 done。
         # 失败/超时/断连轮次不压缩——失败轮的残缺上下文不值得进摘要。
@@ -811,7 +846,7 @@ async def _stream_turn(
             usage=_usage_out(acc.usage),
             prefix_hash=p_hash,
             compress_event=compress_event,
-            guard_verdict=acc.guard_verdict,
+            guard_verdict=format_verdicts(acc.guard_verdicts),
         )
         # 记忆提取放在落账之后、done 之前触发(后台任务,不阻塞本轮收尾)
         if error_code is None and acc.confirm is None and resume is None:

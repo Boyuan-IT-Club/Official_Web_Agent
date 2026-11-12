@@ -1,4 +1,4 @@
-"""知识库运营管理 API:/api/agent/admin/kb/ops* —— 离线分析、主题清单、草稿审核。
+"""知识库运营管理 API:/api/agent/admin/kb/ops* —— 离线分析、主题清单、草稿审核、忠实度抽样。
 
 - 权限:``kb:manage``,与知识条目维护同一个权限码——能改知识库的人才需要看它缺什么
 - 路由由 kb_admin 的 router 一并注册,不单独挂到 app
@@ -21,12 +21,13 @@ from official_agent.graphs.identity import ResolvedIdentity
 from official_agent.kb import query_log
 from official_agent.kb import store as kb_store
 from official_agent.kb.embedding import EmbeddingError, EmbeddingNotConfiguredError
-from official_agent.kb_ops import publish
+from official_agent.kb_ops import faithfulness_runner, publish
 from official_agent.kb_ops import runner as kb_ops_runner
 from official_agent.kb_ops.cluster import gap_hint
 from official_agent.kb_ops.triage import looks_like_instruction
 from official_agent.security.pii import mask_pii
 from official_agent.state import audit
+from official_agent.state import kb_faithfulness as faithfulness_state
 from official_agent.state import kb_ops as kb_ops_state
 from official_agent.web.auth import require_any as _require_any
 
@@ -482,3 +483,111 @@ async def reject_kb_ops_draft(
     if not changed:
         raise HTTPException(status_code=409, detail="草稿已被处理")
     return {"draft_id": draft_id, "status": kb_ops_state.DRAFT_REJECTED}
+
+
+# ── 忠实度抽样 ──────────────────────────────────────────
+
+
+class FaithfulnessRunBody(BaseModel):
+    """触发一次忠实度抽样:往回看多少天的对话,抽多少轮。"""
+
+    days: int = Field(default=7, ge=1, le=30)
+    sample_size: int = Field(default=30, ge=1, le=faithfulness_runner.MAX_SAMPLE_SIZE)
+
+
+@router.post("/admin/kb/ops/faithfulness/runs", status_code=202)
+async def start_faithfulness_run(
+    identity: Annotated[ResolvedIdentity, Depends(_require_kb_manage)],
+    body: FaithfulnessRunBody | None = None,
+) -> dict[str, Any]:
+    """启动一次忠实度抽样(后台执行),返回 run_id。没在配置里打开或已有抽样在跑 → 409。"""
+    body = body or FaithfulnessRunBody()
+    user_id = int(identity.get("user_id") or 0)
+    try:
+        run_id = await faithfulness_runner.start_run(
+            days=body.days, sample_size=body.sample_size, triggered_by=user_id
+        )
+    except (
+        faithfulness_runner.FaithfulnessDisabledError,
+        kb_ops_runner.RunInProgressError,
+    ) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — 原始异常可能带连接串,只进日志
+        logger.warning("kb_faithfulness 启动失败", exc_info=True)
+        raise HTTPException(status_code=500, detail="启动抽样失败,请稍后重试") from exc
+    try:
+        await asyncio.to_thread(
+            audit.write_audit,
+            thread_id=f"kbfaith:{run_id}",
+            acting_user_id=user_id,
+            channel="kb_ops",
+            agent="kb-faithfulness-runner",
+            action={
+                "op": "run_kb_faithfulness_sampling",
+                "run_id": run_id,
+                "days": body.days,
+                "sample_size": body.sample_size,
+            },
+            decision=f"u{user_id}:run",
+            result="已启动忠实度抽样",
+        )
+    except Exception:  # noqa: BLE001
+        # 抽样已经在跑,而且它只读对话与知识库、只写自己的表:审计缺一条「谁触发的」
+        # 不该让请求失败,但必须在日志里看得见(触发人另记在运行行上)
+        logger.warning("kb_faithfulness 触发审计写入失败 run_id=%s", run_id, exc_info=True)
+    return {"run_id": run_id, "status": "running"}
+
+
+@router.get("/admin/kb/ops/faithfulness/runs")
+async def list_faithfulness_runs(
+    _: Annotated[ResolvedIdentity, Depends(_require_kb_manage)],
+    limit: int = 20,
+) -> dict[str, Any]:
+    """最近的抽样运行,新的在前。忠实度与引用核验的数字都在每一项的 stats 里。"""
+    limit = max(1, min(limit, 50))
+    try:
+        runs = await asyncio.to_thread(faithfulness_state.list_runs, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("kb_faithfulness 运行列表查询失败", exc_info=True)
+        raise HTTPException(status_code=500, detail="查询失败,请稍后重试") from exc
+    return {"items": runs, "total": len(runs)}
+
+
+@router.get("/admin/kb/ops/faithfulness/samples")
+async def list_faithfulness_samples(
+    _: Annotated[ResolvedIdentity, Depends(_require_kb_manage)],
+    run_id: str | None = None,
+    problems_only: bool = False,
+) -> dict[str, Any]:
+    """一次抽样的样本:那一轮的问题与回复、逐条说法的结论。有问题的排前面。
+
+    run_id 缺省取最近一次成功的运行;一次都没成功过时返回空列表(run 为 null)。
+    problems_only=true 只看有无依据或矛盾说法的样本。所在会话已删除的样本不再出现。
+    """
+    try:
+        if run_id is None:
+            run = await asyncio.to_thread(faithfulness_state.latest_succeeded_run)
+        else:
+            run = await asyncio.to_thread(faithfulness_state.get_run, run_id)
+            if run is None:
+                raise HTTPException(status_code=404, detail="运行不存在")
+        if run is None:
+            return {"run": None, "items": [], "total": 0}
+        samples = await asyncio.to_thread(faithfulness_state.list_samples, run["run_id"])
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("kb_faithfulness 样本查询失败", exc_info=True)
+        raise HTTPException(status_code=500, detail="查询失败,请稍后重试") from exc
+    if problems_only:
+        samples = [s for s in samples if s["unsupported"] or s["contradicted"]]
+    items = [
+        {
+            **sample,
+            # 落库时已脱敏;这里再过一遍,规则表后来新增的模式也能生效
+            "user_message": mask_pii(str(sample["user_message"])),
+            "reply_summary": mask_pii(str(sample["reply_summary"])),
+        }
+        for sample in samples
+    ]
+    return {"run": run, "items": items, "total": len(items)}

@@ -67,6 +67,9 @@ def ops_db(monkeypatch) -> Settings:
     query_log.ensure_query_log_table()
     with psycopg.connect(_url()) as conn:
         conn.execute("TRUNCATE kb_ops_run CASCADE")
+        # 上一次被中断的测试进程可能留下合成日志;它们落在随机的历史时间窗里,会混进
+        # 别的用例的统计。测试是串行的,此刻不会有别的用例在用这些行
+        conn.execute("DELETE FROM kb_query_log WHERE thread_id LIKE 'it:kb%'")
         conn.commit()
     return settings
 

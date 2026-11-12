@@ -831,3 +831,175 @@ def test_topics_carry_draft_status_and_draft_id(
     _patch_topics(monkeypatch, latest=_run(), topics=[_topic(draft_status="drafted", draft_id=17)])
     (item,) = client.get(_TOPICS, headers=_AUTH).json()["items"]
     assert (item["draft_status"], item["draft_id"]) == ("drafted", 17)
+
+
+# ── 忠实度抽样 ──────────────────────────────────────────
+
+from official_agent.kb_ops.faithfulness_runner import FaithfulnessDisabledError  # noqa: E402
+
+_F_RUNS = "/api/agent/admin/kb/ops/faithfulness/runs"
+_F_SAMPLES = "/api/agent/admin/kb/ops/faithfulness/samples"
+
+
+@pytest.mark.parametrize(
+    ("method", "url"), [("post", _F_RUNS), ("get", _F_RUNS), ("get", _F_SAMPLES)]
+)
+def test_faithfulness_endpoints_require_kb_manage(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, method: str, url: str
+) -> None:
+    assert getattr(client, method)(url).status_code == 401
+    _login(monkeypatch, _identity("agent:monitor"))
+    assert getattr(client, method)(url, headers=_AUTH).status_code == 403
+
+
+def _patch_faithfulness_start(
+    monkeypatch: pytest.MonkeyPatch, *, error: Exception | None = None
+) -> dict[str, Any]:
+    seen: dict[str, Any] = {"audits": []}
+
+    async def start_run(*, days: int, sample_size: int, triggered_by: int) -> str:
+        seen.update(days=days, sample_size=sample_size, triggered_by=triggered_by)
+        if error is not None:
+            raise error
+        return "kbfaith_new"
+
+    monkeypatch.setattr(kb_ops_admin.faithfulness_runner, "start_run", start_run)
+    monkeypatch.setattr(kb_ops_admin.audit, "write_audit", lambda **kw: seen["audits"].append(kw))
+    return seen
+
+
+def test_start_faithfulness_run_returns_run_id_and_audits(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None
+) -> None:
+    seen = _patch_faithfulness_start(monkeypatch)
+    resp = client.post(_F_RUNS, headers=_AUTH, json={"days": 14, "sample_size": 50})
+    assert resp.status_code == 202 and resp.json() == {"run_id": "kbfaith_new", "status": "running"}
+    assert (seen["days"], seen["sample_size"], seen["triggered_by"]) == (14, 50, 2)
+    (audit_row,) = seen["audits"]
+    assert audit_row["agent"] == "kb-faithfulness-runner" and audit_row["decision"] == "u2:run"
+    assert audit_row["action"] == {
+        "op": "run_kb_faithfulness_sampling",
+        "run_id": "kbfaith_new",
+        "days": 14,
+        "sample_size": 50,
+    }
+
+    assert client.post(_F_RUNS, headers=_AUTH).status_code == 202  # 无请求体走默认值
+    assert (seen["days"], seen["sample_size"]) == (7, 30)
+
+
+@pytest.mark.parametrize(
+    "body", [{"days": 0}, {"days": 31}, {"sample_size": 0}, {"sample_size": 101}]
+)
+def test_start_faithfulness_run_validates_body(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None, body: dict
+) -> None:
+    seen = _patch_faithfulness_start(monkeypatch)
+    assert client.post(_F_RUNS, headers=_AUTH, json=body).status_code == 422
+    assert "days" not in seen
+
+
+@pytest.mark.parametrize(
+    ("error", "fragment"),
+    [
+        (
+            FaithfulnessDisabledError("忠实度抽样未开启(配置项 kb_ops_faithfulness_enabled)"),
+            "未开启",
+        ),
+        (RunInProgressError("已有一次忠实度抽样在进行中"), "进行中"),
+    ],
+)
+def test_start_faithfulness_run_conflicts(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    admin: None,
+    error: Exception,
+    fragment: str,
+) -> None:
+    seen = _patch_faithfulness_start(monkeypatch, error=error)
+    resp = client.post(_F_RUNS, headers=_AUTH, json={})
+    assert resp.status_code == 409 and fragment in resp.json()["detail"]
+    assert seen["audits"] == []
+
+
+def test_start_faithfulness_run_failure_does_not_leak_internals(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None
+) -> None:
+    _patch_faithfulness_start(
+        monkeypatch, error=RuntimeError("connection to postgresql://u:secret@db failed")
+    )
+    resp = client.post(_F_RUNS, headers=_AUTH, json={})
+    assert resp.status_code == 500 and resp.json()["detail"] == "启动抽样失败,请稍后重试"
+
+
+def _faithfulness_run(**over) -> dict[str, Any]:
+    base = _run(run_id="kbfaith_a", stats={"faithfulness": 0.86, "citation": {"clean": 40}})
+    return {**base, **over}
+
+
+def _sample(**over) -> dict[str, Any]:
+    base = {
+        "sample_id": 1,
+        "run_id": "kbfaith_a",
+        "conversation_id": 5,
+        "status": "judged",
+        "source_ids": ["kb_fee"],
+        "claims_total": 2,
+        "supported": 2,
+        "unsupported": 0,
+        "contradicted": 0,
+        "claims": [{"text": "加入社团不收会费", "verdict": "supported", "reason": ""}],
+        "user_message": "入社要交钱吗?我手机 13812345678",
+        "reply_summary": "不用交钱。",
+        "asked_at": _T0,
+    }
+    return {**base, **over}
+
+
+def test_list_faithfulness_runs(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None
+) -> None:
+    monkeypatch.setattr(
+        kb_ops_admin.faithfulness_state, "list_runs", lambda *, limit: [_faithfulness_run()]
+    )
+    data = client.get(_F_RUNS, headers=_AUTH).json()
+    assert data["total"] == 1 and data["items"][0]["stats"]["faithfulness"] == 0.86
+
+
+def test_faithfulness_samples_default_to_latest_run_and_filter_problems(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None
+) -> None:
+    samples = [
+        _sample(sample_id=1, contradicted=1),
+        _sample(sample_id=2, unsupported=2),
+        _sample(sample_id=3),
+        _sample(sample_id=4, status="failed", claims_total=0, supported=0, claims=[]),
+    ]
+    state = kb_ops_admin.faithfulness_state
+    monkeypatch.setattr(state, "latest_succeeded_run", lambda: _faithfulness_run())
+    monkeypatch.setattr(state, "list_samples", lambda run_id: list(samples))
+
+    data = client.get(_F_SAMPLES, headers=_AUTH).json()
+    assert data["run"]["run_id"] == "kbfaith_a" and data["total"] == 4
+    assert data["items"][0]["user_message"] == "入社要交钱吗?我手机 138****5678"
+    assert data["items"][0]["claims"][0]["text"] == "加入社团不收会费"
+
+    problems = client.get(f"{_F_SAMPLES}?problems_only=true", headers=_AUTH).json()
+    assert [s["sample_id"] for s in problems["items"]] == [1, 2]
+
+
+def test_faithfulness_samples_empty_state_and_unknown_run(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, admin: None
+) -> None:
+    state = kb_ops_admin.faithfulness_state
+    monkeypatch.setattr(state, "latest_succeeded_run", lambda: None)
+    monkeypatch.setattr(state, "get_run", lambda run_id: None)
+    assert client.get(_F_SAMPLES, headers=_AUTH).json() == {"run": None, "items": [], "total": 0}
+    assert client.get(f"{_F_SAMPLES}?run_id=nope", headers=_AUTH).status_code == 404
+
+    def boom():
+        raise RuntimeError("relation does not exist")
+
+    monkeypatch.setattr(state, "latest_succeeded_run", boom)
+    resp = client.get(_F_SAMPLES, headers=_AUTH)
+    assert resp.status_code == 500 and resp.json()["detail"] == "查询失败,请稍后重试"

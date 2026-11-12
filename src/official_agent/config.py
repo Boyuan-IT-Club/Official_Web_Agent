@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     kb_ops_drafting_enabled: bool = False
     # 处理完(批准/驳回/被顶替)的草稿保留这么多天;待审的草稿不清
     kb_ops_draft_retention_days: int = 365
+    # 在线引用核验:回复里用书名号引的条目是不是本轮检索到的。只把判定记进对话日志,
+    # 不改写回复、不调模型。默认关闭,打开后先看一段时间的误报再决定要不要据此做事
+    kb_citation_check_enabled: bool = False
+    # 离线忠实度抽样:抽已答复的回合,由模型核对回复与当时检索到的条目。默认关闭:
+    # 打开之前先在真实模型上跑过 kb_ops_faithfulness 这个 eval 并留下基线
+    kb_ops_faithfulness_enabled: bool = False
 
     # 状态与记忆(ADR-0007:checkpointer/Store 均用 Postgres,Redis 退出 agent 栈)
     postgres_url: str = "postgresql://localhost:5432/official_agent"

@@ -14,4 +14,5 @@
 - graph:聚类 → 逐主题甄别 → 起草的流水线图,只做计算
 - runner:取数、跑图、落库、清理旧数据
 - publish:把管理员批准的草稿写进知识库(唯一的写入口)
+- faithfulness / faithfulness_runner:离线抽样已答复的对话,核对回复与当时检索到的条目
 """

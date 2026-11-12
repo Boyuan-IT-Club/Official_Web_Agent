@@ -77,7 +77,7 @@ src/official_agent/
 │   ├── telemetry.py        #   conversation_log 落账、KB 引用锚收集、usage/前缀指纹
 │   ├── config_admin.py     #   /admin/config:低敏热改 + 高敏掩码 + base_url 白名单
 │   ├── kb_admin.py         #   /admin/kb*:知识条目 CRUD/入库重嵌
-│   ├── kb_ops_admin.py     #   /admin/kb/ops*:触发离线分析、运行列表、主题清单、草稿审核(列表/修改/批准发布/驳回;挂在 kb_admin 的 router 下)
+│   ├── kb_ops_admin.py     #   /admin/kb/ops*:触发离线分析、运行列表、主题清单、草稿审核(列表/修改/批准发布/驳回)、忠实度抽样;挂在 kb_admin 的 router 下
 │   └── evaluation_admin.py #   /admin/evaluation*:触发/队列/维卡/采纳/驳回/题库
 ├── graphs/                 # 编排层:LangGraph 图
 │   ├── assistant/          #   A:build_assistant_agent(create_agent ReAct)+ 会话压缩
@@ -106,6 +106,7 @@ src/official_agent/
 │   ├── qbank.py            #   interview_qbank:题库 + pick_log
 │   ├── audit.py            #   agent_audit_log:审计(五字段,ADR-0006)
 │   ├── kb_ops.py           #   kb_ops_run / kb_ops_topic / kb_draft:离线分析的运行记录、主题清单、草稿 + 运行锁与草稿锁
+│   ├── kb_faithfulness.py  #   kb_faithfulness_run / _sample:回复忠实度抽样(样本随对话日志级联删除)
 │   └── config_store.py     #   agent_config:热配置(DB 覆盖 env)
 ├── tools/                  # 基础设施:后端 REST 的语义化封装
 │   ├── client.py           #   BackendClient + 异常层级(AuthError/UnavailableError/BackendError)
@@ -120,8 +121,10 @@ src/official_agent/
 │                           #   / draft(受限检索循环起草)/ verify + citation(审核;引文与数字由代码复核、代码裁决)
 │                           #   / drafting + dedupe(主题级编排与查重)/ graph(聚类→并行甄别→起草,只计算)
 │                           #   / runner(抢锁、取数、落库)/ publish(管理员批准后才写知识库,唯一的写入口)
+│                           #   / faithfulness + faithfulness_runner(离线抽样核对回复与检索到的条目)
 ├── memory/                 # 长期记忆:store(agent_memory 表) / extract(后台提取+闸门) / recall(注入 system 末尾)
 ├── security/               # 横切:pii(脱敏)/ injection_guard(数据区+扫描)/ fabrication_guard
+│                           #   / citation_guard(引用核验,只观测)/ guard_verdict(多个守卫的判定怎么存进一列)
 ├── prompts/                # prompt 唯一权威(一图一节点一文件 + frontmatter,ADR-0004)
 ├── evals/                  # eval 集 + 统一 runner(python -m evals / evals/run_evals.py)
 ├── observability.py        # Langfuse 接线(fail-open)+ trace id(contextvar/W3C)+ PII 遮蔽 handler
@@ -308,7 +311,7 @@ flowchart TD
 | 表 | 内容 | 关键约束 |
 |---|---|---|
 | `agent_threads` | 会话档案(thread_id/属主/状态) | thread_id 全局唯一;软删+保留期清理 |
-| `agent_conversation_log` | 对话日志(问题摘要/工具/耗时/usage/轮级 trace_id/守卫判定) | fail-open 写入 |
+| `agent_conversation_log` | 对话日志(问题摘要/工具/耗时/usage/轮级 trace_id/守卫判定) | fail-open 写入;`guard_verdict` 是 `守卫名=判定` 用分号连接 |
 | `evaluation_scorecard` | AI 参考分卡(card JSONB/total/hard_zero) | UNIQUE(resume,cycle,card_version);状态机 CHECK |
 | `evaluation_job` | 执行 job(状态机/attempts/qbank_status) | 部分唯一索引:活跃 job 每 (resume,cycle) 一条 |
 | `interview_qbank` | 题库信封(v2 JSONB) | 版本递增 |
@@ -318,6 +321,7 @@ flowchart TD
 | `kb_source` / `kb_faq` / `kb_doc` / `kb_chunks` | 知识库来源/内容/向量 | 禁跨 embedding 模型混排;`kb_source.cycle_id` 非空的条目只在该招新周期开放时进检索;`kb_faq.alt_questions` 的每种问法各自成块,同一条 FAQ 在一次检索结果里只占一个名额 |
 | `kb_query_log` | 对话里每次知识库检索一行(脱敏后的问题/结局/门槛前最高分/命中条目/生效周期) | fail-open 写入;按 `thread_id` 随会话删除;`trace_id` 关联对话日志 |
 | `kb_ops_run` / `kb_ops_topic` | 知识库运营的离线分析:一次运行一行,产出的主题清单(热度/近失数/归类/样本引用/起草结局)随运行级联 | 同一时刻只跑一次(advisory lock);主题不存提问原文,只存 `kb_query_log` 行 id,样本随会话删除消失;只留最近若干次运行 |
+| `kb_faithfulness_run` / `kb_faithfulness_sample` | 回复忠实度抽样:一次运行一行,抽到的每轮对话一行(逐条说法的结论与计数) | 样本外键挂对话日志行并级联删除(随会话删除);问题与回复不重复存;只留最近若干次运行 |
 | `kb_draft` | 知识库草稿(补问法/新 FAQ/待补充):逐句出处、审核结论、审核状态 | 是 agent 的私有状态,不是知识库条目;状态只从 pending 走一次;发布由管理员批准触发、按草稿加锁、先审计后发布;不随运行删除,处理完的到期清理 |
 
 ## 9. 横切机制

@@ -1,5 +1,5 @@
 """知识库运营的确定性门禁执行器:聚类、近失判定、缺口提示、样本过滤、引文复核、
-草稿裁决、查重。
+草稿裁决、查重、引用核验、守卫判定编码、忠实度计数。
 
 数据集 evals/datasets/kb_ops_probes.yaml。全部是纯函数断言:聚类与查重用数据集里
 写死的向量,审核者的判断也写死在数据集里,不调嵌入端点也不调模型,任何环境都能跑。
@@ -24,6 +24,7 @@ from official_agent.kb_ops.cluster import (
     normalize_query,
 )
 from official_agent.kb_ops.dedupe import KnownQuestion, most_similar
+from official_agent.kb_ops.faithfulness import FaithfulnessOutput, review_claims, score_turn
 from official_agent.kb_ops.triage import looks_like_instruction
 from official_agent.kb_ops.verify import (
     ReviewOutput,
@@ -32,6 +33,8 @@ from official_agent.kb_ops.verify import (
     precheck,
     ruling,
 )
+from official_agent.security.citation_guard import check_citations
+from official_agent.security.guard_verdict import format_verdicts, parse_verdicts
 
 
 def _load_yaml(path: Path) -> Any:
@@ -137,9 +140,47 @@ def _dedupe_match(case: dict[str, Any], spec: dict[str, Any]) -> str | None:
     return match.ref if match else None
 
 
+def _faithfulness_outcome(case: dict[str, Any], chunks: dict[str, Any]) -> dict[str, Any]:
+    """写死的模型输出经代码复核后的计数与逐条原因。"""
+    findings = review_claims(FaithfulnessOutput.model_validate({"claims": case["claims"]}), chunks)
+    score = score_turn(findings)
+    return {
+        "supported": score.supported,
+        "unsupported": score.unsupported,
+        "contradicted": score.contradicted,
+        "faithful": score.faithful,
+        "reasons": [f.reason for f in findings],
+    }
+
+
+def _guard_verdict_roundtrip(case: dict[str, Any]) -> dict[str, Any]:
+    """守卫判定的编码与解码:给 verdicts 测编码(再解回来),给 stored 测解码。"""
+    if "stored" in case:
+        return {"parsed": parse_verdicts(case["stored"])}
+    stored = format_verdicts(case["verdicts"])
+    return {"stored": stored, "parsed": parse_verdicts(stored)}
+
+
 async def run_suite(path: Path, *, distribution: bool = False, **_: Any) -> SuiteResult:
     data = _load_yaml(path) or {}
     cases = _clustering_cases(data["clustering"])
+    cases += _value_cases(
+        "citation_guard",
+        data.get("citation_guard") or [],
+        lambda row: check_citations(
+            str(row["reply"]), list(row.get("retrieved") or []), searched=bool(row["searched"])
+        ),
+    )
+    cases += _value_cases(
+        "guard_verdict", data.get("guard_verdict") or [], _guard_verdict_roundtrip
+    )
+    faithfulness_spec = data.get("faithfulness") or {}
+    faithfulness_chunks = chunk_records(faithfulness_spec.get("chunks") or {})
+    cases += _value_cases(
+        "faithfulness",
+        faithfulness_spec.get("cases") or [],
+        lambda row: _faithfulness_outcome(row, faithfulness_chunks),
+    )
     cases += _value_cases(
         "citation",
         data.get("citation") or [],

@@ -259,3 +259,121 @@ dedupe:
     - { id: below_threshold, vector: [0.5, 0, 0.866], expect: null }
     - { id: at_threshold, vector: [0.8, 0, 0.6], expect: kb_fee }
     - { id: unrelated, vector: [0, 0, 1], expect: null }
+
+# ── 在线引用核验:回复里用书名号引的条目,是不是本轮检索到的 ──
+# expect 是守卫的判定;null = 回复里没有书名号引用,守卫不适用。
+citation_guard:
+  - id: cites_a_retrieved_source
+    reply: 据知识库《技术部介绍》,技术部负责官网开发。
+    retrieved: [技术部介绍, 招新流程]
+    searched: true
+    expect: clean
+  - id: shortened_or_extended_title_still_matches
+    reply: 详见《技术部介绍》与《招新流程(2026)》。
+    retrieved: [技术部介绍(2026 版), 招新流程]
+    searched: true
+    expect: clean
+  - id: cites_a_source_that_was_not_retrieved
+    reply: 据《技术部介绍》与《奖学金办法》,社团每学期评选奖学金。
+    retrieved: [技术部介绍]
+    searched: true
+    expect: "unverified:奖学金办法"
+  - id: searched_but_nothing_hit
+    reply: 据《会费说明》,入社不收费。
+    retrieved: []
+    searched: true
+    expect: "unverified:会费说明"
+  - id: cites_without_searching_this_turn
+    reply: 上面提到的《技术部介绍》里有写。
+    retrieved: []
+    searched: false
+    expect: "unsearched:技术部介绍"
+  - id: no_citation_in_reply
+    reply: 知识库里没有这部分,建议查看官网。
+    retrieved: [技术部介绍]
+    searched: true
+    expect: null
+  - id: single_character_overlap_is_not_a_match
+    reply: 据《部》的说明,可以报名。
+    retrieved: [技术部介绍]
+    searched: true
+    expect: "unverified:部"
+
+# ── 守卫判定在对话日志里的编码:守卫名=判定,分号连接 ──
+guard_verdict:
+  - id: two_guards
+    verdicts: { fabrication_empty_tools: clean, kb_citation: "unverified:奖学金办法" }
+    expect:
+      stored: "fabrication_empty_tools=clean;kb_citation=unverified:奖学金办法"
+      parsed: { fabrication_empty_tools: clean, kb_citation: "unverified:奖学金办法" }
+  - id: no_guard_ran
+    verdicts: {}
+    expect: { stored: null, parsed: {} }
+  # 判定里的分号与换行会把一列切坏:编码时换掉
+  - id: separator_inside_a_verdict_is_neutralized
+    verdicts: { kb_citation: "unverified:招新;面试\n安排" }
+    expect:
+      stored: "kb_citation=unverified:招新,面试 安排"
+      parsed: { kb_citation: "unverified:招新,面试 安排" }
+  # 只有编造守卫一个写入方的时期存的是裸判定:读成编造守卫的判定
+  - id: legacy_bare_value
+    stored: "triggered:查询结果"
+    expect: { parsed: { fabrication_empty_tools: "triggered:查询结果" } }
+  - id: empty_value
+    stored: ""
+    expect: { parsed: {} }
+
+# ── 忠实度计数:模型逐条判断 + 代码复核 → 每轮的计数 ──
+# claims 是写死的模型输出。reasons:ok / judge_unsupported / judge_contradicted /
+# chunk_not_in_evidence / quote_missing
+faithfulness:
+  chunks:
+    "kb_fee#0":
+      source_id: kb_fee
+      title: 会费说明
+      type: faq
+      text: "Q: 加入社团需要交费吗?\nA: 本社团不向成员收取会费,日常活动经费由学院拨款和赞助支持。"
+    "kb_interview#1":
+      source_id: kb_interview
+      title: 技术部面试
+      text: 技术部面试分两轮:第一轮是三十分钟的技术面,第二轮是部长面。面试安排在周六下午,地点在信息楼 302。
+  cases:
+    - id: every_claim_grounded
+      claims:
+        - { text: 加入社团不收会费, verdict: supported, chunk_id: "kb_fee#0", quote: 本社团不向成员收取会费 }
+        - { text: 技术部面试分两轮, verdict: supported, chunk_id: "kb_interview#1", quote: 技术部面试分两轮 }
+      expect: { supported: 2, unsupported: 0, contradicted: 0, faithful: true, reasons: [ok, ok] }
+
+    # 模型说有依据,但引文原文里没有,或引的块不在证据里:都按无依据计
+    - id: supported_without_a_real_quote_does_not_count
+      claims:
+        - { text: 加入社团不收会费, verdict: supported, chunk_id: "kb_fee#0", quote: 入社完全免费无需任何费用 }
+        - { text: 面试结果一周内通知, verdict: supported, chunk_id: "kb_notice#4", quote: 面试结果一周内通知 }
+      expect:
+        supported: 0
+        unsupported: 2
+        contradicted: 0
+        faithful: false
+        reasons: [quote_missing, chunk_not_in_evidence]
+
+    - id: quote_from_another_chunk_does_not_count
+      claims:
+        - { text: 加入社团不收会费, verdict: supported, chunk_id: "kb_interview#1", quote: 本社团不向成员收取会费 }
+      expect: { supported: 0, unsupported: 1, contradicted: 0, faithful: false, reasons: [quote_missing] }
+
+    - id: mixed_turn
+      claims:
+        - { text: 加入社团不收会费, verdict: supported, chunk_id: "kb_fee#0", quote: 本社团不向成员收取会费 }
+        - { text: 面试结果一周内通知, verdict: unsupported }
+        - { text: 面试安排在周日上午, verdict: contradicted, chunk_id: "kb_interview#1", quote: 面试安排在周六下午 }
+      expect:
+        supported: 1
+        unsupported: 1
+        contradicted: 1
+        faithful: false
+        reasons: [ok, judge_unsupported, judge_contradicted]
+
+    # 回复里没有可核对的说法(比如如实说知识库里没有):不算忠实,也不算不忠实
+    - id: no_claims_to_check
+      claims: []
+      expect: { supported: 0, unsupported: 0, contradicted: 0, faithful: false, reasons: [] }

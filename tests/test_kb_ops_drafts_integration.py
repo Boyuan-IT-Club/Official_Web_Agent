@@ -45,6 +45,8 @@ _REAL_WRITE_AUDIT = audit_state.write_audit
 
 _PROD_DB_NAME = "official_agent"
 _ACTOR = "it-kbops"
+#: 夹具建的知识条目都带这个标签;标签在条目被改动(加问法)后仍然保留,清理靠它
+_KB_TAG = "it-kbops-drafts"
 _POLICY = ClusterPolicy(
     similarity_threshold=0.8, min_queries=2, min_threads=2, near_miss_floor=0.37
 )
@@ -74,8 +76,13 @@ def _execute(sql: str, params: tuple = ()) -> None:
 
 
 def _clean_kb() -> None:
+    """删掉本档往知识库里放的条目:夹具建的(按标签认)与批准草稿发布出来的(按 id 前缀认)。
+
+    不能按更新人认:批准补问法会把目标条目的更新人改成批准的管理员。
+    """
     _execute(
-        "DELETE FROM kb_source WHERE updated_by = %s OR source_id LIKE 'kb\\_draft%%'", (_ACTOR,)
+        "DELETE FROM kb_source WHERE %s = ANY(tags) OR source_id LIKE 'kb\\_draft%%'",
+        (_KB_TAG,),
     )
 
 
@@ -106,6 +113,9 @@ def drafts_db(monkeypatch) -> Settings:
     kb_store.list_faq_questions()  # 触发知识库表自举
     _execute("TRUNCATE kb_ops_run CASCADE")
     _execute("TRUNCATE kb_draft")
+    # 上一次被中断的测试进程可能留下合成日志;它们落在随机的历史时间窗里,会混进
+    # 别的用例的统计。测试是串行的,此刻不会有别的用例在用这些行
+    _execute("DELETE FROM kb_query_log WHERE thread_id LIKE 'it:kb%%'")
     _clean_kb()
     yield settings
     _clean_kb()
@@ -415,6 +425,7 @@ async def _seed_kb() -> dict[str, str]:
             title="社团章程",
             type="doc",
             content_md=f"# 经费\n{_FEE_TEXT}",
+            tags=(_KB_TAG,),
             updated_by=_ACTOR,
             cycle_id=12,
         ),
@@ -426,6 +437,7 @@ async def _seed_kb() -> dict[str, str]:
             type="faq",
             question="面试在哪里?",
             answer="面试在信息楼 302。",
+            tags=(_KB_TAG,),
             updated_by=_ACTOR,
         ),
         embedder=_embed,
@@ -499,8 +511,12 @@ def _roles() -> DraftRoles:
 
 
 async def _run_with_drafting(log: _Log, *, cycle_ids: tuple[int, ...] = (12,)) -> str:
+    # 每次调用一个新的 run_id:同一段日志可以连着分析两次
     request = RunRequest(
-        run_id=f"kbops_{log.tag}", window_start=log.start, window_end=log.end, triggered_by=2
+        run_id=f"kbops_{secrets.token_hex(4)}",
+        window_start=log.start,
+        window_end=log.end,
+        triggered_by=2,
     )
     kb_ops_state.create_run(
         request.run_id,
@@ -585,8 +601,7 @@ async def test_rerun_supersedes_the_previous_pending_drafts(log) -> None:
     first = await _run_with_drafting(log)
     first_ids = _draft_ids(first)
 
-    log.tag = secrets.token_hex(4)  # 第二次运行换一个 run_id,读的是同一段日志
-    second = await _run_with_drafting(log)
+    second = await _run_with_drafting(log)  # 读的是同一段日志
     second_ids = _draft_ids(second)
 
     assert {kb_ops_state.get_draft(i)["status"] for i in first_ids.values()} == {"superseded"}

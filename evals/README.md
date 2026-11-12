@@ -38,10 +38,11 @@ uv run python evals/run_evals.py --write-baseline evals/baselines.json # 落新�
 | `datasets/cv_dive_report.yaml` | datasets | `cv_dive_report` | LLM_* 配置 + `real_resumes/` 有样本 |
 | `datasets/scoring_probes.yaml` | datasets | `scoring_probes` | LLM_* 配置;CD 部署后在生产容器里自动跑(只报告) |
 | `datasets/memory_probes.yaml` | datasets | `memory_probes` | LLM_* 配置(提取闸门 + 模型,不落库) |
-| `datasets/kb_ops_probes.yaml` | datasets | `kb_ops_probes` | 无(确定性:聚类/近失判定/样本过滤/引文复核/草稿裁决/查重,向量与审核输出写死在数据集里) |
+| `datasets/kb_ops_probes.yaml` | datasets | `kb_ops_probes` | 无(确定性:聚类/近失判定/样本过滤/引文复核/草稿裁决/查重/引用核验/守卫判定编码/忠实度计数,向量与模型输出写死在数据集里) |
 | `datasets/kb_ops_triage.yaml` | datasets | `kb_ops_triage` | LLM_* 配置(缺口甄别:样本过滤 + 模型 + 输出闸门,不读库不落库);尚无基线 |
 | `datasets/kb_ops_verify.yaml` | datasets | `kb_ops_verify` | LLM_* 配置(草稿审核:模型 + 代码复核与裁决,不读库不落库);尚无基线 |
 | `datasets/kb_ops_injection.yaml` | datasets | `kb_ops_injection` | 无(确定性:三个角色的输出写死成「已被带偏」,断言代码闸门挡住夹带内容) |
+| `datasets/kb_ops_faithfulness.yaml` | datasets | `kb_ops_faithfulness` | LLM_* 配置(回复忠实度核对:模型 + 代码复核与计数,不读库不落库);尚无基线 |
 
 ## 专项数据集与纪律
 
