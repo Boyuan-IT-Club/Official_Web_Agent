@@ -107,10 +107,14 @@ POST /chat(web/routes.chat,ChatBody 校验 + JWT 鉴权)
 ```
 POST /admin/evaluation/run(evaluation_admin,权限 evaluation:run)
   → runner.submit:后端权威归属核对 → create_jobs(幂等,活跃去重)
-  → _execute_job:评分段(_do_scoring:取数→归属硬断言→脱敏→评分子图→落卡)
+  → _execute_job:评分段(_do_scoring:取数→归属硬断言→脱敏→评分子图→落卡→用量日志)
   → 题库段(_do_qbank:出题 bundle→qbank 落库→用量日志)
   → mark succeeded(带 qbank_status)→ 完成审计 → 评审队列(list_review_queue)
 ```
+
+用量日志:两段各落一行到 `agent_conversation_log`(`channel='evaluation'`,
+`thread_id='eval:<job_id>'`),`tools` 列是段标记——评分段 `["scoring"]`,题库段
+`["explore","grilling"]`;按段统计成本以这一列为准。写入 fail-open。
 
 失败语义:评分失败 job 落 failed(可重试,上限交人工);题库线失败不影响评分卡
 (job succeeded + qbank_status=failed,管理面可见真实原因)。

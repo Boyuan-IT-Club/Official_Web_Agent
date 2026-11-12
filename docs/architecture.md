@@ -205,7 +205,7 @@ flowchart TD
     CJ --> D["派发(_sem 并发闸)"]
     D --> P["pending"]
     P --> R["running(attempts+1,简历状态 6)"]
-    R --> SC["评分段 _do_scoring<br/>取数→归属硬断言→脱敏→评分子图→落卡"]
+    R --> SC["评分段 _do_scoring<br/>取数→归属硬断言→脱敏→评分子图→落卡→用量日志"]
     SC --> QB["题库段 _do_qbank<br/>出题 bundle→落库→用量日志"]
     QB -->|成功| OK["succeeded<br/>(card_version + qbank_status)"]
     QB -->|题库线失败| OKF["succeeded + qbank_status=failed<br/>(评分卡有效,原因直达管理面)"]
