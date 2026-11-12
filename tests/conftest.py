@@ -85,6 +85,9 @@ def web_no_real_pg(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("official_agent.memory.store.purge_expired", lambda: 0)
     monkeypatch.setattr("official_agent.memory.recall.memory_enabled_for", lambda _i: False)
 
+    # ── 5) 知识库检索日志:删会话时按 thread 清理会连 PG(删除语义有专门用例就地覆盖)──
+    monkeypatch.setattr("official_agent.kb.query_log.delete_thread_queries", lambda _tid: 0)
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _close_evaluation_pool():

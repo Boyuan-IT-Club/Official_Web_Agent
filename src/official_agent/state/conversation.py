@@ -46,6 +46,10 @@ class ConversationRecord:
     prefix_hash: str | None
     compress_event: str | None
     created_at: Any
+    #: 轮级入口 trace id;与 kb_query_log.trace_id 同值,两表按它关联
+    trace_id: str | None = None
+    #: 本轮回复出口守卫的判定(如 "clean" / "triggered:查询结果");没跑守卫的轮次为 None
+    guard_verdict: str | None = None
 
 
 def _conn() -> psycopg.Connection[dict[str, Any]]:
@@ -72,6 +76,8 @@ def ensure_conversation_table() -> None:
                 cache_hit_tokens integer,
                 cache_miss_tokens integer,
                 compress_event   text,
+                trace_id         text,
+                guard_verdict    text,
                 created_at       timestamptz NOT NULL DEFAULT now()
             );
             CREATE INDEX IF NOT EXISTS idx_conversation_user
@@ -80,12 +86,21 @@ def ensure_conversation_table() -> None:
                 ON agent_conversation_log (thread_id, created_at DESC);
             """
         )
-        # prefix_hash、compress_event 为增量加列,老库幂等补齐
-        # (存量表缺 compress_event → INSERT 全失败且被
-        # fail-open 吞掉 = 整表静默停写,必须随建表一起补)
+        # prefix_hash、compress_event、trace_id、guard_verdict 为增量加列,老库幂等补齐
+        # (存量表缺列 → INSERT 全失败且被 fail-open 吞掉 = 整表静默停写,
+        # 必须随建表一起补)
         conn.execute("ALTER TABLE agent_conversation_log ADD COLUMN IF NOT EXISTS prefix_hash text")
         conn.execute(
             "ALTER TABLE agent_conversation_log ADD COLUMN IF NOT EXISTS compress_event text"
+        )
+        conn.execute("ALTER TABLE agent_conversation_log ADD COLUMN IF NOT EXISTS trace_id text")
+        conn.execute(
+            "ALTER TABLE agent_conversation_log ADD COLUMN IF NOT EXISTS guard_verdict text"
+        )
+        # 从一条检索日志(kb_query_log)反查它所在的那一轮对话
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversation_trace "
+            "ON agent_conversation_log (trace_id)"
         )
 
 
@@ -175,13 +190,17 @@ def write_conversation(
     cache_miss_tokens: int | None = None,
     prefix_hash: str | None = None,
     compress_event: str | None = None,
+    trace_id: str | None = None,
+    guard_verdict: str | None = None,
 ) -> ConversationRecord:
     """落一行对话运营数据(SSE 每轮结束调用)。
 
     PII 过滤:user_message / reply_summary 写入前强制 mask_pii。
     错误行(error_code 非空):只存 error_code + 元数据,user_message/reply_summary 置空。
     tools 序列化为 jsonb;usage 列由调用方传 extract_usage 结果;
-    prefix_hash 为缓存前缀稳定性证据;compress_event 为压缩事件留痕。
+    prefix_hash 为缓存前缀稳定性证据;compress_event 为压缩事件留痕;
+    trace_id 为轮级入口 id(关联 kb_query_log);guard_verdict 为回复出口守卫的判定,
+    没跑守卫的轮次留空。
     """
     if error_code:
         # 异常/错误行不存对话内容
@@ -197,12 +216,13 @@ def write_conversation(
             INSERT INTO agent_conversation_log
                 (thread_id, user_id, channel, user_message, reply_summary,
                 tools, duration_ms, error_code, input_tokens, output_tokens,
-                cache_hit_tokens, cache_miss_tokens, prefix_hash, compress_event)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                cache_hit_tokens, cache_miss_tokens, prefix_hash, compress_event,
+                trace_id, guard_verdict)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id, thread_id, user_id, channel, user_message, reply_summary,
                       tools, duration_ms, error_code, input_tokens, output_tokens,
                       cache_hit_tokens, cache_miss_tokens, prefix_hash,
-                      compress_event, created_at
+                      compress_event, trace_id, guard_verdict, created_at
             """,
             (
                 thread_id,
@@ -219,6 +239,8 @@ def write_conversation(
                 cache_miss_tokens,
                 prefix_hash,
                 compress_event,
+                trace_id,
+                guard_verdict,
             ),
         ).fetchone()
     if row is None:
@@ -246,6 +268,8 @@ def _record(row: dict[str, Any]) -> ConversationRecord:
         prefix_hash=row.get("prefix_hash"),
         compress_event=row["compress_event"],
         created_at=row["created_at"],
+        trace_id=row.get("trace_id"),
+        guard_verdict=row.get("guard_verdict"),
     )
 
 
@@ -297,7 +321,8 @@ def get_conversation(conversation_id: int) -> dict[str, Any] | None:
             """
             SELECT id, thread_id, user_id, channel, user_message, reply_summary,
                    tools, duration_ms, error_code, input_tokens, output_tokens,
-                   cache_hit_tokens, cache_miss_tokens, prefix_hash, created_at
+                   cache_hit_tokens, cache_miss_tokens, prefix_hash, trace_id,
+                   guard_verdict, created_at
             FROM agent_conversation_log
             WHERE id = %s
             """,

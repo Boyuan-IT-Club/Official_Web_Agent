@@ -412,6 +412,8 @@ class _TurnAccum:
     )
     # 本轮停在写操作确认处(interrupt 挂起):载荷原样给前端渲染确认卡片
     confirm: dict[str, Any] | None = None
+    # 回复出口守卫的判定,随对话日志落库;没跑守卫的轮次保持 None
+    guard_verdict: str | None = None
 
 
 def _feed_text_chunk(
@@ -515,17 +517,19 @@ async def _consume_model_stream(
 
 
 async def _toolless_guarded_reply(
-    agent: Any, config: dict, reply_chunks: list[str]
+    agent: Any, config: dict, acc: _TurnAccum
 ) -> AsyncIterator[str]:
     """无工具档:整段回复过编造守卫后一次性下发(缓冲直播)。
 
     守卫在一切持久化之前——直播、conversation_log、checkpointer 三面同用
     改写文本;压缩必须排在其后,否则编造原文会被压进摘要。
+    判定写进 acc.guard_verdict,随本轮对话日志落库。
     """
     from official_agent.security.fabrication_guard import guard_empty_tools_reply
     from official_agent.security.pii import mask_pii_output
 
-    final_reply, verdict = guard_empty_tools_reply("".join(reply_chunks))
+    final_reply, verdict = guard_empty_tools_reply("".join(acc.reply_chunks))
+    acc.guard_verdict = verdict
     # toolless 回复出口同过 PII 掩(与 cli 对称;掩后文本进回写)
     final_reply, _pii_trace = mask_pii_output(final_reply)
     if verdict != "clean":
@@ -534,7 +538,7 @@ async def _toolless_guarded_reply(
             "fabrication_empty_tools",
             verdict,
         )
-        reply_chunks[:] = [final_reply]
+        acc.reply_chunks[:] = [final_reply]
         await _rewrite_last_ai_message(agent, config, final_reply)
     if final_reply:
         yield _sse({"type": "delta", "role": "assistant", "content": final_reply})
@@ -775,7 +779,7 @@ async def _stream_turn(
         from official_agent.graphs.assistant import build_system_prompt
 
         if toolless and error_code is None:
-            async for event in _toolless_guarded_reply(session.agent, config, acc.reply_chunks):
+            async for event in _toolless_guarded_reply(session.agent, config, acc):
                 yield event
 
         # 回复出口 PII 守卫——全部会话适用。流式 delta 已逐块掩(尾部缓冲抗
@@ -807,6 +811,7 @@ async def _stream_turn(
             usage=_usage_out(acc.usage),
             prefix_hash=p_hash,
             compress_event=compress_event,
+            guard_verdict=acc.guard_verdict,
         )
         # 记忆提取放在落账之后、done 之前触发(后台任务,不阻塞本轮收尾)
         if error_code is None and acc.confirm is None and resume is None:
@@ -1027,11 +1032,12 @@ async def delete_my_session(
     auth: Annotated[tuple[ResolvedIdentity, str], Depends(_authenticate)],
 ) -> Response:
     """用户删除自己的会话:档案行物理 DELETE + checkpoint
-    三表物理清理 + 对话日志物理清理;进程内运行时对象同步移除。
+    三表物理清理 + 对话日志与知识库检索日志物理清理;进程内运行时对象同步移除。
 
     Langfuse trace 的删除需经其外部 API(自托管/云与 trace 关联键尚未确定)
     ——本端点删除后 trace 已无可关联档案,残余 trace 按留存策略
     过期,运维手册见 docs/eval-observability.md 同级说明。"""
+    from official_agent.kb.query_log import delete_thread_queries
     from official_agent.state.conversation import delete_thread_conversations
     from official_agent.state.pg import purge_thread_checkpoints
     from official_agent.state.threads import hard_delete_thread, resolve_thread
@@ -1057,6 +1063,8 @@ async def delete_my_session(
         try:
             await asyncio.to_thread(purge_thread_checkpoints, thread_id)
             await asyncio.to_thread(delete_thread_conversations, thread_id)
+            # 检索日志里存着这段对话里问过的问题(脱敏后),同样属于会话留存
+            await asyncio.to_thread(delete_thread_queries, thread_id)
             # 该会话里整理出的长期记忆一并删除:删会话即撤回这段对话的一切留存
             from official_agent.memory import store as memory_store
 

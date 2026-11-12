@@ -104,7 +104,7 @@ def test_masked_handler_masks_llm_prompts() -> None:
 def test_delete_session_purges_all_store_faces(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """用户删除 → 档案硬删 + checkpoint 清理 + 对话日志清理,三面联动。"""
+    """用户删除 → 档案硬删 + checkpoint 清理 + 对话日志清理 + 检索日志清理,四面联动。"""
     from official_agent.tools.client import BackendUnavailableError  # noqa: F401
 
     async def _resolve(*_a: object, **_k: object) -> dict:
@@ -134,6 +134,11 @@ def test_delete_session_purges_all_store_faces(
     monkeypatch.setattr(
         conv, "delete_thread_conversations", lambda tid: called.append(f"conv:{tid}") or 5
     )
+    import official_agent.kb.query_log as kb_query_log
+
+    monkeypatch.setattr(
+        kb_query_log, "delete_thread_queries", lambda tid: called.append(f"kbq:{tid}") or 2
+    )
     monkeypatch.setattr(
         thread_store,
         "hard_delete_thread",
@@ -145,7 +150,57 @@ def test_delete_session_purges_all_store_faces(
         headers={"Authorization": "Bearer tok"},
     )
     assert resp.status_code == 204
-    assert sorted(called) == ["ckpt:web:u7:deadbeef", "conv:web:u7:deadbeef", "row:web:u7:deadbeef"]
+    assert sorted(called) == [
+        "ckpt:web:u7:deadbeef",
+        "conv:web:u7:deadbeef",
+        "kbq:web:u7:deadbeef",
+        "row:web:u7:deadbeef",
+    ]
+    # 档案行最后删:数据面没清完之前它得留着,删除才能重试
+    assert called[-1] == "row:web:u7:deadbeef"
+
+
+def test_delete_session_fails_loudly_when_query_log_purge_fails(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """检索日志没删掉 → 500 且档案行保留(可重试),不能报「已删除」。"""
+
+    async def _resolve(*_a: object, **_k: object) -> dict:
+        return _identity(7)
+
+    monkeypatch.setattr("official_agent.web.auth.resolve", _resolve)
+
+    import official_agent.kb.query_log as kb_query_log
+    import official_agent.state.conversation as conv
+    import official_agent.state.pg as pg_mod
+    import official_agent.state.threads as thread_store
+
+    rec = type(
+        "Rec", (), {"thread_id": "web:u7:kbqfail", "owner_user_id": 7, "status": "active"}
+    )()
+    monkeypatch.setattr(
+        thread_store, "resolve_thread", lambda tid, uid: rec if tid == "web:u7:kbqfail" else None
+    )
+    monkeypatch.setattr(pg_mod, "purge_thread_checkpoints", lambda tid: 3)
+    monkeypatch.setattr(conv, "delete_thread_conversations", lambda tid: 5)
+
+    def _boom(_tid: str) -> int:
+        raise RuntimeError("PG 抖动")
+
+    monkeypatch.setattr(kb_query_log, "delete_thread_queries", _boom)
+    hard_deleted: list[str] = []
+    monkeypatch.setattr(
+        thread_store,
+        "hard_delete_thread",
+        lambda tid, *, owner_user_id: hard_deleted.append(tid) or True,
+    )
+
+    resp = client.delete(
+        "/api/agent/sessions/web:u7:kbqfail", headers={"Authorization": "Bearer tok"}
+    )
+    assert resp.status_code == 500
+    assert hard_deleted == []
+    assert "web:u7:kbqfail" not in session_store.deleting
 
 
 def test_delete_session_rejects_non_owner(client: TestClient, monkeypatch) -> None:

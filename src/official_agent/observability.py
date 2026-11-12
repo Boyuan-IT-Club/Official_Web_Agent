@@ -94,6 +94,17 @@ def current_trace_id() -> str:
     return span_tid or _turn_trace_id.get() or _ZERO_TRACE_ID
 
 
+def turn_trace_id() -> str:
+    """本轮入口设的 trace id(set_turn_trace_id 归一后的值),永非空。
+
+    与 current_trace_id 的区别是不看活跃 span。同一轮里要互相关联的几张观测表
+    (对话日志、知识库检索日志)用它取值:current_trace_id 在图执行内优先返回
+    Langfuse span 的 id,而轮末落账在图外、拿不到那个 id,两处各取各的就对不上。
+    入口没设时退回全零兜底。
+    """
+    return _turn_trace_id.get() or _ZERO_TRACE_ID
+
+
 def traceparent_header() -> dict[str, str]:
     """出站请求的 W3C traceparent 头。
 

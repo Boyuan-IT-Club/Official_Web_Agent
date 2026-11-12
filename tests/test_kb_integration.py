@@ -75,6 +75,9 @@ def _patch_pg(monkeypatch) -> None:
     )
     monkeypatch.setattr("official_agent.kb.store.get_settings", lambda: s)
     monkeypatch.setattr("official_agent.kb.schema.get_settings", lambda: s)
+    # 检索日志走通用连接池(state/pools),两处的库 URL 也要指到测试库
+    monkeypatch.setattr("official_agent.kb.query_log.get_settings", lambda: s)
+    monkeypatch.setattr("official_agent.state.pools.get_settings", lambda: s)
 
 
 def _axis_embedder():
@@ -356,3 +359,186 @@ async def test_hybrid_keyword_rescue_and_threshold_real_pg(kb_env) -> None:
     # 向量与字面都对不上:返回空,「查不到」才说得出来
     misses = await store.search("ax1 天气", embedder=_axis_embedder(), top_k=5, min_score=0.45)
     assert all(h.source_id != rescued for h in misses)
+
+
+# ── 招新周期过滤 ──────────────────────────────────────────
+
+
+async def test_cycle_bound_source_only_visible_while_its_cycle_is_open(kb_env) -> None:
+    """常青条目始终可检;绑定周期的条目只在该周期开放时可检,换届后自动退出。"""
+    run = secrets.token_hex(3)
+    evergreen = await store.ingest_source(
+        SourceInput(
+            title="社团简介", type="doc", content_md="ax0 常青内容", updated_by=f"it-{run}"
+        ),
+        embedder=_axis_embedder(),
+    )
+    bound = SourceInput(
+        title="本届面试安排",
+        type="doc",
+        content_md="ax0 面试在周六",
+        cycle_id=12,
+        updated_by=f"it-{run}",
+    )
+    this_cycle = await store.ingest_source(bound, embedder=_axis_embedder())
+
+    async def found(cycle_ids: tuple[int, ...]) -> set[str]:
+        hits = await store.search(
+            "ax0", embedder=_axis_embedder(), top_k=10, cycle_ids=cycle_ids
+        )
+        return {h.source_id for h in hits} & {evergreen, this_cycle}
+
+    assert await found(()) == {evergreen}  # 读不到开放周期时的降级:只查常青
+    assert await found((12,)) == {evergreen, this_cycle}
+    assert await found((13,)) == {evergreen}  # 换届后往届条目退出检索
+    assert await found((12, 13)) == {evergreen, this_cycle}  # 同时开着两个周期
+
+    # 关键词一路同样受过滤:问题向量落在 ax1 轴,只能靠「面试」字面命中召回
+    by_keyword = await store.search(
+        "面试 ax1", embedder=_axis_embedder(), top_k=10, min_score=0.45, cycle_ids=(12,)
+    )
+    assert any(h.source_id == this_cycle for h in by_keyword)
+    by_keyword_next_cycle = await store.search(
+        "面试 ax1", embedder=_axis_embedder(), top_k=10, min_score=0.45, cycle_ids=(13,)
+    )
+    assert all(h.source_id != this_cycle for h in by_keyword_next_cycle)
+
+    # 详情带回周期;改回常青(cycle_id=None)后不给周期也能检到
+    rec = store.get_source(this_cycle)
+    assert rec is not None and rec.cycle_id == 12
+    await store.ingest_source(
+        SourceInput(
+            title="本届面试安排", type="doc", content_md="ax0 面试在周六", updated_by=f"it-{run}"
+        ),
+        embedder=_axis_embedder(),
+        source_id=this_cycle,
+    )
+    assert await found(()) == {evergreen, this_cycle}
+
+
+async def test_cycle_column_is_added_to_an_existing_database(kb_env) -> None:
+    """存量库的 kb_source 没有 cycle_id 列:下次自举补上,已有条目视为常青、照常可检。"""
+    import psycopg
+
+    run = secrets.token_hex(3)
+    sid = await store.ingest_source(
+        SourceInput(
+            title="存量条目", type="doc", content_md="ax0 旧库内容", updated_by=f"it-{run}"
+        ),
+        embedder=_axis_embedder(),
+    )
+    with psycopg.connect(os.environ["KB_TEST_DATABASE_URL"]) as conn:
+        conn.execute("ALTER TABLE kb_source DROP COLUMN cycle_id")
+        conn.commit()
+    store.reset_schema_cache()  # 相当于新版本进程启动后的第一次检索
+
+    hits = await store.search("ax0", embedder=_axis_embedder(), top_k=10)
+    assert any(h.source_id == sid for h in hits)
+    rec = store.get_source(sid)
+    assert rec is not None and rec.cycle_id is None
+
+
+async def test_search_with_signals_reports_best_scores_on_miss(kb_env) -> None:
+    """没命中时带回过门槛之前的最高分(检索日志靠它分辨「差一点」与「完全没有」)。"""
+    run = secrets.token_hex(3)
+    sid = await store.ingest_source(
+        SourceInput(
+            title="报名须知",
+            type="doc",
+            content_md="ax0 计拔的同学可以报名任何部门",
+            updated_by=f"it-{run}",
+        ),
+        embedder=_axis_embedder(),
+    )
+    miss = await store.search_with_signals(
+        "ax1 天气", embedder=_axis_embedder(), top_k=5, min_score=0.45
+    )
+    assert all(h.source_id != sid for h in miss.hits)
+    assert miss.best_vec_score is not None and miss.best_vec_score < 0.45
+    assert miss.best_kw_ratio is not None and miss.best_kw_ratio < 0.5
+
+    hit = await store.search_with_signals(
+        "ax0 报名", embedder=_axis_embedder(), top_k=5, min_score=0.45
+    )
+    assert any(h.source_id == sid for h in hit.hits)
+    assert hit.best_vec_score is not None and hit.best_vec_score >= 0.45
+
+
+# ── 检索日志(kb_query_log)────────────────────────────────
+
+
+def test_query_log_roundtrip_real_pg(monkeypatch) -> None:
+    """真库往返:数组列/空分数/CHECK 约束/脱敏/按会话删除,以及运营要跑的那条聚合 SQL。"""
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from official_agent.kb import query_log
+    from official_agent.kb.query_log import QueryLogEntry
+
+    _patch_pg(monkeypatch)
+    query_log.reset_table_cache()
+    url = os.environ["KB_TEST_DATABASE_URL"]
+    thread = f"it:kbq:{secrets.token_hex(4)}"
+    trace = secrets.token_hex(16)
+
+    def entry(**over) -> QueryLogEntry:
+        base = {"thread_id": thread, "trace_id": trace, "query": "计拔怎么报名", "status": "ok"}
+        base.update(over)
+        return QueryLogEntry(**base)
+
+    try:
+        query_log.write_query(
+            entry(
+                query="我手机 13812345678,计拔怎么报名",
+                status="not_found",
+                best_vec_score=0.42,
+                best_kw_ratio=0.0,
+                cycle_ids=(12,),
+            )
+        )
+        query_log.write_query(entry(status="not_found", best_vec_score=0.40, best_kw_ratio=0.0))
+        query_log.write_query(
+            entry(
+                query="技术部做什么",
+                best_vec_score=0.91,
+                best_kw_ratio=1.0,
+                hit_source_ids=("kb_a", "kb_b"),
+            )
+        )
+        query_log.write_query(entry(query="技术部做什么", status="unavailable"))
+
+        with psycopg.connect(url, row_factory=dict_row) as conn:
+            rows = conn.execute(
+                "SELECT * FROM kb_query_log WHERE thread_id = %s ORDER BY id", (thread,)
+            ).fetchall()
+            assert [r["status"] for r in rows] == ["not_found", "not_found", "ok", "unavailable"]
+            assert rows[0]["query"] == "我手机 138****5678,计拔怎么报名"  # 落库前已脱敏
+            assert rows[0]["best_vec_score"] == pytest.approx(0.42)
+            assert rows[0]["cycle_ids"] == [12] and rows[0]["hit_source_ids"] == []
+            assert rows[2]["hit_source_ids"] == ["kb_a", "kb_b"] and rows[2]["cycle_ids"] == []
+            assert rows[3]["best_vec_score"] is None and rows[3]["best_kw_ratio"] is None
+            assert all(r["trace_id"] == trace and r["created_at"] is not None for r in rows)
+
+            # 近 7 天没答上的问题,按次数排,带上离门槛最近的一次分数
+            top = conn.execute(
+                """
+                SELECT query, count(*) AS times, max(best_vec_score) AS best
+                FROM kb_query_log
+                WHERE status = 'not_found' AND created_at > now() - interval '7 days'
+                  AND thread_id = %s
+                GROUP BY query ORDER BY times DESC, best DESC
+                """,
+                (thread,),
+            ).fetchall()
+            assert [r["query"] for r in top] == ["我手机 138****5678,计拔怎么报名", "计拔怎么报名"]
+
+        # 状态写错在库里就被拒,且不影响连接池后续使用
+        with pytest.raises(psycopg.errors.CheckViolation):
+            query_log.write_query(entry(status="bogus"))
+
+        assert query_log.delete_thread_queries(thread) == 4
+        assert query_log.delete_thread_queries(thread) == 0  # 幂等
+    finally:
+        with psycopg.connect(url) as conn:
+            conn.execute("DELETE FROM kb_query_log WHERE thread_id = %s", (thread,))
+            conn.commit()

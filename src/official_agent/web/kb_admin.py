@@ -29,7 +29,11 @@ _require_kb_manage = _require_any("kb:manage")
 
 
 class KbSourceUpsert(BaseModel):
-    """创建/更新知识条目。type=faq 必须 question/answer;type=doc 必须 content_md。"""
+    """创建/更新知识条目。type=faq 必须 question/answer;type=doc 必须 content_md。
+
+    cycle_id 不填(null)= 常青条目;填招新周期 id = 只在该周期开放期间可被检索,
+    周期结束后自动退出检索(条目本身保留,可改回常青或换绑下一届)。
+    """
 
     title: str = Field(min_length=1)
     type: Literal["faq", "doc"]
@@ -38,6 +42,7 @@ class KbSourceUpsert(BaseModel):
     question: str = ""
     answer: str = ""
     content_md: str = ""
+    cycle_id: int | None = Field(default=None, ge=1)
 
 
 class KbEnabledBody(BaseModel):
@@ -59,6 +64,7 @@ def _to_input(body: KbSourceUpsert, identity: ResolvedIdentity) -> kb_store.Sour
         answer=body.answer,
         content_md=body.content_md,
         updated_by=_actor(identity),
+        cycle_id=body.cycle_id,
     )
 
 
@@ -195,6 +201,7 @@ async def reembed_kb_source(
         answer=record.answer,
         content_md=record.content_md,
         updated_by=_actor(identity),
+        cycle_id=record.cycle_id,
     )
     try:
         await kb_store.ingest_source(source, source_id=source_id)

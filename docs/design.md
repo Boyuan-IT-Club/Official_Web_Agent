@@ -39,7 +39,7 @@ agent 工程实践:ReAct 工具调用、状态机编排、human-in-the-loop、�
 | 模块 | 入口(ADR-0003:各入口直连,无统一意图路由) | 形态 |
 |---|---|---|
 | **A · 招新对话助理** | 官网 SSE(`/api/agent/chat`,已上线);CLI(`official-agent` 命令,开发调试);飞书(规划,未接入) | 身份解析 → 按角色装配工具集 → ReAct 单循环;写操作经 interrupt 指纹令牌 |
-| **B · 简历评估流水线** | 管理面 `/admin/evaluation`(触发/重试/评审);启动自动恢复 | job 状态机 → 评分子图(评分+批判回炉)→ 出题 bundle → 落库/评审队列 |
+| **B · 简历评估流水线** | 管理面 `/admin/evaluation`(触发/重试/评审);启动自动恢复 | job 状态机 → 评分子图(评委判定 → 批判者复核 → 评委答辩 → 代码汇总出置信度)→ 出题 bundle → 落库/评审队列(低置信在前) |
 | **C · 面试官 Copilot** | 官网管理端面试页(规划中) | 卡片 / 速记追问建议 / 评价草稿三态 |
 
 ## 3. 总体架构
@@ -77,10 +77,10 @@ C:管理端面试页(规划)      ─┘        │
 |---|---|---|
 | `web/` | 接口层 | FastAPI 路由与入口横切:`routes`(chat SSE + 会话路由)、`config_admin`(配置管理面)、`kb_admin`(知识库管理面)、`evaluation_admin`(初筛管理面)、`auth`(鉴权依赖)、`session_store`(会话注册表,纯状态)、`agent_factory`(配置热生效)、`telemetry`(对话观测落账)、`app`(装配 + 生命周期 + trace 中间件) |
 | `graphs/` | 编排层 | `assistant/`(A:ReAct 单循环 + 会话压缩)、`evaluation/`+`investigate_graph`(B 的编排面)、`copilot/`(C,规划)、`identity`(JWT→身份)、`router`(统一路由图,未接入) |
-| `evaluation/` | 评估域 | 流水线领域逻辑:`runner`(job 执行)、`bundle`(出题证据线)、`explore`+`investigate_graph`(仓探索/出题)、`graph`(评分子图)、`judge`/`tech_stack`/`awards`(专项出题)、`scoring`(量规)、`schema`(数据契约)、`llm_common`(共享 LLM 小件)、`github_client`/`autograding`/`attribution`/`dossier` |
+| `evaluation/` | 评估域 | 流水线领域逻辑:`runner`(job 执行)、`bundle`(出题证据线)、`explore`+`investigate_graph`(仓探索/出题)、`graph`(评分子图)、`panel`(初筛合议:拆开的评委/批判者/答辩/汇总/主席/校准案例的规则)、`calibration`(校准案例的取用与录入)、`clause_candidates`(评分条款候选的归纳)、`grounding`(落地校验)、`material`(简历材料排布)、`judge`/`tech_stack`/`awards`(专项出题)、`scoring`(量规)、`schema`(数据契约)、`llm_common`(共享 LLM 小件)、`github_client`/`autograding`/`attribution`/`dossier` |
 | `tools/` | 基础设施 | `client`(后端 REST 客户端,异常层级在此)、`readonly`/`knowledge`(语义化只读工具)、`write`(interrupt 写工具)、`credentials`(服务账号)、`interrupt_guard` |
 | `state/` | 基础设施 | Postgres 状态面:`pg`(checkpointer 连接)、`threads`(会话档案)、`conversation`(对话日志)、`evaluation/`(分卡/job/评审队列,包)、`qbank`(题库)、`audit`(审计)、`config_store`(热配置) |
-| `kb/` | 基础设施 | 知识库:入库分块/向量检索/表自举 |
+| `kb/` | 基础设施 | 知识库:入库分块/混合检索(按招新周期过滤)/表自举/检索日志(`query_log`) |
 | `security/` | 横切 | `pii`(脱敏)、`injection_guard`(数据区+注入扫描)、`fabrication_guard`(编造守卫) |
 | `prompts/` | 资源 | prompt 唯一权威(一图一节点一文件 + frontmatter,ADR-0004) |
 | `evals/` | 质量门 | eval 集 + 统一 runner(`python evals/run_evals.py`) |
@@ -128,7 +128,8 @@ POST /admin/evaluation/run(evaluation_admin,权限 evaluation:run)
 ## 7. 状态与安全
 
 - **存储只有 Postgres**(ADR-0007):checkpointer、会话档案(agent_threads)、
-  对话日志、评测三表(分卡/job/题库)、审计、kb 向量
+  对话日志、评测三表(分卡/job/题库)、审计、kb 向量、kb 检索日志(kb_query_log,
+  随会话删除)
 - **PII 是分层边界**:进模型前脱敏(tools 出口)+ trace 采集侧遮蔽(observability
   handler)+ 模型输出侧守卫 + 挂起载荷 TTL
 - **不可信输入**:简历/评测记录/候选人自述进 prompt 一律包数据区;批判节点兼作
@@ -151,5 +152,7 @@ POST /admin/evaluation/run(evaluation_admin,权限 evaluation:run)
 - 决策记录(ADR):`docs/adr/`(工作区根)
 - 工程规范:`docs/standards/`(入口 README 有加载地图)
 - 重构计划与进度:`docs/refactor-roadmap.md`
+- 多 agent 方向的设计稿:`docs/proposals/`(入口 README)。其中知识库运营闭环的 P0
+  (检索信号落库、周期过滤)已实现,其余无实现无排期
 - 历史过程记录(评审纪要/谈判清单/里程碑规划):`docs/archive/`(仅追溯用)
 - 架构决策的背景与备选:git 历史与 ADR;本文件只描述**当前**形态

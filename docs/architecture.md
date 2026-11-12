@@ -85,7 +85,17 @@ src/official_agent/
 │   └── copilot/            #   C:面试官 Copilot(预留)
 ├── evaluation/             # 评估域:流水线领域逻辑
 │   ├── runner.py           #   EvaluationRunner:submit/派发/_execute_job(评分段+题库段)
-│   ├── graph.py            #   评分子图:precheck→(hard_zero? finalize_hard : llm_score)→finalize
+│   ├── graph.py            #   评分子图,按评分模式装配:single = precheck→llm_score→finalize;
+│   │                       #   critic = precheck→judge→critic→(rebuttal)→aggregate→finalize;
+│   │                       #   panel = 五路评委→collect→critic→(rebuttal)→aggregate→chair(缺省不启用)
+│   ├── panel/              #   初筛合议:critic(批判者,只举手不改判)/ judges(拆开的评委与答辩)/
+│   │                       #   aggregate(纯函数汇总:分歧、作废项、置信度)/ chair(主席写整体理由)/
+│   │                       #   criteria(判定标准截自评分 prompt)/ anchors + harvest(校准案例的规则)/
+│   │                       #   clauses(条款候选的聚合与过闸)/ shapes
+│   ├── calibration.py      #   校准案例(往届判例)的 IO 编排:取判例/录种子判例/收割往届一致卡(缺省关闭)
+│   ├── clause_candidates.py#   评分条款候选:周期结束后聚合人机不一致 → 模型归纳 → 过闸落库(缺省关闭,只给人看)
+│   ├── grounding.py        #   落地校验:引文是否在原文里、两段文本是否重叠
+│   ├── material.py         #   简历材料进 prompt 的统一排布(报名信息 + 简历全文,包数据区)
 │   ├── investigate_graph.py#   调查出题子图:route→explore→generate(含 skip/guided 分支)
 │   ├── bundle.py           #   出题证据线:仓线/评测错因线/奖项线/兜底线 → qbank 信封
 │   ├── explore.py          #   受限 ReAct 仓探索(轮数/墙钟双闸 + dossier 槽位)
@@ -94,14 +104,16 @@ src/official_agent/
 │   ├── grading.py          #   同部门候选池内相对分级(优秀/良好/一般)+ 调剂建议/面试提示
 │   ├── applicant.py        #   报名信息解析(志愿部门/专业/年级)
 │   ├── schema.py           #   数据契约(ScorecardOutput/QbankV2/QuestionGroupV2...)
-│   ├── llm_common.py       #   共享小件:content_text/prompt_version/温度定档/invoke_with_retry
+│   ├── llm_common.py       #   共享小件:content_text/extract_json/prompt_version/温度定档/
+│   │                       #   invoke_with_retry/add_usage
 │   ├── runner 依赖的 github_client / autograding / attribution / dossier
 │   └── state/evaluation/(见 state/)
 ├── state/                  # 基础设施:Postgres 状态面(Repository 语义)
 │   ├── pg.py               #   checkpointer 连接 + 挂起载荷清理
 │   ├── threads.py          #   agent_threads:会话档案(建档/属主校验/硬删)
 │   ├── conversation.py     #   agent_conversation_log:对话日志 + usage 解包
-│   ├── evaluation/         #   包:scorecard_store / job_store / review_queue / bootstrap / _connection(池)
+│   ├── evaluation/         #   包:scorecard_store / job_store / review_queue / calibration_store /
+│   │                       #   clause_store / bootstrap / _connection(池)
 │   ├── qbank.py            #   interview_qbank:题库 + pick_log
 │   ├── audit.py            #   agent_audit_log:审计(五字段,ADR-0006)
 │   └── config_store.py     #   agent_config:热配置(DB 覆盖 env)
@@ -111,8 +123,9 @@ src/official_agent/
 │   ├── projection.py       #   工具返回投影(只留回答要用的字段,姓名/打分不进)
 │   ├── envelope.py         #   统一信封 {status: ok|error|unavailable, hint}
 │   ├── write.py            #   写工具(官网通道:确认卡片 → 指纹核对 → 意图审计 → 本人令牌执行 → 结果审计)
-│   └── knowledge.py        #   search_knowledge(知识库检索,降级契约)
-├── kb/                     # 知识库:chunking / embedding / keywords(分词) / schema / store(混合检索)
+│   └── knowledge.py        #   search_knowledge(知识库检索,降级契约;解析开放周期、落检索日志)
+├── kb/                     # 知识库:chunking / embedding / keywords(分词) / schema / store(混合检索+周期过滤)
+│                           #   / query_log(kb_query_log:每次检索的结局与门槛前最高分)
 ├── memory/                 # 长期记忆:store(agent_memory 表) / extract(后台提取+闸门) / recall(注入 system 末尾)
 ├── security/               # 横切:pii(脱敏)/ injection_guard(数据区+扫描)/ fabrication_guard
 ├── prompts/                # prompt 唯一权威(一图一节点一文件 + frontmatter,ADR-0004)
@@ -179,6 +192,7 @@ sequenceDiagram
     W->>W: 模型并发闸 + 墙钟超时
     loop 流式消费(astream 双模式)
         A->>TL: 工具调用(只读直连/写操作 interrupt)
+        Note right of TL: search_knowledge 每查一次<br/>后台落一行 kb_query_log(fail-open)
         A-->>W: delta 块(PII 掩码逐块) / tool 事件 / usage 终块
         W-->>C: event: delta / tool
     end
@@ -186,7 +200,7 @@ sequenceDiagram
         W->>W: 编造守卫 → 改写/放行
     end
     W->>W: 轮末压缩(超阈值,摘要回写 checkpoint)
-    W->>T: conversation_log 落一行(to_thread,fail-open)
+    W->>T: conversation_log 落一行(带轮级 trace_id 与守卫判定;to_thread,fail-open)
     W-->>C: event: done(带 sources 引用锚) 或 error(稳定文案+trace_id)
 ```
 
@@ -225,16 +239,46 @@ stateDiagram-v2
     succeeded --> [*]
 ```
 
-### 6.2 评分子图(hard_zero 短路)
+### 6.2 评分子图(hard_zero 短路,按评分模式装配)
 
 ```mermaid
 flowchart LR
     PRE["precheck<br/>(确定性绝对卡规则)"] -->|"hard_zero"| FH["finalize_hard<br/>零卡不调模型<br/>(两张清单全未达成+命中原因)"]
-    PRE -->|"正常"| LS["llm_score<br/>(校验回灌重试 ×2)"]
-    LS --> FIN["finalize<br/>统一卡形状"]
+    PRE -->|"single"| LS["llm_score<br/>评委判定后直接组卡<br/>(校验回灌重试 ×2)"]
+    PRE -->|"critic"| J["judge<br/>评委判定<br/>(校验回灌重试 ×2)"]
+    J -->|"评委失败 = 整份失败"| FIN
+    J --> CR["critic<br/>批判者:注入片段 + 质疑清单<br/>(失败 → 卡照出,置信度 low)"]
+    CR -->|"有质疑"| RB["rebuttal<br/>评委重判被质疑的条目<br/>(失败 → 记为分歧)"]
+    CR -->|"无质疑"| AG["aggregate<br/>纯代码汇总:分歧/作废项/置信度"]
+    RB --> AG
+    AG --> FIN["finalize<br/>统一卡形状"]
+    LS --> FIN
     FH --> FIN
     FIN --> E(["END"])
 ```
+
+评分模式(`evaluation_scoring_mode`:`single` / `critic` / `panel`)**按周期固定**:一个周期最早落库
+的那张卡用了哪种模式,之后的 job(含重评)都沿用,不再读配置——等级是池内相对排名,同一个
+池里的卡必须出自同一种模式。`critic` 模式下批判者没有改判权:被质疑的条目交回评委重判,
+评委维持原判就只记为分歧。唯一由代码直接改判的情形是达成项的引文落在批判者指出的注入
+片段里。分歧只产出**置信度**(`low / medium / high`,落在卡的 `panel` 块里),不进分数与
+等级;评审队列按低置信在前排序,并有 `low_confidence` 子队列。
+
+`panel` 模式(上图未画,**缺省不启用**)在 `critic` 的基础上把评委拆开:四位部门评委各判一张
+部门清单、一位认真程度评委判认真程度清单并给态度,用 `Send` 五路并行、各自独立上下文;
+任何一位评委失败即整份失败。批判者之后的答辩按清单分派给各自的评委,整体理由改由主席在
+汇总之后写(只看最终判定,不看简历;失败则用程序模板)。启用条件见
+`docs/proposals/screening-panel.md`「P2 落地」。
+
+校准案例(往届判例,**缺省关闭**)是评委 prompt 末尾的一段参考:runner 在评分子图之前按
+判定项从案例库里取与简历最相似的判例(每项至多一条达成、一条未达成),传给评分子图。
+案例集按周期冻结(周期开跑时记下案例号水位),不用本周期与本简历的案例;判例入库时过
+注入扫描与脱敏,进 prompt 时包数据区。取不到判例不挡评分。
+
+评分条款候选(**缺省关闭**)不在评分路径上:周期结束后由管理面触发,把人机看法不一致的卡
+按判定项聚合(纯代码),交一次模型调用归纳成「补充条款的候选」,过闸后存表,周期复盘报告
+用只读函数取。候选只给人看——采纳方式只有人改 `prompts/` 下的文件并发 PR,代码里没有
+任何据此改 prompt 的路径。
 
 初筛看两个维度,互不折算:**部门匹配度**(四个部门的录入标准清单都判,志愿部门那张
 决定匹配度,其余用于调剂建议)与**认真程度**(内容充实/了解社团部门/意愿真挚/成文/
@@ -300,19 +344,25 @@ flowchart TD
 | 表 | 内容 | 关键约束 |
 |---|---|---|
 | `agent_threads` | 会话档案(thread_id/属主/状态) | thread_id 全局唯一;软删+保留期清理 |
-| `agent_conversation_log` | 对话日志(问题摘要/工具/耗时/usage/trace) | fail-open 写入 |
-| `evaluation_scorecard` | AI 参考分卡(card JSONB/total/hard_zero) | UNIQUE(resume,cycle,card_version);状态机 CHECK |
+| `agent_conversation_log` | 对话日志(问题摘要/工具/耗时/usage/轮级 trace_id/守卫判定) | fail-open 写入 |
+| `evaluation_scorecard` | AI 参考分卡(card JSONB/total/hard_zero;critic / panel 模式的卡带 `panel` 块:模式/置信度/注入片段/分歧) | UNIQUE(resume,cycle,card_version);状态机 CHECK |
 | `evaluation_job` | 执行 job(状态机/attempts/qbank_status) | 部分唯一索引:活跃 job 每 (resume,cycle) 一条 |
+| `evaluation_calibration_case` | 初筛校准案例(条目级判例 + 向量 real[],记 embed_model) | 案例不可改,只能停用;同一张卡的同一判定项只入库一次;按周期用案例号水位冻结 |
+| `evaluation_clause_candidate` | 评分条款候选(判定项/方向/候选文字/支持卡数) | 按周期整批替换;只给人看,评分路径不读;文字入库前过长度/个人信息/指令样文本三道闸 |
 | `interview_qbank` | 题库信封(v2 JSONB) | 版本递增 |
 | `qbank_pick_log` | 面试官选题记录 | 服务端权威引用(防伪造证据路径) |
 | `agent_audit_log` | 审计(ADR-0006 五字段) | 代理身份+trace_id |
 | `agent_config` | 热配置低敏键 | 白名单 HOT_KEYS |
-| `kb_source` / `kb_faq` / `kb_doc` / `kb_chunks` | 知识库来源/内容/向量 | 禁跨 embedding 模型混排 |
+| `kb_source` / `kb_faq` / `kb_doc` / `kb_chunks` | 知识库来源/内容/向量 | 禁跨 embedding 模型混排;`kb_source.cycle_id` 非空的条目只在该招新周期开放时进检索 |
+| `kb_query_log` | 对话里每次知识库检索一行(脱敏后的问题/结局/门槛前最高分/命中条目/生效周期) | fail-open 写入;按 `thread_id` 随会话删除;`trace_id` 关联对话日志 |
 
 ## 9. 横切机制
 
 - **trace 串联**:三入口(web 中间件/CLI/eval job)置轮级 id(归一 W3C 32-hex)→
-  出站 `traceparent` → 审计 trace_id → 日志 `[trace_id]`,四面同 id(ADR-0012)
+  出站 `traceparent` → 审计 trace_id → 日志 `[trace_id]`,四面同 id(ADR-0012)。
+  对话日志与知识库检索日志存的是入口那个 id(`observability.turn_trace_id`),两表按它
+  关联;Langfuse 开启时图内取到的是 span 的 id,与入口 id 不同(见
+  `docs/proposals/kb-ops-loop.md` D1)
 - **PII 分层边界**:工具出口 `mask_pii_deep` → trace 采集侧遮蔽(handler)→ 模型输出
   侧守卫 → 挂起载荷 TTL
 - **错误分类**:类型判定(`BackendAuthError`/`BackendUnavailableError`/`BackendError`)→
@@ -326,7 +376,7 @@ flowchart TD
 |---|---|---|
 | 单测 | `uv run pytest`(709+) | 确定性逻辑:工具/图结构/权限/脱敏/状态面(mock 连接) |
 | 集成 | pgvector 容器 + `POSTGRES_URL=... pytest tests/*_pg.py tests/test_kb_integration.py` | DDL 幂等/唯一索引/事务边界/锁纪律(自 SKIP 不算通过) |
-| eval | `python evals/run_evals.py` | 工具选择/参数红线(forbidden_tools)、阈值门禁、LLM-as-judge |
+| eval | `python evals/run_evals.py` | 工具选择/参数红线(forbidden_tools)、阈值门禁、LLM-as-judge、初筛评分基线(区间一致率/条目翻转率/注入拦截率) |
 | 机械 | `uv run ruff check .` | lint(line-length 100) |
 
 评分分级可见与客服面红线有专门保证测试:`test_no_role_assembles_score_tools`

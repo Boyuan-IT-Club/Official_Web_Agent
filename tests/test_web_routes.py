@@ -754,6 +754,43 @@ def test_chat_toolless_honest_reply_passes_through(
     assert deltas == ["我没有查询权限,请联系管理员。"]
 
 
+@pytest.mark.parametrize(
+    ("role", "reply", "expected_prefix"),
+    [
+        ("unknown", "查询结果:您有 3 份简历待筛选。", "triggered:"),
+        ("unknown", "我没有查询权限,请联系管理员。", "clean"),
+        ("candidate", "你好!", None),  # 有工具档不过这道守卫:留空,区别于 clean
+    ],
+)
+def test_chat_logs_guard_verdict_with_the_turn(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+    reply: str,
+    expected_prefix: str | None,
+) -> None:
+    """守卫判定随本轮对话日志落库:事后能按判定筛出被改写的轮次。"""
+    logged: list[dict] = []
+    monkeypatch.setattr(
+        "official_agent.web.telemetry.log_conversation", lambda *a, **k: logged.append(k)
+    )
+    _install_fake_agent(monkeypatch, reply)
+    ident = auth_ok_data(role=role)
+    if role == "unknown":
+        ident["permission_codes"] = []
+    monkeypatch.setattr("official_agent.web.auth.resolve", fake_resolve(ident))
+    resp = client.post(
+        "/api/agent/chat", json={"message": "有几份简历?"}, headers={"Authorization": "Bearer tok"}
+    )
+    assert resp.status_code == 200
+    (row,) = logged
+    verdict = row["guard_verdict"]
+    if expected_prefix is None:
+        assert verdict is None
+    else:
+        assert verdict is not None and verdict.startswith(expected_prefix)
+
+
 def test_guard_rewrite_persists_to_checkpointer(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
