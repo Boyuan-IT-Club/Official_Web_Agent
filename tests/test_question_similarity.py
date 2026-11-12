@@ -155,15 +155,24 @@ def index_on(monkeypatch: pytest.MonkeyPatch) -> dict:
 
 
 async def test_annotate_is_off_by_default(monkeypatch) -> None:
-    """开关默认关:不算向量、不碰信封。"""
+    """开关默认关:不算向量、不碰信封。
 
-    async def _boom(texts):
-        raise AssertionError("索引关闭时不该算向量")
+    用「记下有没有被调」而不是「被调就抛」来判:annotate 是旁路,自己会吞掉异常,
+    抛出来的断言到不了用例这里。
+    """
+    embedded: list[list[str]] = []
 
-    monkeypatch.setattr(qs, "embed_texts", _boom)
+    async def _embed(texts):
+        embedded.append(texts)
+        return [[1.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(qs, "embed_texts", _embed)
+    monkeypatch.setattr(qs.qbank_index, "count_similar_resumes", lambda **k: [0] * 4)
     envelope = _envelope()
 
+    assert get_settings().qbank_index_enabled is False
     assert await qs.annotate(envelope, resume_id=1, cycle_id=2026) is None
+    assert embedded == []
     assert "similarity" not in envelope
 
 

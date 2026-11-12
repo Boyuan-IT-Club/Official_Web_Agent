@@ -36,6 +36,7 @@ from official_agent.evaluation.llm_common import (
     gated_ainvoke,
     prompt_version,
 )
+from official_agent.evaluation.plan import LinePlan, Plan, RepoCandidate, make_plan
 from official_agent.evaluation.question_review import (
     review_line,
     review_mode,
@@ -132,8 +133,11 @@ def _group_has_evidence(g: dict[str, Any]) -> bool:
 
 async def _repo_lines(
     project_text: str, *, resume_id: int, github_token: str
-) -> list[tuple[str, str] | None]:
+) -> tuple[list[tuple[str, str] | None], dict[tuple[str, str], dict[str, Any]]]:
     """仓线分线:可读的仓各一条线,读不到的合起来只给一条(钉第一个)。
+
+    返回 (各线钉住的仓, 可读仓的 GitHub 元数据)。元数据就是探测时拿到的那份,
+    留给规划段用,不为它多发请求。
 
     可读性在这里一次探清,而不是让每个仓各跑一遍子图、各自发现读不到:
     仓读不到时材料只剩简历自述,而自述只有一份——逐个仓跑只会得到一堆
@@ -154,20 +158,22 @@ async def _repo_lines(
         )
         repo_candidates = repo_candidates[:MAX_REPO_LINES]
     if not repo_candidates:
-        return [None]
+        return [None], {}
     probe = GitHubClient(token=github_token)
 
-    async def _is_readable(owner: str, name: str) -> bool:
+    async def _repo_meta(owner: str, name: str) -> dict[str, Any] | None:
+        """仓可读返回元数据,读不到返回 None。"""
         try:
-            await probe.repo(owner, name)
+            return await probe.repo(owner, name)
         except GitHubUnavailable:
-            return False
-        return True
+            return None
 
-    verdicts = await asyncio.gather(*(_is_readable(o, n) for o, n in repo_candidates))
-    readable = [repo for repo, ok in zip(repo_candidates, verdicts, strict=True) if ok]
-    unreadable = [repo for repo, ok in zip(repo_candidates, verdicts, strict=True) if not ok]
-    return [*readable, *unreadable[:1]]
+    metas = await asyncio.gather(*(_repo_meta(o, n) for o, n in repo_candidates))
+    readable = {
+        repo: meta for repo, meta in zip(repo_candidates, metas, strict=True) if meta is not None
+    }
+    unreadable = [repo for repo in repo_candidates if repo not in readable]
+    return [*readable, *unreadable[:1]], readable
 
 
 async def _repo_line(
@@ -178,11 +184,14 @@ async def _repo_line(
     github_key: str | None,
     github_token: str,
     grade: str,
+    line_plan: LinePlan | None = None,
 ) -> dict[str, Any]:
     """跑一个仓的调查子图,返回该线的组;失败降级为错误组,不向外抛。
 
     不告诉子图「别的线有没有挖过简历」:各线同时在跑,谁也不知道别的线会不会
     回退到简历深挖。重复的简历深挖组由汇合处裁掉(_keep_first_cv_dive)。
+    line_plan 是这条线的探索预算与侧重;没有计划的线(没钉仓、仓读不到)不进
+    探索段,用不上。
     """
     owner, name = pinned if pinned else ("", "")
     repo_label = f"{owner}/{name}" if pinned else ""
@@ -194,6 +203,8 @@ async def _repo_line(
             github_token=github_token,
             candidate_login=github_key or "",
             grade=grade,
+            explore_budget=line_plan.budget if line_plan else None,
+            explore_focus=line_plan.focus if line_plan else (),
         )
         return {
             "group": _group_kind(repo_envelope),
@@ -227,6 +238,7 @@ async def _repo_groups(
     github_key: str | None,
     github_token: str,
     grade: str,
+    plan: Plan,
 ) -> list[dict[str, Any]]:
     """各仓线并发跑,返回与 pins 同序的组(至多 MAX_PARALLEL_REPO_LINES 条同时在跑)。
 
@@ -244,9 +256,56 @@ async def _repo_groups(
                 github_key=github_key,
                 github_token=github_token,
                 grade=grade,
+                line_plan=plan.for_line(_line_id(pinned)),
             )
 
     return list(await asyncio.gather(*(_gated_line(pinned) for pinned in pins)))
+
+
+def _line_id(pinned: tuple[str, str] | None) -> str:
+    """钉住的仓 → 它在计划里的线号(owner/name);没钉仓为空串。"""
+    return f"{pinned[0]}/{pinned[1]}" if pinned else ""
+
+
+def _without_cut_lines(
+    pins: list[tuple[str, str] | None], plan: Plan, *, resume_id: int
+) -> list[tuple[str, str] | None]:
+    """去掉被整包预算上限砍掉的线(留痕);其余的线顺序不变。"""
+    cut = [line.line_id for line in plan.lines if line.is_dropped]
+    if cut:
+        logging.getLogger(__name__).warning(
+            "bundle_plan_cut resume_id=%s dropped=%r", resume_id, cut
+        )
+    return [pinned for pinned in pins if _line_id(pinned) not in cut]
+
+
+def _plan_record(plan: Plan, repo_groups: list[dict[str, Any]]) -> dict[str, Any]:
+    """计划进信封的形态:每条线给了多少预算、实际用了多少。
+
+    实际用量取自各线自己的探索元信息;被砍掉、跑失败、没进探索段的线没有用量。
+    给了多少与用了多少放在一起,是为了日后按真实用量重定各档的数值。
+    """
+    explored = {
+        str(group.get("repo", "")): (group.get("qbank_v2") or {}).get("explore_meta") or {}
+        for group in repo_groups
+    }
+    return {
+        "status": plan.status,
+        "prompt_version": plan.prompt_version,
+        "usage": plan.usage,
+        "lines": [
+            {
+                "repo": line.line_id,
+                "tier": line.tier,
+                "focus": list(line.focus),
+                "max_turns": line.budget.max_turns,
+                "max_wall_seconds": line.budget.max_wall_seconds,
+                "turns_used": explored.get(line.line_id, {}).get("turns"),
+                "seconds_used": explored.get(line.line_id, {}).get("seconds"),
+            }
+            for line in plan.lines
+        ],
+    }
 
 
 def _keep_first_cv_dive(
@@ -423,8 +482,10 @@ def _flatten_v2_questions(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return all_questions
 
 
-def _aggregate_usage(groups: list[dict[str, Any]]) -> dict[str, int | None]:
-    """聚合各线的模型用量:仓线的探索、出题、审题,以及评测线的审题。
+def _aggregate_usage(
+    groups: list[dict[str, Any]], *, plan_usage: dict[str, int | None] | None = None
+) -> dict[str, int | None]:
+    """聚合模型用量:规划调用,仓线的探索、出题、审题,以及评测线的审题。
 
     评测线、兜底线的出题调用不采用量,所以不在这里。
     """
@@ -434,19 +495,20 @@ def _aggregate_usage(groups: list[dict[str, Any]]) -> dict[str, int | None]:
         "cache_hit_tokens": None,
         "cache_miss_tokens": None,
     }
+    metas: list[dict[str, Any]] = [plan_usage or {}]
     for g in groups:
         qbank_v2 = g.get("qbank_v2") or {}
-        metas = [
+        metas += [
             qbank_v2.get("explore_meta") or {},
             qbank_v2.get("generation_usage") or {},
             (qbank_v2.get("review") or {}).get("usage") or {},
             (g.get("review") or {}).get("usage") or {},
         ]
-        for meta in metas:
-            for k in usage_total:
-                v = meta.get(k)
-                if v is not None:
-                    usage_total[k] = (usage_total[k] or 0) + int(v)
+    for meta in metas:
+        for k in usage_total:
+            v = meta.get(k)
+            if v is not None:
+                usage_total[k] = (usage_total[k] or 0) + int(v)
     return usage_total
 
 
@@ -472,6 +534,9 @@ async def run_bundle(
     奖项线缺席)。信封里组的顺序固定为仓线(简历里的出现序)→ 评测 → 奖项 →
     兜底,与各线完成的先后无关。
 
+    起线之前先给可读的仓定探索计划(evaluation/plan.py):每条线的档位与预算、
+    整包封顶。计划连同各线实际用掉的轮数与时间记在信封的 plan 里。
+
     grade 是**元信息**(年级原文):只透传给调查子图调节出题深度,不参与
     任何评分线;缺省空串即「年级缺失」,子图走安全默认。
     """
@@ -480,15 +545,26 @@ async def run_bundle(
     resume_text = _resume_text(fields)
 
     # 多仓:项目文本里每个 GitHub 仓各深挖一次,产出独立 repo group。
-    pins = await _repo_lines(project_text, resume_id=resume_id, github_token=github_token)
+    pins, repo_metas = await _repo_lines(
+        project_text, resume_id=resume_id, github_token=github_token
+    )
+    # 只有可读的仓会进探索段,所以只给它们定预算;make_plan 不抛,规划不成即缺省
+    plan = await make_plan(
+        [
+            RepoCandidate.from_repo_meta(owner, name, meta, candidate_login=github_key or "")
+            for (owner, name), meta in repo_metas.items()
+        ],
+        project_text=project_text,
+    )
     repo_groups, autograding_group, awards_group = await asyncio.gather(
         _repo_groups(
-            pins,
+            _without_cut_lines(pins, plan, resume_id=resume_id),
             project_text=project_text,
             resume_text=resume_text,
             github_key=github_key,
             github_token=github_token,
             grade=grade,
+            plan=plan,
         ),
         _contained(
             "autograding",
@@ -506,7 +582,7 @@ async def run_bundle(
 
     # 用量按实际跑过的线算,所以取在裁重复组之前:被裁掉的线同样花了 token。
     other_groups = [g for g in (autograding_group, awards_group) if g is not None]
-    explore_usage_total = _aggregate_usage([*repo_groups, *other_groups])
+    explore_usage_total = _aggregate_usage([*repo_groups, *other_groups], plan_usage=plan.usage)
     groups = _keep_first_cv_dive(repo_groups, resume_id=resume_id)
     groups.extend(other_groups)
     if not any(_group_has_evidence(g) for g in groups):
@@ -516,6 +592,7 @@ async def run_bundle(
     return {
         "schema_name": "evaluation_qbank/v2",
         "groups": groups,
+        "plan": _plan_record(plan, repo_groups),
         "suggested_plan": suggest_plan(all_questions, budget_minutes=15),
         "total_questions": len(all_questions),
         "explore_usage_total": explore_usage_total,

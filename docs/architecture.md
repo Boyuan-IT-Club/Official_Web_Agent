@@ -89,6 +89,7 @@ src/official_agent/
 │   ├── investigate_graph.py#   调查出题子图:route→explore→generate(含 skip/guided 分支)
 │   ├── bundle.py           #   出题证据线:仓线/评测错因线/奖项线并发跑,汇合后按需兜底 → qbank 信封
 │   ├── explore.py          #   受限 ReAct 仓探索(轮数/墙钟双闸 + dossier 槽位)
+│   ├── plan.py             #   探索计划:档位→预算的映射、整包封顶、规划者(默认关闭)
 │   ├── question_review.py  #   审题:出题之后逐题给意见,只标注不改题(默认关闭)
 │   ├── question_similarity.py # 题目相似度标注:本包跨线查重 + 跨简历通用题(默认关闭)
 │   ├── judge.py / tech_stack.py / awards.py   # 专项出题
@@ -282,9 +283,10 @@ stateDiagram-v2
 
 ```mermaid
 flowchart LR
-    SPLIT["_repo_lines<br/>各仓可读性并发探测 → 分线<br/>可读的仓各一条,读不到的合成一条<br/>至多 5 条"] --> REPO["仓线 ×N<br/>各一次调查子图(6.3)<br/>至多 3 条同时在跑"]
-    SPLIT --> AG["评测错因线"]
-    SPLIT --> AW["奖项线"]
+    SPLIT["_repo_lines<br/>各仓可读性并发探测 → 分线<br/>可读的仓各一条,读不到的合成一条<br/>至多 5 条"] --> PLAN["make_plan<br/>可读仓各定档位与探索预算<br/>整包封顶,超出的线砍掉"]
+    PLAN --> REPO["仓线 ×N<br/>各一次调查子图(6.3)<br/>至多 3 条同时在跑"]
+    PLAN --> AG["评测错因线"]
+    PLAN --> AW["奖项线"]
     REPO --> JOIN["汇合(纯代码)<br/>简历深挖只留分线顺序上的第一条<br/>用量在裁组之前聚合"]
     AG --> JOIN
     AW --> JOIN
@@ -304,6 +306,13 @@ flowchart LR
 令牌的速率配额)。模型调用另有一把评估域共用的进程级闸(`llm_common.model_gate`,上限
 `EVALUATION_MODEL_CONCURRENCY`,默认 8):评分、探索、出题、审题都先过它,所以 4 个 job 同时在
 题库段时峰值是 8 而不是 4 ×(3 条仓线 + 评测线)= 16。排队等闸的时间不计入探索的墙钟预算。
+
+起线之前先定探索计划(`evaluation/plan.py`):每条可读的仓线一个档位(`high` / `normal` /
+`low`),档位由代码映射成探索的轮数与墙钟预算,`high` 就是探索段的缺省上限;各线预算之和再过
+整包上限(`QBANK_EXPLORE_MAX_TOTAL_TURNS` / `…_WALL_SECONDS`),超出的从最低档的线开始降档直至
+砍掉。档位可以由规划者(单次模型调用,`QBANK_PLAN_MODE`,默认关闭)来选,它只能在固定集合里
+取值,选不了预算数值;关着或失败时每条线都是 `high`。计划连同各线实际用掉的轮数与时间记在
+信封的 `plan` 里。
 
 题库落库前后各有一步可选的相似度标注(`question_similarity`,默认关闭):落库前给题目算向量,
 把本包里跨线重复的题、本周期多份简历都出过的题标在信封顶层;落库后把向量写进

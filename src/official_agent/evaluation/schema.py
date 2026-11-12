@@ -287,6 +287,7 @@ class ExploreMeta(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     turns: int = 0
+    seconds: float | None = None  # 探索自己花的墙钟;没有探索(简历路径等)为 None
     dossier_chars: int = 0
     input_tokens: int | None = None
     output_tokens: int | None = None

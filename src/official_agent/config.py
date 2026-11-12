@@ -116,6 +116,16 @@ class Settings(BaseSettings):
     qbank_generic_min_similarity: float = 0.9
     qbank_generic_min_resumes: int = 3
 
+    # 规划者(给每条仓线定探索档位与侧重,预算数值由代码按档位映射):off = 不调,
+    # 每条线都是最高档;plan = 调。默认关:要先在真实模型上跑过
+    # evals/datasets/plan_probes.yaml 的模型段再打开
+    qbank_plan_mode: str = "off"
+    # 一份简历的探索预算总上限(各仓线预算之和),规划者开没开都生效。缺省值是
+    # 「5 条仓线全部最高档」的总量,即不比没有上限时更紧;调小后超出的部分从
+    # 最低档的线开始砍(见 evaluation/plan.py 的 cap_lines)
+    qbank_explore_max_total_turns: int = 400
+    qbank_explore_max_total_wall_seconds: int = 1500
+
     # 初筛分级:同部门候选池内头部/尾部比例与小池阈值(见 evaluation/grading.py)
     evaluation_grade_top_ratio: float = 0.2
     evaluation_grade_bottom_ratio: float = 0.2

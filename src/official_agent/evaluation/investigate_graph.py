@@ -25,7 +25,7 @@ from official_agent.evaluation.attribution import (
     resolve_entry,
 )
 from official_agent.evaluation.dossier import dossier_from_resume
-from official_agent.evaluation.explore import run_explore
+from official_agent.evaluation.explore import ExploreBudget, run_explore
 from official_agent.evaluation.github_client import GitHubClient, GitHubUnavailable
 from official_agent.evaluation.graph import _extract_json
 from official_agent.evaluation.investigate import (
@@ -94,7 +94,12 @@ class InvestigationState(TypedDict, total=False):
     dossier_degraded: bool
     dossier_degrade_reason: str
     dossier_turns: int
+    dossier_seconds: float
     explore_usage: dict
+    #: 本条线的探索预算与侧重类别,由调用方的代码给(缺省即探索段的缺省上限、
+    #: 无侧重);不来自模型输出,也不来自候选人材料
+    explore_budget: ExploreBudget | None
+    explore_focus: tuple[str, ...]
     tech_items: list[dict]
     attribution: dict
     #: 出题深度档,由年级派生;元信息,不进评分
@@ -295,6 +300,8 @@ async def explore_node(state: InvestigationState) -> dict:
         login=state.get("candidate_login", ""),
         github_base=state.get("github_base") or "https://api.github.com",
         github_token=state.get("github_token") or "",
+        budget=state.get("explore_budget"),
+        focus=tuple(state.get("explore_focus") or ()),
     )
     if dossier.is_empty():
         return {
@@ -306,6 +313,7 @@ async def explore_node(state: InvestigationState) -> dict:
             "dossier_degraded": True,
             "dossier_degrade_reason": dossier.degrade_reason,
             "dossier_turns": dossier.turns_used,
+            "dossier_seconds": dossier.seconds_used,
         }
     if dossier.degraded:
         # 预算触顶:用已有材料出题,降级标记进材料头,题面可感知
@@ -320,6 +328,7 @@ async def explore_node(state: InvestigationState) -> dict:
         "dossier_degraded": dossier.degraded,
         "dossier_degrade_reason": dossier.degrade_reason,
         "dossier_turns": dossier.turns_used,
+        "dossier_seconds": dossier.seconds_used,
         "explore_usage": {
             "input_tokens": dossier.input_tokens,
             "output_tokens": dossier.output_tokens,
@@ -459,6 +468,7 @@ async def generate_node(state: InvestigationState) -> dict:
             degrade_reason=str(state.get("dossier_degrade_reason", "")),
             explore_meta=ExploreMeta(
                 turns=int(state.get("dossier_turns", 0)),
+                seconds=state.get("dossier_seconds"),
                 dossier_chars=len(dossier_text),
                 **(state.get("explore_usage") or {}),
             ),
@@ -750,6 +760,8 @@ async def run_investigation(
     candidate_login: str = "",
     grade: str = "",
     cv_dive_done: bool = False,
+    explore_budget: ExploreBudget | None = None,
+    explore_focus: tuple[str, ...] = (),
 ) -> dict:
     """便捷入口:返回题集 dict(questions 可为空=skip/降级);LLM 失败抛 RuntimeError。
 
@@ -763,6 +775,8 @@ async def run_investigation(
     的仓不再重复挖同一份自述,直接出空组。逐条顺序跑线的调用方可在上一次返回
     的信封上读 mode 回填;并发跑线时各线互不等待、答不出这个问题,保持缺省,
     由调用方在汇合处去重(见 evaluation/bundle.py 的 _keep_first_cv_dive)。
+    explore_budget / explore_focus 传这条线的探索预算与侧重类别(只对仓深挖
+    生效);缺省即探索段的缺省上限、无侧重。
     """
     graph = build_investigation_subgraph()
     init: InvestigationState = {
@@ -773,6 +787,8 @@ async def run_investigation(
         "candidate_login": candidate_login,
         "grade_band": grade_band(grade),
         "cv_dive_done": cv_dive_done,
+        "explore_budget": explore_budget,
+        "explore_focus": explore_focus,
     }
     if repo:
         init["repo_owner"], init["repo_name"] = repo

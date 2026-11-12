@@ -802,7 +802,10 @@ def test_keep_first_cv_dive_touches_nothing_else() -> None:
 
 
 async def test_repo_lines_probe_concurrently_in_resume_order(monkeypatch) -> None:
-    """可读性探测各仓同时发出;分线结果仍按简历里的出现序,读不到的只留第一个。"""
+    """可读性探测各仓同时发出;分线结果仍按简历里的出现序,读不到的只留第一个。
+
+    可读仓的元数据随分线结果一起带回(规划段要用),不为它另发请求。
+    """
     meeting = _Rendezvous(parties=4)
 
     class _MixedGH:
@@ -813,19 +816,24 @@ async def test_repo_lines_probe_concurrently_in_resume_order(monkeypatch) -> Non
             await meeting.meet(repo)  # 四个探测都已发出才有人拿到结果
             if repo.startswith("private"):
                 raise bd.GitHubUnavailable("GitHub 404")
-            return {"default_branch": "main"}
+            return {"default_branch": "main", "full_name": f"{owner}/{repo}"}
 
     monkeypatch.setattr(bd, "GitHubClient", _MixedGH)
     project_text = " ".join(
         f"https://github.com/me/{name}" for name in ("private1", "open1", "private2", "open2")
     )
 
-    pins = await asyncio.wait_for(
+    pins, metas = await asyncio.wait_for(
         bd._repo_lines(project_text, resume_id=26, github_token=""),
         timeout=_DEADLOCK_TIMEOUT,
     )
 
     assert pins == [("me", "open1"), ("me", "open2"), ("me", "private1")]
+    assert {repo: meta["full_name"] for repo, meta in metas.items()} == {
+        ("me", "open1"): "me/open1",
+        ("me", "open2"): "me/open2",
+    }
+    assert len(meeting.arrived) == 4  # 每个仓只探了一次
 
 
 # ── 审题:评测线过审,审题用量计入聚合 ─────────────────────
@@ -938,3 +946,154 @@ async def test_bundle_usage_includes_repo_line_review_calls(monkeypatch) -> None
     envelope = await bd.run_bundle(_repo_fields("a"), resume_id=33, cycle_id=2026)
 
     assert envelope["explore_usage_total"]["input_tokens"] == 1000 + 200 + 50
+
+
+# ── 探索计划:按线传预算、整包封顶砍线、计划与用量进信封 ───────
+
+
+class _MetaGH:
+    """可读仓替身:me/fork 是 fork,其余是候选人自己的仓。"""
+
+    def __init__(self, base_url: str = "", token: str = "") -> None:
+        pass
+
+    async def repo(self, owner, repo):
+        return {"default_branch": "main", "fork": repo == "fork", "description": f"{repo} 的描述"}
+
+
+def _explored_envelope(turns: int, seconds: float) -> dict:
+    return _line_envelope(
+        explore_meta={"turns": turns, "seconds": seconds, "dossier_chars": 500, "input_tokens": 100}
+    )
+
+
+async def test_bundle_records_default_plan_with_actual_usage(monkeypatch) -> None:
+    """规划者没开:每条可读仓线最高档、不调规划模型;给的预算与实际用量都进信封。"""
+    from official_agent.evaluation import explore
+
+    given: dict[str, dict] = {}
+
+    async def _investigate(text, **kw):
+        name = kw["repo"][1]
+        given[name] = {"budget": kw["explore_budget"], "focus": kw["explore_focus"]}
+        return _explored_envelope(turns=12 if name == "a" else 30, seconds=41.5)
+
+    async def _boom(*a, **k):
+        raise AssertionError("规划者关闭时不该调规划模型")
+
+    monkeypatch.setattr(bd, "GitHubClient", _MetaGH)
+    monkeypatch.setattr(bd.ig, "run_investigation", _investigate)
+    monkeypatch.setattr("official_agent.evaluation.plan.ask_planner", _boom)
+
+    envelope = await bd.run_bundle(_repo_fields("a", "b"), resume_id=41, cycle_id=2026)
+
+    assert given["a"] == {"budget": explore.default_budget(), "focus": ()}
+    assert envelope["plan"] == {
+        "status": "off",
+        "prompt_version": "",
+        "usage": None,
+        "lines": [
+            {
+                "repo": f"me/{name}",
+                "tier": "high",
+                "focus": [],
+                "max_turns": explore.MAX_TURNS,
+                "max_wall_seconds": explore.MAX_WALL_SECONDS,
+                "turns_used": turns,
+                "seconds_used": 41.5,
+            }
+            for name, turns in (("a", 12), ("b", 30))
+        ],
+    }
+
+
+async def test_bundle_hands_each_line_its_planned_budget_and_focus(monkeypatch) -> None:
+    """规划者的档位与侧重按线传给调查子图;规划调用的用量计入聚合。"""
+    from official_agent.config import get_settings
+    from official_agent.evaluation import plan as plan_mod
+
+    seen: dict = {}
+    given: dict[str, dict] = {}
+
+    async def _planner(candidates, project_text):
+        seen["candidates"] = {c.line_id: (c.fork, c.owned_by_candidate) for c in candidates}
+        seen["project_text"] = project_text
+        return (
+            [
+                plan_mod.PlannedLine(id="me/main", tier="high", focus=["C6_难点与调试"]),
+                plan_mod.PlannedLine(id="me/fork", tier="low"),
+            ],
+            {"input_tokens": 400, "output_tokens": 20},
+        )
+
+    async def _investigate(text, **kw):
+        given[kw["repo"][1]] = {"budget": kw["explore_budget"], "focus": kw["explore_focus"]}
+        return _explored_envelope(turns=5, seconds=9.0)
+
+    monkeypatch.setattr(get_settings(), "qbank_plan_mode", "plan")
+    monkeypatch.setattr(bd, "GitHubClient", _MetaGH)
+    monkeypatch.setattr(bd.ig, "run_investigation", _investigate)
+    monkeypatch.setattr(plan_mod, "ask_planner", _planner)
+
+    fields = _repo_fields("main", "fork")
+    envelope = await bd.run_bundle(fields, resume_id=42, cycle_id=2026, github_key="me")
+
+    assert seen["candidates"] == {"me/main": (False, True), "me/fork": (True, True)}
+    assert seen["project_text"] == fields[0].value
+    assert given["main"] == {"budget": plan_mod.tier_budget("high"), "focus": ("C6_难点与调试",)}
+    assert given["fork"] == {"budget": plan_mod.tier_budget("low"), "focus": ()}
+    assert envelope["plan"]["status"] == "planned"
+    assert [(line["repo"], line["tier"]) for line in envelope["plan"]["lines"]] == [
+        ("me/main", "high"),
+        ("me/fork", "low"),
+    ]
+    # 规划 400 + 两条线的探索各 100
+    assert envelope["explore_usage_total"]["input_tokens"] == 400 + 100 + 100
+
+
+async def test_bundle_skips_lines_cut_by_the_package_cap(monkeypatch, caplog) -> None:
+    """整包上限只容得下两条最高档的线:第三条被砍掉,不跑、不出组,计划里留痕。"""
+    from official_agent.config import get_settings
+    from official_agent.evaluation import explore
+
+    ran: list[str] = []
+
+    async def _investigate(text, **kw):
+        ran.append(kw["repo"][1])
+        return _explored_envelope(turns=3, seconds=1.0)
+
+    monkeypatch.setattr(get_settings(), "qbank_explore_max_total_turns", 2 * explore.MAX_TURNS)
+    monkeypatch.setattr(bd, "GitHubClient", _MetaGH)
+    monkeypatch.setattr(bd.ig, "run_investigation", _investigate)
+
+    with caplog.at_level(logging.WARNING):
+        envelope = await bd.run_bundle(_repo_fields("a", "b", "c"), resume_id=43, cycle_id=2026)
+
+    assert sorted(ran) == ["a", "b"]
+    assert [g["repo"] for g in envelope["groups"]] == ["me/a", "me/b"]
+    cut = envelope["plan"]["lines"][2]
+    assert (cut["repo"], cut["tier"], cut["max_turns"], cut["turns_used"]) == (
+        "me/c",
+        "dropped",
+        0,
+        None,
+    )
+    assert "bundle_plan_cut" in caplog.text and "me/c" in caplog.text
+
+
+async def test_unreadable_and_unpinned_lines_are_not_planned(monkeypatch) -> None:
+    """读不到的仓不进探索段:不给它定预算,计划里也没有它。"""
+    given: list = []
+
+    async def _investigate(text, **kw):
+        given.append((kw["explore_budget"], kw["explore_focus"]))
+        return {"mode": "cv_dive", "repo_summary": "", "questions": []}
+
+    monkeypatch.setattr(bd, "GitHubClient", _UnreadableGH)
+    monkeypatch.setattr(bd.ig, "run_investigation", _investigate)
+    monkeypatch.setattr(bd, "build_model", lambda *a, **k: _FakeModel())
+
+    envelope = await bd.run_bundle(_repo_fields("private"), resume_id=44, cycle_id=2026)
+
+    assert given == [(None, ())]
+    assert envelope["plan"]["lines"] == []

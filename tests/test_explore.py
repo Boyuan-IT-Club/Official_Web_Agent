@@ -556,3 +556,62 @@ async def test_trigger_message_wraps_candidate_material() -> None:
     assert payload not in head  # 指令区干净
     assert payload in tail.partition("</data>")[0]
     assert '<data source="candidate-github-login">\nzewang\n</data>' in trigger
+
+
+# ── 调用方给的预算与侧重 ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_caller_budget_caps_turns_without_touching_module_defaults() -> None:
+    """按线给的预算生效:轮数到了调用方给的上限就停,降级文案报的是实际上限。"""
+    model = _FakeModel([_ai_with_tools([("list_files", {})]) for _ in range(10)])
+
+    dossier = await explore_repo(
+        project_text="我做了 xx",
+        owner="me",
+        name="demo",
+        attribution="trusted-own",
+        login="me",
+        client=_FakeClient(),  # type: ignore[arg-type]
+        model=model,  # type: ignore[arg-type]
+        budget=explore_mod.ExploreBudget(max_turns=3, max_wall_seconds=60),
+    )
+
+    assert dossier.turns_used == 3
+    assert dossier.degraded and "轮数 3 触顶" in dossier.degrade_reason
+    assert dossier.seconds_used >= 0
+
+
+def test_budget_can_only_shrink_the_defaults() -> None:
+    """调用方给得再大,也收回探索段的缺省上限以内。"""
+    greedy = explore_mod.ExploreBudget(max_turns=10_000, max_wall_seconds=10_000)
+
+    assert greedy.clamped() == explore_mod.default_budget()
+    assert explore_mod.ExploreBudget(-5, -5).clamped() == explore_mod.ExploreBudget(0, 0)
+
+
+@pytest.mark.asyncio
+async def test_focus_hint_goes_into_the_user_message_not_the_system_text() -> None:
+    """侧重提示只进首条 user 消息:system 文本要跨候选人字节稳定(缓存纪律)。"""
+    focus = ("C5_数字与规模", "C6_难点与调试")
+
+    async def _explore(**kwargs: Any) -> _FakeModel:
+        model = _FakeModel([_text_ai("材料够了")])
+        await explore_repo(
+            project_text="我做了 xx",
+            owner="me",
+            name="demo",
+            attribution="trusted-own",
+            login="me",
+            client=_FakeClient(),  # type: ignore[arg-type]
+            model=model,  # type: ignore[arg-type]
+            **kwargs,
+        )
+        return model
+
+    focused, plain = await _explore(focus=focus), await _explore()
+
+    first_user = next(m for m in focused.seen[0] if isinstance(m, HumanMessage))
+    assert "优先为这些类别取材:C5_数字与规模、C6_难点与调试" in first_user.content
+    assert focused.system_texts == plain.system_texts
+    assert all("优先为这些类别取材" not in m.content for m in plain.seen[0])
