@@ -90,8 +90,10 @@ src/official_agent/
 │   │                       #   panel = 五路评委→collect→critic→(rebuttal)→aggregate→chair(缺省不启用)
 │   ├── panel/              #   初筛合议:critic(批判者,只举手不改判)/ judges(拆开的评委与答辩)/
 │   │                       #   aggregate(纯函数汇总:分歧、作废项、置信度)/ chair(主席写整体理由)/
-│   │                       #   criteria(判定标准截自评分 prompt)/ anchors + harvest(校准案例的规则)/ shapes
+│   │                       #   criteria(判定标准截自评分 prompt)/ anchors + harvest(校准案例的规则)/
+│   │                       #   clauses(条款候选的聚合与过闸)/ shapes
 │   ├── calibration.py      #   校准案例(往届判例)的 IO 编排:取判例/录种子判例/收割往届一致卡(缺省关闭)
+│   ├── clause_candidates.py#   评分条款候选:周期结束后聚合人机不一致 → 模型归纳 → 过闸落库(缺省关闭,只给人看)
 │   ├── grounding.py        #   落地校验:引文是否在原文里、两段文本是否重叠
 │   ├── material.py         #   简历材料进 prompt 的统一排布(报名信息 + 简历全文,包数据区)
 │   ├── investigate_graph.py#   调查出题子图:route→explore→generate(含 skip/guided 分支)
@@ -111,7 +113,7 @@ src/official_agent/
 │   ├── threads.py          #   agent_threads:会话档案(建档/属主校验/硬删)
 │   ├── conversation.py     #   agent_conversation_log:对话日志 + usage 解包
 │   ├── evaluation/         #   包:scorecard_store / job_store / review_queue / calibration_store /
-│   │                       #   bootstrap / _connection(池)
+│   │                       #   clause_store / bootstrap / _connection(池)
 │   ├── qbank.py            #   interview_qbank:题库 + pick_log
 │   ├── audit.py            #   agent_audit_log:审计(五字段,ADR-0006)
 │   └── config_store.py     #   agent_config:热配置(DB 覆盖 env)
@@ -273,6 +275,11 @@ flowchart LR
 案例集按周期冻结(周期开跑时记下案例号水位),不用本周期与本简历的案例;判例入库时过
 注入扫描与脱敏,进 prompt 时包数据区。取不到判例不挡评分。
 
+评分条款候选(**缺省关闭**)不在评分路径上:周期结束后由管理面触发,把人机看法不一致的卡
+按判定项聚合(纯代码),交一次模型调用归纳成「补充条款的候选」,过闸后存表,周期复盘报告
+用只读函数取。候选只给人看——采纳方式只有人改 `prompts/` 下的文件并发 PR,代码里没有
+任何据此改 prompt 的路径。
+
 初筛看两个维度,互不折算:**部门匹配度**(四个部门的录入标准清单都判,志愿部门那张
 决定匹配度,其余用于调剂建议)与**认真程度**(内容充实/了解社团部门/意愿真挚/成文/
 不套话)。模型只逐项判定达成与否并给原文引文,两维 0-10 分由清单权重派生落卡;
@@ -341,6 +348,7 @@ flowchart TD
 | `evaluation_scorecard` | AI 参考分卡(card JSONB/total/hard_zero;critic / panel 模式的卡带 `panel` 块:模式/置信度/注入片段/分歧) | UNIQUE(resume,cycle,card_version);状态机 CHECK |
 | `evaluation_job` | 执行 job(状态机/attempts/qbank_status) | 部分唯一索引:活跃 job 每 (resume,cycle) 一条 |
 | `evaluation_calibration_case` | 初筛校准案例(条目级判例 + 向量 real[],记 embed_model) | 案例不可改,只能停用;同一张卡的同一判定项只入库一次;按周期用案例号水位冻结 |
+| `evaluation_clause_candidate` | 评分条款候选(判定项/方向/候选文字/支持卡数) | 按周期整批替换;只给人看,评分路径不读;文字入库前过长度/个人信息/指令样文本三道闸 |
 | `interview_qbank` | 题库信封(v2 JSONB) | 版本递增 |
 | `qbank_pick_log` | 面试官选题记录 | 服务端权威引用(防伪造证据路径) |
 | `agent_audit_log` | 审计(ADR-0006 五字段) | 代理身份+trace_id |

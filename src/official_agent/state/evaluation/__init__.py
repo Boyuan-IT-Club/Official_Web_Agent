@@ -1,13 +1,13 @@
 """evaluation 状态面(包):scorecard / job / 评审队列 + 自举与连接。
 
 拆分自单文件版;本 `__init__` re-export 全部公共名,消费方
-(`from official_agent.state import evaluation`)零改动。校准案例的数据面在
-calibration_store 模块,按模块名引用(`evaluation.calibration_store`)。
+(`from official_agent.state import evaluation`)零改动。校准案例与条款候选的数据面在
+calibration_store / clause_store 模块,按模块名引用(`evaluation.calibration_store`)。
 """
 
 from __future__ import annotations
 
-from official_agent.state.evaluation import calibration_store
+from official_agent.state.evaluation import calibration_store, clause_store
 from official_agent.state.evaluation._connection import _conn, get_pool, reset_pool
 from official_agent.state.evaluation.bootstrap import ensure_once
 from official_agent.state.evaluation.job_store import (
@@ -47,6 +47,7 @@ __all__ = [
     "_conn",
     "JobStoreError",
     "calibration_store",
+    "clause_store",
     "claim_job",
     "claim_next_pending",
     "create_jobs",

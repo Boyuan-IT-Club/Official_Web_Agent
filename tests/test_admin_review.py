@@ -884,3 +884,135 @@ def test_harvest_only_runs_on_a_cycle_known_to_have_ended(
     assert store.harvested == [7]
     assert [a["action"] for a in store.audits] == [{"op": "calibration_harvest", "cycle_id": 7}]
 
+
+# ── 评分条款候选:查看 / 生成 ──────────────────────────────────
+
+_CLAUSES = "/api/agent/admin/evaluation/clauses"
+_GENERATE = f"{_CLAUSES}/generate"
+_CANDIDATE = {
+    "candidate_id": 1,
+    "cycle_id": 7,
+    "checklist": "技术部",
+    "item": "技术基础",
+    "direction": "lenient",
+    "clause": "只列了技术名词、没有说明用它做出了什么的,不算「技术基础」。",
+    "supporting_cards": 5,
+}
+
+
+class _ClauseBackend:
+    """假的候选表与假的归纳编排:记下管理面到底执行了什么。"""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.audits: list[dict] = []
+        self.generated: list[int] = []
+        self.model_fails = False
+        monkeypatch.setattr(ea.audit, "write_audit", lambda **k: self.audits.append(k))
+        monkeypatch.setattr(
+            ea.evaluation.clause_store, "list_candidates", lambda cycle_id: [_CANDIDATE]
+        )
+        monkeypatch.setattr(ea.clause_candidates, "generate_for_cycle", self._generate)
+
+    async def _generate(self, cycle_id, *, policy, created_by):
+        if self.model_fails:
+            raise ValueError("条款归纳两次输出均不合规")
+        self.generated.append(cycle_id)
+        return {"adopted_cards": 20, "comparable_cards": 18, "disagreeing_cards": 6,
+                "groups": 3, "candidates_stored": 2, "candidates_rejected": 1}
+
+
+def _enable_clauses(monkeypatch: pytest.MonkeyPatch, open_cycles) -> None:
+    from official_agent.config import Settings
+
+    settings = Settings(_env_file=None, evaluation_clause_candidates_enabled=True)
+    monkeypatch.setattr(ea, "get_settings", lambda: settings)
+
+    async def _open_ids() -> set[int]:
+        if isinstance(open_cycles, Exception):
+            raise open_cycles
+        return set(open_cycles)
+
+    monkeypatch.setattr(ea, "_open_cycle_ids", _open_ids)
+
+
+def test_clause_candidates_can_be_read_with_review_permission(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_resolve(monkeypatch, ["resume:audit"])
+    _ClauseBackend(monkeypatch)
+
+    body = client.get(f"{_CLAUSES}?cycle_id=7", headers=_AUTH).json()
+
+    assert body["items"] == [_CANDIDATE]
+    assert body["total"] == 1 and body["cycle_id"] == 7
+    assert body["enabled"] is False  # 生成条款候选的开关缺省关着
+
+
+def test_generating_clause_candidates_needs_the_run_permission(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_resolve(monkeypatch, ["resume:audit"])
+    backend = _ClauseBackend(monkeypatch)
+
+    resp = client.post(_GENERATE, headers=_AUTH, json={"cycle_id": 7})
+
+    assert resp.status_code == 403
+    assert backend.generated == [] and backend.audits == []
+
+
+def test_clause_generation_is_refused_while_the_switch_is_off(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """生成条款候选缺省关闭:它要调模型,且要有一个完整周期的人工采纳数据才有东西可归纳。"""
+    _install_resolve(monkeypatch, ["evaluation:run"])
+    backend = _ClauseBackend(monkeypatch)
+
+    resp = client.post(_GENERATE, headers=_AUTH, json={"cycle_id": 7})
+
+    assert resp.status_code == 409 and "未启用" in resp.json()["detail"]
+    assert backend.generated == [] and backend.audits == []
+
+
+def test_clause_generation_only_runs_on_a_cycle_known_to_have_ended(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_resolve(monkeypatch, ["evaluation:run"])
+    backend = _ClauseBackend(monkeypatch)
+
+    _enable_clauses(monkeypatch, open_cycles={7})
+    still_open = client.post(_GENERATE, headers=_AUTH, json={"cycle_id": 7})
+    assert still_open.status_code == 409 and "还在进行中" in still_open.json()["detail"]
+
+    _enable_clauses(monkeypatch, open_cycles=RuntimeError("后端不可达"))
+    assert client.post(_GENERATE, headers=_AUTH, json={"cycle_id": 7}).status_code == 503
+    assert backend.generated == [] and backend.audits == []
+
+    _enable_clauses(monkeypatch, open_cycles={8})
+    done = client.post(_GENERATE, headers=_AUTH, json={"cycle_id": 7})
+    assert done.status_code == 200
+    assert done.json()["cycle_id"] == 7 and done.json()["candidates_stored"] == 2
+    assert backend.generated == [7]
+    (entry,) = backend.audits
+    assert entry["action"] == {"op": "clause_candidates_generated", "cycle_id": 7}
+
+
+def test_clause_generation_is_not_run_when_audit_is_down_and_reports_model_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_resolve(monkeypatch, ["evaluation:run"])
+    backend = _ClauseBackend(monkeypatch)
+    _enable_clauses(monkeypatch, open_cycles=set())
+
+    backend.model_fails = True
+    failed = client.post(_GENERATE, headers=_AUTH, json={"cycle_id": 7})
+    assert failed.status_code == 502 and "原有的候选保留" in failed.json()["detail"]
+
+    def _audit_down(**_k):
+        raise RuntimeError("审计库连不上")
+
+    backend.model_fails = False
+    monkeypatch.setattr(ea.audit, "write_audit", _audit_down)
+    resp = client.post(_GENERATE, headers=_AUTH, json={"cycle_id": 7})
+    assert resp.status_code == 503 and "操作未执行" in resp.json()["detail"]
+    assert backend.generated == []
+

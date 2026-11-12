@@ -213,6 +213,26 @@ class RebuttalOutput(BaseModel):
     verdicts: list[RebuttalVerdict] = Field(min_length=1)
 
 
+# ── 评分条款候选:周期结束后从人机不一致的判定里归纳,只给人看 ──
+
+
+class ClauseCandidate(BaseModel):
+    """一条补充条款候选:针对输入里的某个条目(group 是它的序号),一两句话。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    group: int = Field(ge=0, description="这条候选针对的条目序号,取自输入")
+    clause: str = Field(min_length=1, description="补充条款的文字:什么情形算、什么情形不算")
+
+
+class ClauseInductionOutput(BaseModel):
+    """条款归纳的结构化输出。没有值得写的条款时 candidates 为空。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    candidates: list[ClauseCandidate] = Field(default_factory=list)
+
+
 class QuestionEvidence(BaseModel):
     """证据锚:仓内可点路径(deep_dive 必填);无仓引导题留空+note 说明。"""
 

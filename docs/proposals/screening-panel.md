@@ -4,7 +4,8 @@
 > 环境,见 D1「落地」);**P1(批判者先行)已实现**,真模型的 eval 同样没跑(见「P1 落地」);
 > **P2(拆评委)的机制已实现,缺省不启用,启用条件尚未满足**(见「P2 落地」);
 > **P3(校准案例)的机制已实现,两个开关缺省关闭**:种子判例还没人写,往届一致卡要等一个
-> 完整周期的人工采纳数据(见「P3 落地」);P4 未实现。
+> 完整周期的人工采纳数据(见「P3 落地」);**P4(评分条款候选)的机制已实现,开关缺省关闭**:
+> 没有真实的人工采纳数据,归纳角色没在真模型上跑过(见「P4 落地」)。四期的启用条件都没有满足。
 > 范围 = B 模块评分子图(`evaluation/graph.py`)与人工复核队列;**不改出题线,不改等级划分
 > 规则**。共同约束见 [README](README.md)。
 
@@ -250,6 +251,11 @@ flowchart TD
 (ADR-0004)。不存在任何自动写 prompt 的路径——打分规则的变化是行为变更,必须有人审,而且同样
 只能在周期之间生效。
 
+**落地时的分工取舍(P4)。** 立项时设想归纳这一步并入周期复盘,由复盘线的分析员来做。实现时
+改成了**归纳留在合议线自己做**:复盘线的分析员只看聚合指标、不碰简历原文,而归纳要看的正是
+不一致条目上的引文与理由。合议线把过了闸的候选文字和支持卡数存在自己的表里,复盘线用一个
+只读函数取出来,用代码放进报告的栏目——候选文字不再经过复盘线的任何模型。
+
 ## 5. 数据面
 
 带批判者的模式(`critic`)出的卡是 `evaluation_scorecard/v3`:在 v2 的基础上多一个 `panel`
@@ -354,6 +360,44 @@ checklist / item / met / quote / reason / embed_model / created_by / created_at 
 停用立即生效。清单与判定项的取值范围是固定的(四个部门各 4 项 + 认真程度 5 项),见
 `evaluation/schema.py` 的 `DEPT_MATCH_ITEMS` 与 `EFFORT_ITEMS`。
 
+**评分条款候选(P4 新增,前缀同上)**
+
+| 接口 | 权限 | 说明 |
+|---|---|---|
+| `GET /admin/evaluation/clauses?cycle_id=` | `resume:audit` | 一个周期已生成的条款候选,支持卡数多的在前。返回 `{items, total, cycle_id, enabled}`;没生成过则 `items` 为空;`enabled` 是「允许生成」的开关 |
+| `POST /admin/evaluation/clauses/generate` | `evaluation:run` | 请求体 `{cycle_id}`。为一个已结束的周期生成候选,**整批替换**该周期原有的候选,返回各步计数。**缺省关闭,调用返回 409** |
+
+`items[]` 每项:
+
+| 字段 | 说明 |
+|---|---|
+| `candidate_id` / `cycle_id` | 候选号、所属周期 |
+| `checklist` / `item` | 针对哪个判定项(清单名是部门名或「认真程度」) |
+| `direction` | `lenient` = 在这一项上 AI 判得比评审人宽;`strict` = AI 判得比评审人严 |
+| `clause` | 候选文字,10–300 字,已过长度、个人信息、指令样文本三道闸 |
+| `supporting_cards` | 在这个判定项上人机看法不一致的卡数(代码数出来的,不是模型说的) |
+| `prompt_version` / `model` / `created_by` / `created_at` | 归纳用的 prompt 版本与模型、触发人、生成时间 |
+
+生成接口返回 `{cycle_id, adopted_cards, comparable_cards, disagreeing_cards, groups,
+candidates_stored, candidates_rejected}`。错误:409 开关没开,或周期还在进行中;503 无法确认
+周期是否结束,或审计服务不可用;502 模型两次都没给出合规的输出(该周期原有的候选保留)。
+
+候选是**只读的展示内容**:管理面没有「采纳」按钮,也不应该有——采纳只能是人改
+`prompts/` 下的文件并发 PR。
+
+**给周期复盘线的只读出口**(纯代码,不调模型;同步函数,异步上下文里用 `asyncio.to_thread`):
+
+```python
+from official_agent.state.evaluation import clause_store
+
+clause_store.list_candidates(cycle_id: int) -> list[dict[str, Any]]
+```
+
+返回该周期已生成的候选,按 `supporting_cards` 从多到少;没有生成过返回空列表。每项的键同
+上表(`candidate_id / cycle_id / checklist / item / direction / clause / supporting_cards /
+prompt_version / model / created_by / created_at`)。`clause` 已经过了入库前的三道闸,复盘线
+可以直接放进报告的栏目;报告里要展示的数字用 `supporting_cards`。
+
 校准案例表(`state/evaluation/calibration_store.py`,每个进程第一次用到时自建):
 
 ```sql
@@ -384,6 +428,24 @@ CREATE TABLE IF NOT EXISTS evaluation_calibration_case (
   相似度,几十到几百条的量级用不着向量索引;这样这张表的自举也不依赖 pgvector 扩展。
   「记录 `embed_model`、不跨模型混检」的纪律照守:读取时只取当前嵌入模型的行。
 - `dept` 改叫 `checklist`(认真程度清单不是部门);多了 `created_by` 与 `retired_at`。
+
+条款候选表(`state/evaluation/clause_store.py`,同样是每个进程第一次用到时自建):
+
+```sql
+CREATE TABLE IF NOT EXISTS evaluation_clause_candidate (
+    candidate_id     bigserial   PRIMARY KEY,
+    cycle_id         int         NOT NULL,
+    checklist        text        NOT NULL,
+    item             text        NOT NULL,
+    direction        text        NOT NULL CHECK (direction IN ('lenient', 'strict')),
+    clause           text        NOT NULL,
+    supporting_cards int         NOT NULL,
+    prompt_version   text        NOT NULL,
+    model            text        NOT NULL,
+    created_by       bigint,
+    created_at       timestamptz NOT NULL DEFAULT now()
+);
+```
 
 立项时设想的 `evaluation_panel_max_parallel` 没有加:评委扇出
 的并发由评估域的模型并发闸统一限(见「P2 落地」),不再给合议单设一个上限。
@@ -423,6 +485,7 @@ P1 只有其中两个角色:**评委**是现有的那一次调用(一个人判�
 | `scoring_probes`(已有;P0 已扩展) | 真模型 | 区间一致率、条目翻转率、注入拦截率;成本只记录 |
 | `panel_probes`(P1 已有) | 确定性 | 汇总规则:双钥 `bad_faith`、注入片段重叠置未达成、置信度推导。「缺评委即失败」发生在汇总之前,由评分子图的单测守 |
 | `critic_probes`(P1 已有,**未跑**) | 真模型 | 植入的错引文与注入被质疑(`critic_catch_rate`);干净卡不被误伤(`critic_clean_rate`)。两个门槛是初值,没有经过真模型校准 |
+| `clause_probes`(P4 已有,**未跑**) | 真模型 | 给定人机不一致的条目与样例:归纳得出候选;样例里的指令样文本与个人信息不会被抄进候选(抄了会被入库前的闸拦掉,用例记为失败)。门槛是初值 |
 | `calibration_probes`(P3 已有) | 确定性 + 检索 | 同简历隔离、周期冻结、含注入的案例不入库(确定性,13 条,已跑通);相关判例能检到(要嵌入模型,2 条,**未跑**) |
 
 上线判据:同一份数据集上,相对 D1 的基线,翻转率下降、区间一致率不降、注入拦截率不降。
@@ -444,7 +507,7 @@ P1 只有其中两个角色:**评委**是现有的那一次调用(一个人判�
 | P1 | 批判者先行:单评委 + 批判者 + 答辩 + 置信度 + 低置信队列 | 注入拦截率上升;低置信卡的人工驳回率明显高于其余 | 代码、单测、`panel_probes` 已有,真库集成档跑过;**两条验收都未达成**:前一条要基线和 key,后一条要一个周期的人工复核数据 |
 | P2 | 拆评委,只在周期之间切换模式 | 翻转率下降且区间一致率不降 | 机制、单测已有,**缺省不启用**;验收未达成(没有基线,也没有 `panel` 模式的数) |
 | P3 | 校准案例:先种子判例,后往届一致卡 | `calibration_probes` 通过,区间一致率不降 | 机制、单测、真库集成档已有,**两个开关缺省关闭**;`calibration_probes` 的确定性部分通过,要嵌入模型的两条和「区间一致率不降」都没验 |
-| P4 | 条款候选,并入周期复盘 | 复盘报告里出现候选栏目 | 未开始 |
+| P4 | 条款候选,并入周期复盘 | 复盘报告里出现候选栏目 | 合议线这一半(聚合、归纳、候选表、触发接口、只读出口)的机制、单测、真库集成档已有,**开关缺省关闭**;报告栏目由复盘线接;没有真实的人工采纳数据,`clause_probes` 没跑,验收未达成 |
 
 P1 单独上线就有价值:它补上了约定里有、图里没有的注入检测节点。
 
@@ -593,15 +656,56 @@ LangGraph `Send` 扇出,各自独立上下文;`critic` 与 `single` 两种模式
 
 没有验证的:真模型与真嵌入模型都没跑过;判例到底让评委判得更准还是更偏,没有数字。
 
+### P4 落地
+
+周期结束后,从人和 AI 看法不一致的判定里归纳「补充条款候选」。规则是纯函数
+(`evaluation/panel/clauses.py`),IO 与那一次模型调用在 `evaluation/clause_candidates.py`。
+
+- **聚合**(纯代码):人机一致与否沿用 P3 的口径——AI 的位次(志愿部门匹配分 + 认真程度分)
+  与评审人采纳分的位次在同一个候选池里落在不同的带,即不一致;池子不足
+  `evaluation_grade_min_pool` 人不比。不一致是整张卡的事,落到判定项上的规则是:
+  AI 把卡排高了(`lenient`),嫌疑在它判为**达成**的项;排低了(`strict`),嫌疑在它判为
+  **未达成**的项。只看参与 AI 位次的两张清单(第一志愿部门的清单与认真程度清单)。
+  按(清单, 判定项, 方向)聚合,数出各有多少张卡。
+- **哪些条目值得归纳**:支持卡数不到 3 张的不要;一次最多送 12 个条目,每个条目最多带 5 条
+  样例。三个数都是代码里的初值。
+- **归纳**(新模型角色,`prompts/evaluation/panel/clauses.md`,strong 档):输入是这些条目
+  的样例(引文与理由)和现行判定标准。样例进模型前再脱敏一次,含指令样文本的样例直接不给
+  模型看,其余包数据区。输出是「条目序号 + 一两句话」;strict 校验,指向不存在的条目或同一
+  条目两条候选都回灌重试一次。
+- **入库前的三道闸**:长度(10–300 字)、个人信息(脱敏会改动文字即拒绝)、指令样文本
+  (`scan_injection`)。没过闸的候选丢弃并计数,不连累其余候选。
+- **数字归代码**:每条候选的支持卡数取自聚合结果;模型的输出格式里没有这个字段,自报
+  卡数会被 strict 校验打回。
+- **存储**:`evaluation_clause_candidate` 表,每次生成整批替换该周期原有的候选(同一个
+  事务)。模型失败时不写,原有的候选不动。
+- **触发**:管理面 `POST /admin/evaluation/clauses/generate`,`evaluation:run`,先落审计
+  再执行;要能从后端确认周期已经结束。
+- **不存在自动采纳的路径**,有两条测试守着:评分路径(评分子图、runner、评委、批判者、
+  校准案例)的代码不引用条款候选的任何模块;条款候选的代码里没有任何写文件的调用。
+
+**开关 `EVALUATION_CLAUSE_CANDIDATES_ENABLED` 缺省关闭**,启用条件都没有满足:
+
+1. 有至少一个完整周期的人工采纳数据——没有就没有「人机不一致」可言;
+2. 人机不一致的口径用真实数据核对过(现在只用合成数据测了机制;人的分数取的是单个评审人
+   的票,开放问题 2 仍然开着);
+3. `clause_probes` 在真模型上跑过,归纳 prompt 至少迭代过一轮;
+4. 周期复盘线把候选栏目接上(用 §5.1 的只读出口)。
+
+没有验证的:归纳角色一次没在真模型上跑过,prompt 是首版;归纳出来的条款有没有用,要等
+部长看过真实的候选才知道。
+
 ## 11. 代码落位
 
-已落地(P0–P3):
+已落地(P0–P4):
 
 - `evaluation/panel/`:`shapes.py`(节点间传递的数据形状)、`criteria.py`(判定标准的截取)、
   `judges.py`(拆开的评委与答辩)、`critic.py`、`aggregate.py`(纯函数)、`chair.py`、
   `anchors.py`(校准案例的规则)、`harvest.py`(往届一致卡的规则)。
 - `evaluation/calibration.py`:校准案例的 IO 编排(取判例、录种子判例、收割);
   `state/evaluation/calibration_store.py`:案例表。
+- `evaluation/panel/clauses.py`(条款候选的规则)、`evaluation/clause_candidates.py`
+  (聚合 → 归纳 → 落库的编排)、`state/evaluation/clause_store.py`(候选表与只读出口)。
 - `evaluation/grounding.py`:引文落地校验(从评分子图里提出来)与文本重叠判断;
   `evaluation/material.py`:简历材料进 prompt 的统一排布。
 - `evaluation/graph.py`:`build_evaluation_subgraph(mode)` 按模式装配,`single` 模式的图保持
@@ -610,14 +714,15 @@ LangGraph `Send` 扇出,各自独立上下文;`critic` 与 `single` 两种模式
   `cycle_scoring_mode`;`review_queue.py` 的低置信队列。
 - `web/evaluation_admin.py`:队列参数。
 - `prompts/evaluation/panel/`:`critic.md`、`rebuttal.md`、`preamble.md`、`dept.md`、
-  `effort.md`、`chair.md`、`anchors.md`。
+  `effort.md`、`chair.md`、`anchors.md`、`clauses.md`。
 - `evals/scoring_probes.py`(P0 扩展)、`evals/panel_probes.py`、`evals/critic_probes.py`、
-  `evals/calibration_probes.py`,数据集在仓库根的 `evals/datasets/`。
+  `evals/calibration_probes.py`、`evals/clause_probes.py`,数据集在仓库根的 `evals/datasets/`。
 
 待做:
 
 - P2 的收尾:先发一路再扇出(视缓存命中率实测结果);主席降到 light 档的 eval。
 - P3 的收尾:给 `scoring_probes` 加带判例的跑法;种子判例的内容(要部长来写)。
+- P4 的另一半:周期复盘报告里的候选栏目(复盘线接)。
 
 ## 12. 开放问题
 
@@ -644,3 +749,6 @@ LangGraph `Send` 扇出,各自独立上下文;`critic` 与 `single` 两种模式
 12. 新周期的头两个 job 同时开跑时,各自读到「周期里还没有卡」,各自取当前水位;这中间
     恰好有人录了新判例的话,两张卡的水位会不同,之后的 job 以先落库的那张为准。窗口很小,
     没有加锁。
+13. 人机不一致是整张卡的事,落到判定项上只能按「排高了看达成项、排低了看未达成项」去猜。
+    一张排高了的卡上所有达成项都会被记一笔,其中多数其实没问题。支持卡数因此偏高,靠
+    「至少 3 张」这个门槛和归纳时的「宁缺毋滥」来消化;有了真实数据要看这个噪声有多大。

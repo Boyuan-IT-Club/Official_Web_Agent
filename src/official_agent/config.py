@@ -124,6 +124,11 @@ class Settings(BaseSettings):
     evaluation_calibration_enabled: bool = False
     evaluation_calibration_harvest_enabled: bool = False
 
+    # 初筛评分条款候选(见 evaluation/clause_candidates.py),**缺省关闭**:周期结束后从
+    # 人机看法不一致的判定里归纳补充条款的候选,给管理员看。它要一次 strong 档模型调用,
+    # 且要有一个完整周期的人工采纳数据才有东西可归纳。候选不会自动改任何 prompt。
+    evaluation_clause_candidates_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

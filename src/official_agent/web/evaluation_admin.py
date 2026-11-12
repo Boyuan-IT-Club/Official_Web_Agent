@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from official_agent.config import get_settings
-from official_agent.evaluation import calibration
+from official_agent.evaluation import calibration, clause_candidates
 from official_agent.evaluation import runner as eval_runner
 from official_agent.evaluation.grading import CardGrades, GradingPolicy, PoolEntry, grade_pool
 from official_agent.evaluation.graph import GRADED_CARD_SCHEMAS
@@ -742,3 +742,70 @@ async def harvest_calibration_cases(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail="收割失败,请稍后重试") from exc
     return {"cycle_id": body.cycle_id, **counts}
+
+
+# ── 评分条款候选:周期结束后从人机不一致的判定里归纳,只给人看 ──────────
+#
+# 候选不会改任何规则:采纳方式只有人改 prompts/ 下的文件并发 PR。生成要调一次
+# strong 档模型并读整个周期的卡,所以与触发初筛同一权限,并先落审计再执行。
+
+
+class ClauseGenerateBody(BaseModel):
+    cycle_id: int = Field(ge=1)
+
+
+@router.get("/admin/evaluation/clauses")
+async def list_clause_candidates(
+    _: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
+    cycle_id: int,
+) -> dict[str, Any]:
+    """一个周期已生成的评分条款候选,支持卡数多的在前;没有生成过则 items 为空。"""
+    try:
+        items = await asyncio.to_thread(evaluation.clause_store.list_candidates, cycle_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail="查询条款候选失败,请稍后重试") from exc
+    return {
+        "items": items,
+        "total": len(items),
+        "cycle_id": cycle_id,
+        "enabled": get_settings().evaluation_clause_candidates_enabled,
+    }
+
+
+@router.post("/admin/evaluation/clauses/generate")
+async def generate_clause_candidates(
+    body: ClauseGenerateBody,
+    identity: Annotated[ResolvedIdentity, Depends(_require_evaluation_run)],
+) -> dict[str, Any]:
+    """为一个**已结束**的周期生成评分条款候选,整批替换该周期原有的候选,返回各步计数。
+
+    缺省关闭(409)。周期还开着 → 409;确认不了周期是否结束 → 503;模型输出两次都
+    不合规 → 502,原有的候选不动。
+    """
+    if not get_settings().evaluation_clause_candidates_enabled:
+        raise HTTPException(status_code=409, detail="生成评分条款候选的功能未启用")
+    try:
+        open_ids = await _open_cycle_ids()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="无法确认该周期是否已结束,未执行") from exc
+    if body.cycle_id in open_ids:
+        raise HTTPException(status_code=409, detail="该周期还在进行中,结束后才能生成条款候选")
+    await _audit_calibration(
+        identity,
+        {"op": "clause_candidates_generated", "cycle_id": body.cycle_id},
+        "生成评分条款候选",
+    )
+    try:
+        counts = await clause_candidates.generate_for_cycle(
+            body.cycle_id,
+            policy=_grading_policy(),
+            created_by=int(identity.get("user_id") or 0),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=502, detail="模型没有给出合规的候选,本次未写入;原有的候选保留"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail="生成条款候选失败,请稍后重试") from exc
+    return {"cycle_id": body.cycle_id, **counts}
+

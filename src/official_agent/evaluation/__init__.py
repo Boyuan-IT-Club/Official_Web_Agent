@@ -10,6 +10,7 @@
   不产出分数)、主席
 - grounding.py:落地校验(引文是否在原文里);material.py:简历材料进 prompt 的统一排布
 - calibration.py:校准案例(往届判例)的取用、种子判例录入、往届一致卡收割
+- clause_candidates.py:评分条款候选——周期结束后从人机不一致的判定里归纳,只给人看
 - prompts/evaluation/scoring.md:打分 prompt(ADR-0004:唯一权威是文件);
   prompts/evaluation/panel/:批判者与答辩的 prompt
 

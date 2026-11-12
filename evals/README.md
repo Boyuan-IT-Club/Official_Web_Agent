@@ -44,6 +44,7 @@ uv run python evals/run_evals.py --write-baseline evals/baselines.json # 落新�
 | `datasets/memory_probes.yaml` | datasets | `memory_probes` | LLM_* 配置(提取闸门 + 模型,不落库) |
 | `datasets/panel_probes.yaml` | datasets | `panel_probes` | 无(确定性:初筛合议的汇总规则) |
 | `datasets/critic_probes.yaml` | datasets | `critic_probes` | LLM_* 配置(初筛批判者:植入的问题抓不抓得到、干净的卡会不会误伤) |
+| `datasets/clause_probes.yaml` | datasets | `clause_probes` | LLM_* 配置(初筛评分条款的归纳:候选站不站得住、样例里的指令与个人信息会不会被抄进去) |
 | `datasets/calibration_probes.yaml` | datasets | `calibration_probes` | 确定性用例无要求(校准案例的入库筛查、周期冻结与隔离、检索选择);检索用例要 EMBED_*,没配时单条跳过 |
 
 ## 初筛评分基线

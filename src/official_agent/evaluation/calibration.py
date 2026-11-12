@@ -13,7 +13,7 @@ import logging
 from typing import Any
 
 from official_agent.config import get_settings
-from official_agent.evaluation.grading import GradingPolicy, pool_key
+from official_agent.evaluation.grading import GradingPolicy
 from official_agent.evaluation.panel import anchors, harvest
 from official_agent.kb.embedding import embed_texts
 from official_agent.state.evaluation import calibration_store
@@ -80,26 +80,6 @@ async def add_seed_case(
     return {"case_id": case_id, "origin": "seed", **case}
 
 
-def _harvest_entries(
-    cards: list[dict[str, Any]], human_scores: dict[int, int]
-) -> list[dict[str, Any]]:
-    """能参与人机对比的卡:可收割、且有评审人采纳时给的分数。"""
-    entries = []
-    for row in cards:
-        card, resume_id = row["card"], int(row["resume_id"])
-        if resume_id in human_scores and harvest.harvestable(card):
-            entries.append(
-                {
-                    "resume_id": resume_id,
-                    "pool": pool_key((card.get("intended") or {}).get("first")),
-                    "ai_score": float(card["match_score"]) + float(card["effort_score"]),
-                    "human_score": float(human_scores[resume_id]),
-                    "card": card,
-                }
-            )
-    return entries
-
-
 async def harvest_cycle(
     cycle_id: int, *, policy: GradingPolicy, created_by: int | None
 ) -> dict[str, int]:
@@ -114,7 +94,7 @@ async def harvest_cycle(
     """
     cards = await asyncio.to_thread(calibration_store.list_adopted_cards, cycle_id)
     human_scores = await asyncio.to_thread(calibration_store.adopted_human_scores, cycle_id)
-    entries = _harvest_entries(cards, human_scores)
+    entries = harvest.comparable_entries(cards, human_scores)
     consistent = harvest.consistent_resumes(
         entries,
         top_ratio=policy.top_ratio,
