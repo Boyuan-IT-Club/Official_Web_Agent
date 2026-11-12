@@ -54,17 +54,27 @@ class TriggerItem:
     resume_id: int
 
 
+#: 用量行的段标记,写进 tools 列。一个 job 的评分段与题库段各落一行、挂在同一个
+#: eval:<job_id> 线程下,按段统计成本只能靠这一列区分——文案列写入前会过 PII
+#: 掩码(简历号这类数字可能被改写),不能当判据。
+_SCORING_STAGE_TOOLS = ("scoring",)
+_QBANK_STAGE_TOOLS = ("explore", "grilling")
+
+
 def _write_eval_usage_log(
     *,
     job_id: int,
     job_user_id: int | None,
-    resume_id: int,
-    cycle_id: int,
-    qbank_version: int,
+    stage_tools: tuple[str, ...],
+    user_message: str,
+    reply_summary: str,
     usage: dict,
 ) -> None:
-    """eval 通道用量日志:thread_id 关联 job;四列 token 进会话用量面板。
+    """eval 通道用量日志:每段一行,thread_id 关联 job;四列 token 进会话用量面板。
 
+    stage_tools 取 _SCORING_STAGE_TOOLS / _QBANK_STAGE_TOOLS,标明这一行属于哪一段。
+    usage 为空(该段没调模型,或模型响应不带用量)照样落行,token 四列留 NULL:
+    NULL 表示「没有用量记录」,不是 0。
     fail-open:日志写失败不拖垮 job(与审计同语义)。"""
     try:
         from official_agent.state.conversation import write_conversation
@@ -73,13 +83,15 @@ def _write_eval_usage_log(
             thread_id=f"eval:{job_id}",
             user_id=job_user_id,
             channel="evaluation",
-            user_message=f"简历 {resume_id} 初筛+题库(周期 {cycle_id})",
-            reply_summary=f"题库 v{qbank_version} 落库",
-            tools=["explore", "grilling"],
+            user_message=user_message,
+            reply_summary=reply_summary,
+            tools=list(stage_tools),
             **(usage or {}),
         )
     except Exception:  # noqa: BLE001 — 用量日志缺失可容忍
-        logging.getLogger(__name__).warning("eval 用量日志写入失败", exc_info=True)
+        logging.getLogger(__name__).warning(
+            "eval 用量日志写入失败(job=%s,stage=%s)", job_id, "+".join(stage_tools), exc_info=True
+        )
 
 
 def _log_event(job_id: int, cycle_id: int, resume_id: int, stage: str, **fields: object) -> None:
@@ -382,6 +394,17 @@ async def _do_scoring(
         output_tokens=scoring_usage.get("output_tokens"),
         **_panel_facts(card),
     )
+    # 落卡之后才记用量:这一行对应一张已落库的卡。评分失败的那次调用不记
+    # (子图失败时不回传用量)。
+    await asyncio.to_thread(
+        _write_eval_usage_log,
+        job_id=job_id,
+        job_user_id=job.get("user_id"),
+        stage_tools=_SCORING_STAGE_TOOLS,
+        user_message=f"简历 {resume_id} 初筛评分(周期 {cycle_id})",
+        reply_summary=f"评分卡 v{version} 落库",
+        usage=scoring_usage,
+    )
     return card, version, fields, profile.grade
 
 
@@ -445,9 +468,9 @@ async def _do_qbank(
             _write_eval_usage_log,
             job_id=job_id,
             job_user_id=job.get("user_id"),
-            resume_id=resume_id,
-            cycle_id=cycle_id,
-            qbank_version=qbank_version,
+            stage_tools=_QBANK_STAGE_TOOLS,
+            user_message=f"简历 {resume_id} 初筛+题库(周期 {cycle_id})",
+            reply_summary=f"题库 v{qbank_version} 落库",
             usage=usage_total,
         )
     except Exception as qbank_exc:  # noqa: BLE001 — 题库线失败不拖垮评分卡

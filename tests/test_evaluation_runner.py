@@ -390,9 +390,9 @@ async def test_failure_marks_full_timeline_and_audits() -> None:
 
 @pytest.mark.asyncio
 async def test_eval_usage_log_written_per_job(monkeypatch) -> None:
-    """job 完成后 evaluation 通道用量日志落 conversation_log(关联 job)。"""
+    """job 完成后题库段的用量日志落 conversation_log(evaluation 通道,关联 job)。"""
 
-    seen: dict = {}
+    rows: list[dict] = []
 
     async def _fetch(user_id, cycle_id):
         return 99, _fields(), ApplicantProfile()
@@ -423,7 +423,7 @@ async def test_eval_usage_log_written_per_job(monkeypatch) -> None:
         }
 
     def _write_conversation(**kw):
-        seen["log"] = kw
+        rows.append(kw)
 
     monkeypatch.setattr(ev_runner, "fetch_scoring_fields", _fetch)
     monkeypatch.setattr(ev_runner, "run_evaluation", _run_evaluation)
@@ -446,11 +446,206 @@ async def test_eval_usage_log_written_per_job(monkeypatch) -> None:
 
     runner = EvaluationRunner()
     await runner._run_job(1, 2026, trigger_user_id=9)
-    log = seen["log"]
+    (log,) = _stage_rows(rows, ev_runner._QBANK_STAGE_TOOLS)
     assert log["channel"] == "evaluation"
     assert log["thread_id"] == "eval:1"  # 关联 job
     assert log["input_tokens"] == 150
     assert log["cache_hit_tokens"] == 100
+
+
+# ── 用量日志:评分段与题库段各落一行 ───────────────────────
+
+_USAGE_COLUMNS = ("input_tokens", "output_tokens", "cache_hit_tokens", "cache_miss_tokens")
+_SCORING_USAGE = {
+    "input_tokens": 1200,
+    "output_tokens": 340,
+    "cache_hit_tokens": 800,
+    "cache_miss_tokens": 400,
+}
+_QBANK_USAGE = {
+    "input_tokens": 150,
+    "output_tokens": 30,
+    "cache_hit_tokens": 100,
+    "cache_miss_tokens": 15,
+}
+
+
+def _stage_rows(rows: list[dict], stage_tools: tuple[str, ...]) -> list[dict]:
+    """从截获的用量行里挑出某一段的——判据与生产一致,只看 tools 列。"""
+    return [r for r in rows if r["tools"] == list(stage_tools)]
+
+
+def _patch_job_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    write_conversation,
+    scoring_usage: dict | None = _SCORING_USAGE,
+    run_evaluation_error: Exception | None = None,
+    save_scorecard_error: Exception | None = None,
+) -> list[tuple[str, dict]]:
+    """把 job 的取数、评分、落卡、题库全部换成替身,只留用量日志这条线可观察。
+
+    scoring_usage 为 None 表示评分子图不回传用量(确定性短路不调模型,或模型
+    响应不带用量)。返回 mark_job 的调用记录 [(状态, 其余入参)]。
+    """
+    marks: list[tuple[str, dict]] = []
+
+    async def _fetch(user_id, cycle_id):
+        return 99, _fields(), ApplicantProfile()
+
+    async def _run_evaluation(fields, *, resume_id, cycle_id, usage_out=None, **_kw):
+        if run_evaluation_error is not None:
+            raise run_evaluation_error
+        if scoring_usage is not None:
+            usage_out.update(scoring_usage)
+        return {"total": 66.0, "hard_zero": False, "dimensions": [], "attitude": {}}
+
+    def _save(card, *, resume_id, cycle_id, prompt_version):
+        if save_scorecard_error is not None:
+            raise save_scorecard_error
+        return 4
+
+    async def _fetch_github(user_id):
+        return "someuser"
+
+    async def _bundle(fields, **kw):
+        return {
+            "schema_name": "evaluation_qbank/v2",
+            "groups": [],
+            "explore_usage_total": dict(_QBANK_USAGE),
+            "prompt_version": "t",
+        }
+
+    async def _noop_status(resume_id, status):
+        return None
+
+    monkeypatch.setattr(ev_runner, "fetch_scoring_fields", _fetch)
+    monkeypatch.setattr(ev_runner, "run_evaluation", _run_evaluation)
+    monkeypatch.setattr(ev_runner.evaluation, "save_scorecard", _save)
+    monkeypatch.setattr(
+        ev_runner.evaluation,
+        "mark_job",
+        lambda job_id, status, **kw: marks.append((status, kw)) or True,
+    )
+    monkeypatch.setattr(
+        ev_runner.evaluation,
+        "get_job",
+        lambda jid: {"job_id": jid, "user_id": 42, "resume_id": 99},
+    )
+    monkeypatch.setattr(ev_runner.audit, "write_audit", lambda **k: None)
+    monkeypatch.setattr(ev_runner.asyncio, "to_thread", _fake_to_thread([]))
+    monkeypatch.setattr(ev_runner, "fetch_candidate_github", _fetch_github)
+    monkeypatch.setattr(ev_runner, "_set_resume_status", _noop_status)
+    monkeypatch.setattr("official_agent.evaluation.bundle.run_bundle", _bundle)
+    monkeypatch.setattr("official_agent.state.qbank.save_qbank", lambda **k: 3)
+    monkeypatch.setattr("official_agent.state.conversation.write_conversation", write_conversation)
+    return marks
+
+
+async def test_scoring_usage_row_written_with_fields(monkeypatch) -> None:
+    """评分成功 → 落一行评分段用量:挂 job 线程,四列 token 取自评分子图回传。"""
+    rows: list[dict] = []
+    _patch_job_pipeline(monkeypatch, write_conversation=lambda **kw: rows.append(kw))
+
+    await EvaluationRunner()._run_job(7, 2026, trigger_user_id=9)
+
+    (row,) = _stage_rows(rows, ev_runner._SCORING_STAGE_TOOLS)
+    assert row["channel"] == "evaluation"
+    assert row["thread_id"] == "eval:7"
+    assert row["user_id"] == 42  # 简历归属人,不是触发人
+    assert row["tools"] == ["scoring"]
+    assert {k: row[k] for k in _USAGE_COLUMNS} == _SCORING_USAGE
+    assert row["user_message"] == "简历 99 初筛评分(周期 2026)"
+    assert row["reply_summary"] == "评分卡 v4 落库"  # 对应刚落库的那一版卡
+
+
+async def test_scoring_usage_row_written_without_tokens_when_usage_missing(monkeypatch) -> None:
+    """评分子图没回传用量 → 行照落,token 四列不带值(库里是 NULL,不是 0)。"""
+    rows: list[dict] = []
+    marks = _patch_job_pipeline(
+        monkeypatch, write_conversation=lambda **kw: rows.append(kw), scoring_usage=None
+    )
+
+    await EvaluationRunner()._run_job(7, 2026, trigger_user_id=9)
+
+    (row,) = _stage_rows(rows, ev_runner._SCORING_STAGE_TOOLS)
+    assert all(row.get(k) is None for k in _USAGE_COLUMNS)
+    assert row["reply_summary"] == "评分卡 v4 落库"
+    assert [status for status, _ in marks] == ["succeeded"]
+
+
+async def test_scoring_and_qbank_usage_rows_are_distinguishable(monkeypatch) -> None:
+    """一个 job 落两行用量:同一线程,tools 列不同,各带各的 token。"""
+    rows: list[dict] = []
+    _patch_job_pipeline(monkeypatch, write_conversation=lambda **kw: rows.append(kw))
+
+    await EvaluationRunner()._run_job(7, 2026, trigger_user_id=9)
+
+    assert len(rows) == 2
+    assert {r["thread_id"] for r in rows} == {"eval:7"}
+    (scoring,) = _stage_rows(rows, ev_runner._SCORING_STAGE_TOOLS)
+    (qbank,) = _stage_rows(rows, ev_runner._QBANK_STAGE_TOOLS)
+    assert not set(scoring["tools"]) & set(qbank["tools"])  # 段标记互不包含
+    assert {k: scoring[k] for k in _USAGE_COLUMNS} == _SCORING_USAGE
+    assert {k: qbank[k] for k in _USAGE_COLUMNS} == _QBANK_USAGE
+
+
+async def test_usage_log_write_failure_does_not_fail_job(monkeypatch, caplog) -> None:
+    """用量日志写不进去(两段都失败)→ job 照常 succeeded、题库段不被连带判失败。"""
+    import logging as _logging
+
+    def _boom(**kw):
+        raise RuntimeError("pg down")
+
+    marks = _patch_job_pipeline(monkeypatch, write_conversation=_boom)
+
+    with caplog.at_level(_logging.WARNING, logger="official_agent.evaluation.runner"):
+        await EvaluationRunner()._run_job(7, 2026, trigger_user_id=9)
+
+    assert [status for status, _ in marks] == ["succeeded"]
+    assert marks[0][1]["card_version"] == 4
+    assert marks[0][1]["qbank_status"] == "succeeded"
+    failures = [r.getMessage() for r in caplog.records if "eval 用量日志写入失败" in r.getMessage()]
+    assert len(failures) == 2  # 两段各留一条可诊断痕迹
+    assert any("stage=scoring" in m for m in failures)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        {"run_evaluation_error": RuntimeError("评分子图失败")},
+        {"save_scorecard_error": RuntimeError("pg down")},
+    ],
+    ids=["run_evaluation_fails", "save_scorecard_fails"],
+)
+async def test_failed_scoring_writes_no_usage_row(monkeypatch, failure: dict) -> None:
+    """评分段没产出已落库的卡 → 不落用量行(每行评分段用量都对应一版卡)。"""
+    rows: list[dict] = []
+    marks = _patch_job_pipeline(
+        monkeypatch, write_conversation=lambda **kw: rows.append(kw), **failure
+    )
+
+    await EvaluationRunner()._run_job(7, 2026, trigger_user_id=9)
+
+    assert rows == []
+    assert [status for status, _ in marks] == ["failed"]
+
+
+def test_usage_log_swallows_malformed_usage(caplog) -> None:
+    """用量字典带了四列之外的键 → 写入报错被吞,只留告警,不向上抛。"""
+    import logging as _logging
+
+    with caplog.at_level(_logging.WARNING, logger="official_agent.evaluation.runner"):
+        ev_runner._write_eval_usage_log(
+            job_id=7,
+            job_user_id=42,
+            stage_tools=ev_runner._SCORING_STAGE_TOOLS,
+            user_message="简历 99 初筛评分(周期 2026)",
+            reply_summary="评分卡 v4 落库",
+            usage={"total_tokens": 5},
+        )
+
+    assert any("eval 用量日志写入失败" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio
