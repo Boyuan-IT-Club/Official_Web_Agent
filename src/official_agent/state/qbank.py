@@ -230,6 +230,112 @@ def list_picks(resume_id: int, cycle_id: int) -> list[dict[str, Any]]:
     return result
 
 
+def list_cycle_picks(cycle_id: int) -> list[dict[str, Any]]:
+    """一个周期的全部勾选记录(时间正序);question_ref 已解成 dict。"""
+    _ensure_bootstrapped()
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT id, resume_id, cycle_id, interviewer_user_id, question_ref, picked_at "
+            "FROM qbank_pick_log WHERE cycle_id = %s ORDER BY picked_at, id",
+            (cycle_id,),
+        ).fetchall()
+    picks = []
+    for row in rows:
+        item = dict(row)
+        if isinstance(item["question_ref"], str):
+            item["question_ref"] = json.loads(item["question_ref"])
+        picks.append(item)
+    return picks
+
+
+def distinct_picks(picks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """同一位面试官对同一道题的重复勾选只留第一条。
+
+    勾选表没有唯一约束,重试会留下重复行;统计选题偏好时一次选择只该算一次。
+    没有 ref_id 的旧记录按题文认。
+    """
+    seen: set[tuple[Any, ...]] = set()
+    unique: list[dict[str, Any]] = []
+    for pick in picks:
+        ref = pick.get("question_ref") or {}
+        identity = (
+            pick.get("resume_id"),
+            pick.get("interviewer_user_id"),
+            ref.get("ref_id") or ref.get("question"),
+        )
+        if identity not in seen:
+            seen.add(identity)
+            unique.append(pick)
+    return unique
+
+
+def summarize_picks(picks: list[dict[str, Any]]) -> dict[str, Any]:
+    """选题记录 → 选题偏好的聚合计数。纯函数;输出里**没有题文,也没有任何人的 id**。
+
+    四个切面各自按被选次数降序:题类(by_category)、题在题组里的角色(by_role)、
+    出自哪类证据线(by_group_kind)、被选时带着的审题结论(by_review_verdict,
+    没审过的记 unreviewed)。每一行有 picks(被选次数)、resumes(涉及几份简历)、
+    interviewers(几位面试官选过)。
+    """
+    unique = distinct_picks(picks)
+
+    def _slice(name: str, value_of: Any) -> list[dict[str, Any]]:
+        buckets: dict[str, list[dict[str, Any]]] = {}
+        for pick in unique:
+            buckets.setdefault(str(value_of(pick.get("question_ref") or {})), []).append(pick)
+        rows = [
+            {
+                name: value,
+                "picks": len(members),
+                "resumes": len({m.get("resume_id") for m in members}),
+                "interviewers": len({m.get("interviewer_user_id") for m in members}),
+            }
+            for value, members in buckets.items()
+        ]
+        return sorted(rows, key=lambda row: (-row["picks"], row[name]))
+
+    return {
+        "total_picks": len(unique),
+        "resumes": len({pick.get("resume_id") for pick in unique}),
+        "interviewers": len({pick.get("interviewer_user_id") for pick in unique}),
+        "by_category": _slice("category", lambda ref: ref.get("category") or ""),
+        "by_role": _slice("role", lambda ref: ref.get("role") or ""),
+        "by_group_kind": _slice("group_kind", lambda ref: ref.get("group_kind") or ""),
+        "by_review_verdict": _slice(
+            "verdict", lambda ref: (ref.get("review") or {}).get("verdict") or "unreviewed"
+        ),
+    }
+
+
+def pick_type_summary(cycle_id: int) -> dict[str, Any]:
+    """一个周期里面试官选了哪些类型的题、各多少。只读,只出聚合计数。
+
+    返回 summarize_picks 的结果,外加 cycle_id 与 exemplars:该周期归纳出的题型
+    及其计数(题型文字只有已通过人审的才给,草稿与停用的为 None)。题型表读不到
+    时 exemplars 为空列表,其余照常返回。
+    """
+    from official_agent.state import qbank_exemplar
+
+    summary = {"cycle_id": cycle_id, **summarize_picks(list_cycle_picks(cycle_id))}
+    try:
+        exemplars = qbank_exemplar.list_exemplars(cycle_id=cycle_id)
+    except Exception:  # noqa: BLE001 — 题型表是可选的,读不到不该挡住选题统计
+        exemplars = []
+    summary["exemplars"] = [
+        {
+            "exemplar_id": row["exemplar_id"],
+            "category": row["category"],
+            "status": row["status"],
+            "pattern": row["pattern"] if row["status"] == "approved" else None,
+            "picks": row["pick_count"],
+            "resumes": row["resume_count"],
+            "interviewers": row["interviewer_count"],
+        }
+        for row in exemplars
+    ]
+    return summary
+
+
 def question_key(
     role: str,
     *,
@@ -383,7 +489,8 @@ def flatten_v2_pickable(
 def _attach_annotations(entries: list[dict[str, Any]], envelope: dict[str, Any]) -> None:
     """把信封里挂在题组旁边的标注并到可挑题条目上(就地修改 entries)。
 
-    - review:{verdict, reasons},来自该题所在证据线的审题结果;
+    - review:{verdict, reasons},来自该题所在证据线的审题结果;拦截模式下被打回
+      重写过的题多一个 revised=true;
     - similarity:{duplicate_of_ref_id, generic_resumes},来自信封顶层的相似度
       标注;duplicate_of_ref_id 指向本包里问同一件事、证据更强的那道题。
     标注在信封里按「组下标 + 组内编号」定位,不进题目对象,所以要在这里对回去。
@@ -393,10 +500,13 @@ def _attach_annotations(entries: list[dict[str, Any]], envelope: dict[str, Any])
     for group_index, group in enumerate(groups):
         line_review = (group.get("qbank_v2") or {}).get("review") or group.get("review") or {}
         for item in line_review.get("items") or []:
-            reviews[(group_index, str(item.get("key", "")))] = {
+            opinion: dict[str, Any] = {
                 "verdict": item.get("verdict"),
                 "reasons": list(item.get("reasons") or []),
             }
+            if item.get("revised"):
+                opinion["revised"] = True  # 只在改写过的题上出现,其余题的形状不变
+            reviews[(group_index, str(item.get("key", "")))] = opinion
     similar = {
         (int(item.get("group_index", -1)), str(item.get("key", ""))): item
         for item in (envelope.get("similarity") or {}).get("items") or []

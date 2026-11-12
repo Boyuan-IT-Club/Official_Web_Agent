@@ -573,3 +573,125 @@ def test_pick_by_ref_id_returns_entry_with_its_review(monkeypatch) -> None:
 
     assert resolved["ref_id"] == target["ref_id"]
     assert resolved["review"] == {"verdict": "revise", "reasons": ["recitable"]}
+
+
+# ── 给周期复盘的选题汇总:只出聚合计数 ─────────────────────
+
+
+def _picked(pick_id, *, resume, interviewer, category, role="chain", kind="repo", **ref) -> dict:
+    return {
+        "id": pick_id,
+        "resume_id": resume,
+        "cycle_id": 2026,
+        "interviewer_user_id": interviewer,
+        "question_ref": {
+            "ref_id": f"ref{pick_id}",
+            "category": category,
+            "role": role,
+            "group_kind": kind,
+            "question": f"候选人张三的第 {pick_id} 道题,src/app.py 里的限流?",
+            **ref,
+        },
+    }
+
+
+_PICKS = [
+    _picked(1, resume=101, interviewer=901, category="C4_实现细节拷打"),
+    _picked(2, resume=102, interviewer=902, category="C4_实现细节拷打"),
+    _picked(
+        3,
+        resume=101,
+        interviewer=902,
+        category="C6_难点与调试",
+        role="reserve",
+        review={"verdict": "revise", "reasons": ["recitable"]},
+    ),
+    _picked(4, resume=103, interviewer=901, category="guided", role="question", kind="autograding"),
+]
+
+
+def test_pick_summary_counts_by_category_role_kind_and_verdict() -> None:
+    summary = qbank.summarize_picks(_PICKS)
+
+    assert (summary["total_picks"], summary["resumes"], summary["interviewers"]) == (4, 3, 2)
+    assert summary["by_category"] == [
+        {"category": "C4_实现细节拷打", "picks": 2, "resumes": 2, "interviewers": 2},
+        {"category": "C6_难点与调试", "picks": 1, "resumes": 1, "interviewers": 1},
+        {"category": "guided", "picks": 1, "resumes": 1, "interviewers": 1},
+    ]
+    assert [(r["role"], r["picks"]) for r in summary["by_role"]] == [
+        ("chain", 2),
+        ("question", 1),
+        ("reserve", 1),
+    ]
+    assert [(r["group_kind"], r["picks"]) for r in summary["by_group_kind"]] == [
+        ("repo", 3),
+        ("autograding", 1),
+    ]
+    assert [(r["verdict"], r["picks"]) for r in summary["by_review_verdict"]] == [
+        ("unreviewed", 3),
+        ("revise", 1),
+    ]
+
+
+def test_pick_summary_counts_a_repeated_pick_once() -> None:
+    """勾选表没有唯一约束:同一位面试官重复勾同一道题,只算一次选择。"""
+    repeated = [_PICKS[0], {**_PICKS[0], "id": 99}, _PICKS[1]]
+
+    summary = qbank.summarize_picks(repeated)
+
+    assert summary["total_picks"] == 2
+    assert summary["by_category"][0]["picks"] == 2
+
+
+def test_pick_summary_carries_no_question_text_and_no_person_ids(monkeypatch) -> None:
+    """复盘拿到的只有聚合计数:没有题文,没有面试官或简历的 id;题型文字只给人审通过的。"""
+    import json
+
+    monkeypatch.setattr(qbank, "list_cycle_picks", lambda cycle_id: _PICKS)
+    monkeypatch.setattr(
+        "official_agent.state.qbank_exemplar.list_exemplars",
+        lambda **k: [
+            {
+                "exemplar_id": 1,
+                "category": "C4_实现细节拷打",
+                "status": "approved",
+                "pattern": "让候选人说明某次方案更换的触发条件",
+                "pick_count": 5,
+                "resume_count": 3,
+                "interviewer_count": 2,
+            },
+            {
+                "exemplar_id": 2,
+                "category": "C6_难点与调试",
+                "status": "proposed",
+                "pattern": "还没人审过的草稿,可能带着项目细节",
+                "pick_count": 2,
+                "resume_count": 2,
+                "interviewer_count": 2,
+            },
+        ],
+    )
+
+    summary = qbank.pick_type_summary(2026)
+
+    assert summary["cycle_id"] == 2026 and summary["total_picks"] == 4
+    assert [(e["exemplar_id"], e["pattern"], e["picks"]) for e in summary["exemplars"]] == [
+        (1, "让候选人说明某次方案更换的触发条件", 5),
+        (2, None, 2),
+    ]
+    dumped = json.dumps(summary, ensure_ascii=False)
+    for leaked in ("张三", "src/app.py", "901", "902", "101", "102", "103", "草稿"):
+        assert leaked not in dumped
+
+
+def test_pick_summary_survives_a_missing_exemplar_table(monkeypatch) -> None:
+    def _no_table(**kwargs):
+        raise RuntimeError('relation "qbank_exemplar" does not exist')
+
+    monkeypatch.setattr(qbank, "list_cycle_picks", lambda cycle_id: _PICKS)
+    monkeypatch.setattr("official_agent.state.qbank_exemplar.list_exemplars", _no_table)
+
+    summary = qbank.pick_type_summary(2026)
+
+    assert summary["exemplars"] == [] and summary["total_picks"] == 4

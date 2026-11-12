@@ -103,10 +103,15 @@ class Settings(BaseSettings):
     # 没有按模型供应商的限流实测过,见到 429 就调小
     evaluation_model_concurrency: int = 8
 
-    # 审题(出题之后逐题给意见,只标注不改题):off = 不审;annotate = 审并把意见
-    # 挂在题库上。默认关:每条有题的证据线多一次 strong 调用,要先在真实模型上跑过
+    # 审题(出题之后逐题给意见):off = 不审;annotate = 审并把意见挂在题库上,不改题;
+    # enforce = 在 annotate 之上,打回的题让出题者改一次、建议丢弃的题在不破坏题组
+    # 结构时丢弃。默认关:每条有题的证据线多一次 strong 调用,要先在真实模型上跑过
     # evals/datasets/question_review_probes.yaml 再打开
     qbank_review_mode: str = "off"
+    # enforce 的第二道确认:只有这一项也为真,enforce 才生效,否则按 annotate 处理。
+    # 置真的前提是审题者的误杀率已经达标(question_review_probes 的 good_keep_rate),
+    # 这样单独把上面那项写成 enforce——抄错配置、提前改好——都不会让它开始改题
+    qbank_review_enforce_ready: bool = False
 
     # 题目向量索引(本包跨线查重 + 跨简历通用题标注,只标注不删题)。默认关:
     # 两个相似度门槛和「几份简历算通用」都是初值,要先拿现有题库量过分布再打开;
@@ -115,6 +120,11 @@ class Settings(BaseSettings):
     qbank_duplicate_min_similarity: float = 0.9
     qbank_generic_min_similarity: float = 0.9
     qbank_generic_min_resumes: int = 3
+
+    # 题型范例(从面试官选过的题里归纳去标识的提问方式,人审通过后接在出题 prompt
+    # 后面当范例)。默认关:关着时不归纳、管理面的写接口拒绝、出题不带范例。打开的
+    # 前提是已经有至少一个完整周期的选题记录
+    qbank_exemplars_enabled: bool = False
 
     # 规划者(给每条仓线定探索档位与侧重,预算数值由代码按档位映射):off = 不调,
     # 每条线都是最高档;plan = 调。默认关:要先在真实模型上跑过

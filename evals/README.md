@@ -36,6 +36,7 @@ uv run python evals/run_evals.py --write-baseline evals/baselines.json # 落新�
 | `datasets/qbank_probes.yaml` | datasets | `qbank_probes` | 无(确定性) |
 | `datasets/qbank_judge.yaml` | datasets | `qbank_judge` | LLM_* 配置 |
 | `datasets/question_review_probes.yaml` | datasets | `question_review_probes` | LLM_* 配置;门槛是初值,尚未在真实模型上跑过 |
+| `datasets/exemplar_probes.yaml` | datasets | `exemplar_probes` | 确定性段无要求;模型段需 LLM_* 配置,缺配置时逐条跳过并在备注里写明(尚未在真实模型上跑过) |
 | `datasets/plan_probes.yaml` | datasets | `plan_probes` | 确定性段无要求;模型段需 LLM_* 配置,缺配置时逐条跳过并在备注里写明(尚未在真实模型上跑过) |
 | `datasets/cv_dive_report.yaml` | datasets | `cv_dive_report` | LLM_* 配置 + `real_resumes/` 有样本 |
 | `datasets/scoring_probes.yaml` | datasets | `scoring_probes` | LLM_* 配置;CD 部署后在生产容器里自动跑(只报告) |

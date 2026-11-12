@@ -502,6 +502,7 @@ def _aggregate_usage(
             qbank_v2.get("explore_meta") or {},
             qbank_v2.get("generation_usage") or {},
             (qbank_v2.get("review") or {}).get("usage") or {},
+            (qbank_v2.get("review") or {}).get("revise_usage") or {},
             (g.get("review") or {}).get("usage") or {},
         ]
     for meta in metas:

@@ -90,7 +90,8 @@ src/official_agent/
 │   ├── bundle.py           #   出题证据线:仓线/评测错因线/奖项线并发跑,汇合后按需兜底 → qbank 信封
 │   ├── explore.py          #   受限 ReAct 仓探索(轮数/墙钟双闸 + dossier 槽位)
 │   ├── plan.py             #   探索计划:档位→预算的映射、整包封顶、规划者(默认关闭)
-│   ├── question_review.py  #   审题:出题之后逐题给意见,只标注不改题(默认关闭)
+│   ├── question_review.py  #   审题:出题之后逐题给意见;标注模式不改题,拦截模式改题组(默认关闭)
+│   ├── exemplar.py         #   选用题型:从选题记录归纳去标识的提问方式,人审后作出题范例(默认关闭)
 │   ├── question_similarity.py # 题目相似度标注:本包跨线查重 + 跨简历通用题(默认关闭)
 │   ├── judge.py / tech_stack.py / awards.py   # 专项出题
 │   ├── scoring.py          #   绝对卡短路 + 清单派生 0-10 分
@@ -107,6 +108,7 @@ src/official_agent/
 │   ├── evaluation/         #   包:scorecard_store / job_store / review_queue / bootstrap / _connection(池)
 │   ├── qbank.py            #   interview_qbank:题库 + pick_log
 │   ├── qbank_index.py      #   qbank_question_index:题目向量索引(pgvector,惰性自举)
+│   ├── qbank_exemplar.py   #   qbank_exemplar:选用题型(草稿/已通过/已停用,惰性自举)
 │   ├── audit.py            #   agent_audit_log:审计(五字段,ADR-0006)
 │   └── config_store.py     #   agent_config:热配置(DB 覆盖 env)
 ├── tools/                  # 基础设施:后端 REST 的语义化封装
@@ -257,7 +259,7 @@ flowchart TD
     RT -->|guided| GEN["generate_node<br/>出题+校验回灌 ×2<br/>(只捕 ValueError)"]
     RT -->|skip| SKIP["skip_node<br/>空组+mode=skipped"]
     EX --> GEN
-    GEN --> REV["review_node<br/>审题:逐题意见挂在信封上,题目不动<br/>默认关闭;失败只标 unavailable"]
+    GEN --> REV["review_node<br/>审题:逐题意见挂在信封上<br/>标注模式题目不动;拦截模式打回重写一次、可丢则丢<br/>默认关闭;失败只标 unavailable"]
     REV --> FIN["finalize"]
     SKIP --> FIN
     FIN --> E(["END"])
@@ -353,6 +355,7 @@ flowchart TD
 | `interview_qbank` | 题库信封(v2 JSONB) | 版本递增 |
 | `qbank_pick_log` | 面试官选题记录 | 服务端权威引用(防伪造证据路径) |
 | `qbank_question_index` | 题目向量索引(每道可挑的题一行) | 每行记 embed_model,不跨模型比较;一份简历只留最新一版 |
+| `qbank_exemplar` | 选用题型(去标识的提问方式 + 聚合计数) | 状态只能往前走;只有 approved 的会进出题 prompt;不存题文与面试官 |
 | `agent_audit_log` | 审计(ADR-0006 五字段) | 代理身份+trace_id |
 | `agent_config` | 热配置低敏键 | 白名单 HOT_KEYS |
 | `kb_source` / `kb_faq` / `kb_doc` / `kb_chunks` | 知识库来源/内容/向量 | 禁跨 embedding 模型混排;`kb_source.cycle_id` 非空的条目只在该招新周期开放时进检索 |

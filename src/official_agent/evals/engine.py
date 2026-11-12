@@ -108,6 +108,7 @@ def default_registry() -> dict[str, SuiteSpec]:
     """kind → (executor, 环境自检)。依赖注入在各 executor 模块的默认参数里。"""
     from official_agent.evals import (
         cv_dive_report,
+        exemplar_probes,
         injection_probes,
         kb_probes,
         memory_probes,
@@ -130,6 +131,9 @@ def default_registry() -> dict[str, SuiteSpec]:
         "qbank_probes": SuiteSpec(run=qbank_probes.run_suite, env_blocker=qbank_probes.env_blocker),
         "qbank_judge": SuiteSpec(run=qbank_judge.run_suite, env_blocker=qbank_judge.env_blocker),
         "plan_probes": SuiteSpec(run=plan_probes.run_suite, env_blocker=plan_probes.env_blocker),
+        "exemplar_probes": SuiteSpec(
+            run=exemplar_probes.run_suite, env_blocker=exemplar_probes.env_blocker
+        ),
         "question_review_probes": SuiteSpec(
             run=question_review_probes.run_suite, env_blocker=question_review_probes.env_blocker
         ),

@@ -322,8 +322,11 @@ REVIEW_REASON = Literal[
 ]
 
 
-class QuestionReview(BaseModel):
-    """一道题的审题意见。keep 不带理由;revise / drop 至少带一条。"""
+class ReviewOpinion(BaseModel):
+    """审题者对一道题的意见——也是审题模型的输出面,所以只有这三个字段。
+
+    keep 不带理由;revise / drop 至少带一条。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -334,12 +337,36 @@ class QuestionReview(BaseModel):
     reasons: list[REVIEW_REASON] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _reasons_match_verdict(self) -> "QuestionReview":
+    def _reasons_match_verdict(self) -> "ReviewOpinion":
         if self.verdict == "keep" and self.reasons:
             raise ValueError(f"keep 不该带理由:{self.key} {self.reasons}")
         if self.verdict != "keep" and not self.reasons:
             raise ValueError(f"{self.verdict} 必须带理由:{self.key}")
         return self
+
+
+class QuestionReview(ReviewOpinion):
+    """挂在题库上的一条审题意见:审题者的意见,加上代码记的「这道题改写过没有」。
+
+    revised 只在拦截模式下为真:这道题被打回后由出题者重写过,意见是对重写后
+    的题给的。它由代码填,不在审题模型的输出面里。
+    """
+
+    revised: bool = False
+
+
+class DroppedQuestion(BaseModel):
+    """拦截模式丢掉的一道题。
+
+    留在审题结果里是为了事后核对审题者有没有误杀;它不在题组里,所以进不了
+    可挑题视图,面试官看不到也选不到。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(min_length=1, description="丢弃之前它在题组里的编号")
+    question: str
+    reasons: list[REVIEW_REASON] = Field(default_factory=list)
 
 
 class LineReview(BaseModel):
@@ -349,14 +376,30 @@ class LineReview(BaseModel):
     留一个 review 字段,出题模型(或仓里的注入文本)就能替自己的题预先填上
     「放行」。status=unavailable 表示审题模型没给出可用结果,题目原样放行,
     此时 items 里只有确定性预检查出来的那几条。
+
+    mode=enforce 时审题结果改过题组:被打回并重写过的题在 items 里带
+    revised=true,被丢弃的题记在 dropped;items 说的始终是**现在**题组里的题。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["reviewed", "unavailable"]
+    mode: Literal["annotate", "enforce"] = "annotate"
     items: list[QuestionReview] = Field(default_factory=list)
+    dropped: list[DroppedQuestion] = Field(default_factory=list)
     prompt_version: str = ""
-    usage: UsageMeta | None = None
+    revise_prompt_version: str = ""
+    usage: UsageMeta | None = None  # 审题调用的用量(拦截模式下是两次审题之和)
+    revise_usage: UsageMeta | None = None  # 打回重写那一次出题调用的用量
+
+
+class ExemplarUse(BaseModel):
+    """这组题出题时带了哪些题型范例:范例段的 prompt 版本与题型 id。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt_version: str
+    exemplar_ids: list[int] = Field(default_factory=list)
 
 
 class QbankV2(BaseModel):
@@ -366,6 +409,7 @@ class QbankV2(BaseModel):
     预算触顶 degraded 出题)。mode/guide 沿用旧语义:guided=仓库材料
     缺失的通用引导组(此时 entry 可以是引导题,chains 空)。
     review 为空 = 这组题没有审过(审题关闭,或该模式不审)。
+    exemplars 为空 = 出题时没有带题型范例。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -380,6 +424,7 @@ class QbankV2(BaseModel):
     explore_meta: ExploreMeta = Field(default_factory=ExploreMeta)
     generation_usage: UsageMeta | None = None  # 出题段单次调用用量
     review: LineReview | None = None
+    exemplars: ExemplarUse | None = None
     prompt_version: str = ""
 
 

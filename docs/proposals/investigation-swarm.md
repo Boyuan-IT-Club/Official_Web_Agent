@@ -4,7 +4,9 @@
 > 真实模型下的墙钟与质量对比尚未跑)。**P2 的机制已实现但默认关闭,验收未完成**(审题者只
 > 标注 + 题目索引;`question_review_probes` 没有在真实模型上跑过,相似度门槛没有校准,见 §10
 > 进度)。**P3 的机制已实现但规划者默认关闭,验收未完成**(分档预算、整包封顶、规划者;
-> `plan_probes` 的确定性段已通过,模型段没有跑过)。P4 未立项。范围 = B 模块出题线
+> `plan_probes` 的确定性段已通过,模型段没有跑过)。**P4 的机制已实现,两项都默认关闭,启用
+> 条件都没有满足**(审题拦截要误杀率达标,题型范例要至少一个周期的选题数据;只用合成数据
+> 测过机制)。范围 = B 模块出题线
 > (`evaluation/bundle.py`、`evaluation/investigate_graph.py`、`evaluation/explore.py`)与题库
 > (`state/qbank.py`);**不改评分子图,不改面试官选题的交互**。共同约束见 [README](README.md)。
 
@@ -232,6 +234,27 @@ flowchart TD
 - **缓存命中做不到**(§9 原来的设想):审题与出题是两份 prompt,开头不同,档案不是共同前缀。
   要命中得改出题 prompt 的排布,那会动到出题行为,不在 P2 里做。
 
+**P4 落地的拦截模式(`enforce`)**——机制已实现,**启用条件没有满足,现在不能打开**:
+
+- **要两项配置同时到位才生效**:`QBANK_REVIEW_MODE=enforce` 加 `QBANK_REVIEW_ENFORCE_READY=true`。
+  只写了前者按 `annotate` 处理并留一条告警。拦截会改题、丢题,不该因为抄错一处配置、或有人
+  提前把模式改好就开始。第二项置真的前提是 `question_review_probes` 的 `good_keep_rate`
+  (好题没被误伤的比例)在真实模型上达标——这个 suite 还一次都没跑过。
+- **只作用于仓线**(仓深挖、简历深挖)。评测线在拦截模式下仍然只标注:它的题是另一条出题
+  路径出的,没有同一套结构校验可以兜底。
+- **打回(`revise`)**:把出题时的同一份 prompt 接上一段打回要求(`prompts/evaluation/
+  question_revise.md`,带着上次的题组和被打回的题,都包数据区),让**出题者**改一次。
+  - 换题由代码做,只换被打回的那几道(`question_review.replace_questions`):出题者在重写时
+    顺手改了别的题、挪了位置,都带不进来——没被打回的题是审题者看过的。
+  - 改过的题必须有人再审:换完之后整组复审一遍;复审拿不到可用结果,这次重写就不采用。
+  - 只改一次:复审里仍被打回的题不再重写,意见留着。重写两次都不合规也是保留原题。
+- **丢弃(`drop`)**(`question_review.drop_flagged`):备选题可以丢;追问链只从**尾部**往前
+  丢(后一层以前一层为前提,中间的层不丢);入口题不丢。每丢一道都要过一遍出题时的结构校验,
+  过不了就留着、意见照旧挂着。被丢的题连同题文记在审题结果的 `dropped` 里备查——它不在题组
+  里,进不了可挑题视图。
+- 审题模型没给出可用结果时不拦截,题组原样放行。
+- 拦截模式下每条线至多多一次出题调用和一次审题调用,两者的用量都记在审题结果里并计入聚合。
+
 ### D6 · 审题标准与离线 judge 分开
 
 `qbank_judge` 按相关性、具体性、公平性、区分度四个维度给整套题打分,是离线度量。在线审题者如果
@@ -293,6 +316,33 @@ flowchart TD
 - 没被选的题不说明任何问题,不进任何负例集合;
 - 题型的统计只用聚合计数,不记到具体面试官头上。
 
+**P4 落地的题型范例**(D8、D9)——机制已实现,**启用条件没有满足,现在不能打开**:还没有
+任何一个完整周期的选题数据,归纳用的 prompt 也没有在真实模型上跑过;机制只用合成数据测过。
+
+- **一个开关管全部**:`QBANK_EXEMPLARS_ENABLED`,默认关。关着时不读选题记录、不调归纳模型、
+  管理面的两个写接口返回 409、出题不带范例。
+- **归纳**(`evaluation/exemplar.py`,由管理员在管理面触发,不自动跑):
+  - 素材是一个周期的选题记录:同一位面试官重复勾同一道题只算一次;只取十个题类里的题
+    (评测线、奖项线、兜底线的题不归纳);题文先脱敏,再包数据区交给模型。
+  - 模型的每条输出都要过代码的闸(`gate_pattern`):空或过长、含个人信息、含指令样文本、
+    带着网址 / 文件名 / 仓内路径的,一律拒收。闸拦不住「项目名写成了普通词」这种情况,
+    那要靠人审。
+  - 计数不取模型的说法:被选次数、涉及几份简历、几位面试官,都由代码按来源重新数;来源里
+    清单之外的编号不算数。
+  - D9 的门槛写成了数:至少 2 位面试官、至少 2 份简历选用过才成题型。
+  - 产出是草稿,整批替换该周期原有的草稿;已经有人审过的题型不动。被拒收的只回报原因与
+    计数,不带题型文字。
+- **人审**:通过(`approved`)或停用(`retired`)。状态只能往前走——草稿→通过 / 停用,
+  通过→停用,停用之后不能再通过。两个写操作都先写审计再执行,审计写不了就不执行。
+- **取用**:出题段取已通过人审的题型,选用面最广的在前,至多 5 条,每条再过一遍闸;接在
+  出题 prompt 的最后(`prompts/evaluation/exemplars.md`),包数据区,并声明范例只说明提问
+  方式、不是关于这位候选人的事实。只给仓深挖与简历深挖。用到了哪些题型、范例段的版本,
+  随题库记在 `qbank_v2.exemplars` 里。题型表读不到时不带范例照常出题。
+- **与原稿不同的地方**:没有做向量检索(一个周期能通过人审的题型是个位数到几十条,按
+  选用面排序就够了,表里没有 `embedding` 列);没有按题类和年级过滤(选题记录里没有年级,
+  表里的 `grade_band` 列留着但恒为空)。
+- 没被选的题不进任何集合;计数只到「几位」,库里不存是哪位面试官选的。
+
 ### D10 · 失败语义
 
 | 失败点 | 语义 |
@@ -324,6 +374,7 @@ P2 新增的三处都**不在题目对象里**(理由见 D5):
 | `groups[i].review` | 评测线的审题结果,形状同上 | 审题打开;否则没有这个键 |
 | `similarity`(信封顶层) | 相似度标注 | 题目索引打开且 embedding 可用;否则没有这个键 |
 | `plan`(信封顶层,P3) | 探索计划:每条可读仓线的档位、侧重、预算与实际用量 | 始终有(规划者关着时 `status=off`) |
+| `groups[i].qbank_v2.exemplars`(P4) | 这组题出题时带了哪些题型范例 | 题型范例打开且有已通过的题型;否则为 `null` |
 
 ```jsonc
 // 一条线的审题结果(schema.LineReview)
@@ -335,8 +386,20 @@ P2 新增的三处都**不在题目对象里**(理由见 D5):
     {"key": "reserve:2", "verdict": "drop",   "reasons": ["searchable", "generic"]}
   ],
   "prompt_version": "evaluation_question_review/v1",
-  "usage": {"input_tokens": 0, "output_tokens": 0, "cache_hit_tokens": null, "cache_miss_tokens": null}
+  "usage": {"input_tokens": 0, "output_tokens": 0, "cache_hit_tokens": null, "cache_miss_tokens": null},
+
+  // 以下是 P4 拦截模式的字段;标注模式下取缺省值
+  "mode": "annotate",                // annotate | enforce(enforce = 题组被这次审题改过)
+  // items 里每条多一个 "revised": false——拦截模式下被打回并由出题者重写过的题为 true
+  "dropped": [                       // 拦截模式丢掉的题;不在题组里,进不了 pickable
+    {"key": "reserve:1", "question": "…", "reasons": ["searchable"]}
+  ],
+  "revise_prompt_version": "",       // 做过打回重写时是 evaluation_question_revise/v1
+  "revise_usage": null               // 打回重写那一次出题调用的用量
 }
+
+// 仓线信封里的题型范例使用记录(P4)
+{"prompt_version": "evaluation_exemplars/v1", "exemplar_ids": [7, 9]}
 
 // 信封顶层的相似度标注:只列被标到的题
 {
@@ -365,7 +428,9 @@ P2 新增的三处都**不在题目对象里**(理由见 D5):
 }
 ```
 
-题目索引表已建(`state/qbank_index.py`,惰性自举,不进启动流程);题型表属于 P4,仍是示意。
+题目索引表(`state/qbank_index.py`)与题型表(`state/qbank_exemplar.py`)都不进启动流程,对应的
+开关没打开就不会建表:索引表在第一次查索引或写索引时建;题型表只在第一次写草稿时建,读路径
+(题型列表、范例取用、给复盘的汇总)不建表,表不存在就当作没有题型。
 
 ```sql
 CREATE TABLE IF NOT EXISTS qbank_question_index (
@@ -382,20 +447,23 @@ CREATE TABLE IF NOT EXISTS qbank_question_index (
     created_at    timestamptz NOT NULL DEFAULT now()
 );
 
--- P4,示意
+-- 题型表(P4 已建,state/qbank_exemplar.py,惰性自举)
 CREATE TABLE IF NOT EXISTS qbank_exemplar (
-    exemplar_id  bigserial   PRIMARY KEY,
-    category     text        NOT NULL,
-    grade_band   text        NOT NULL DEFAULT '',
-    pattern      text        NOT NULL,
-    pick_count   int         NOT NULL DEFAULT 0,
-    source_refs  jsonb       NOT NULL DEFAULT '[]',
-    status       text        NOT NULL DEFAULT 'proposed'
-                 CHECK (status IN ('proposed', 'approved', 'retired')),
-    approved_by  int,
-    embedding    vector      NOT NULL,
-    embed_model  text        NOT NULL,
-    created_at   timestamptz NOT NULL DEFAULT now()
+    exemplar_id       bigserial   PRIMARY KEY,
+    cycle_id          int         NOT NULL,              -- 归纳自哪个周期的选题记录
+    category          text        NOT NULL,
+    grade_band        text        NOT NULL DEFAULT '',   -- 留着,恒为空(见 D8 的落地说明)
+    pattern           text        NOT NULL,              -- 去标识的提问方式,过了闸才入库
+    pick_count        int         NOT NULL,              -- 以下三项由代码按选题记录数出来
+    resume_count      int         NOT NULL,
+    interviewer_count int         NOT NULL,              -- 只有人数,不存是谁
+    source_refs       jsonb       NOT NULL DEFAULT '[]', -- 题引用 id,不存题文
+    status            text        NOT NULL DEFAULT 'proposed'
+                      CHECK (status IN ('proposed', 'approved', 'retired')),
+    prompt_version    text        NOT NULL DEFAULT '',   -- 归纳用的 prompt 版本
+    reviewed_by       int,
+    reviewed_at       timestamptz,
+    created_at        timestamptz NOT NULL DEFAULT now()
 );
 ```
 
@@ -413,7 +481,7 @@ P2 **不新增接口,不新增权限点**。变化只是两个已有接口的返
 
 | 键 | 形状 | 含义 |
 |---|---|---|
-| `review` | `{"verdict": "keep" \| "revise" \| "drop", "reasons": string[]}` | 审题意见。`keep` 时 `reasons` 为空 |
+| `review` | `{"verdict": "keep" \| "revise" \| "drop", "reasons": string[], "revised"?: true}` | 审题意见。`keep` 时 `reasons` 为空。`revised` 只在拦截模式下被打回并重写过的题上出现(P4),其余题没有这个键 |
 | `similarity` | `{"duplicate_of_ref_id": string \| null, "generic_resumes": number}` | `duplicate_of_ref_id` 是同一个 `pickable[]` 里另一条的 `ref_id`——本包里问同一件事、证据更强的那道;`generic_resumes` 大于 0 表示本周期有这么多份其他简历出过近似的题 |
 
 `reasons` 的取值是固定的六个:
@@ -444,11 +512,103 @@ P2 **不新增接口,不新增权限点**。变化只是两个已有接口的返
 实际用了多少。可以在题组标题旁显示档位;`dropped` 的仓在 `groups` 里没有对应的组,要提示
 「这个仓因整包预算上限没有探索」只能从 `plan.lines` 里读。不展示也不影响任何现有功能。
 
+**题型管理(P4,三个新接口)**
+
+都在 `/admin/evaluation/exemplars` 下。题型范例没启用(默认)时,列表照常可读,两个写接口
+返回 409。**没有新增权限点**:读用 `resume:audit`,写用 `evaluation:run`(题型会进以后每位
+候选人的出题 prompt,所以要的是初筛执行权而不是查看权)。
+
+`GET /admin/evaluation/exemplars?status=&cycle_id=`(权限 `resume:audit`)
+
+- 查询参数都可选:`status` 取 `proposed` / `approved` / `retired`;`cycle_id` 是题型归纳自哪个周期。
+- 响应 `200`:`{"enabled": boolean, "total": number, "items": Exemplar[]}`。`enabled=false`
+  表示题型范例没启用,写接口现在不可用。`items` 按选用面从广到窄排。
+- `Exemplar`:
+
+  | 字段 | 类型 | 含义 |
+  |---|---|---|
+  | `exemplar_id` | number | 题型 id |
+  | `cycle_id` | number | 归纳自哪个周期的选题记录 |
+  | `category` | string | 题类(十个题类之一) |
+  | `pattern` | string | 题型文字:去标识的提问方式。草稿没有经过人审,可能还带着项目细节——审的就是这个 |
+  | `pick_count` / `resume_count` / `interviewer_count` | number | 被选了几次、涉及几份简历、几位面试官 |
+  | `source_refs` | string[] | 支持这个题型的题引用 id(与 `pickable[].ref_id` 同源),没有题文 |
+  | `status` | string | `proposed` 草稿 / `approved` 已通过(会被出题段用作范例)/ `retired` 已停用 |
+  | `grade_band` | string | 恒为空串,保留字段 |
+  | `prompt_version` | string | 归纳用的 prompt 版本 |
+  | `reviewed_by` / `reviewed_at` | number \| null / string \| null | 谁在什么时候审的;没审过为 null |
+  | `created_at` | string | 归纳时间 |
+
+`POST /admin/evaluation/exemplars/propose`(权限 `evaluation:run`)
+
+- 请求体:`{"cycle_id": number}`。从这个周期的选题记录归纳题型,写成草稿,**替换该周期原有
+  的草稿**(已审过的不动)。会调一次模型,耗时在秒到几十秒。
+- 响应 `201`:`{"status": "proposed" | "no_picks", "picked": number, "proposed": number,
+  "exemplar_ids"?: number[], "rejected": Rejected[]}`。`picked` 是参与归纳的题数;`no_picks`
+  表示这个周期没有可归纳的选题记录,没有调模型。`Rejected` 是
+  `{"reason": string, "category": string, "picks": number, "resumes": number,
+  "interviewers": number}`——被代码拒收的题型只给原因与计数,不给题型文字。
+- 错误:`409` 没启用;`503` 审计服务不可用,**没有执行**,可以重试;`502` 归纳失败(模型调用
+  失败或输出不合规),原有草稿没有变动;`403` 没有权限。
+
+`POST /admin/evaluation/exemplars/{exemplar_id}/review`(权限 `evaluation:run`)
+
+- 请求体:`{"decision": "approve" | "retire"}`。`approve` 让这条题型开始被出题段用作范例,
+  `retire` 停用。
+- 响应 `200`:`{"exemplar_id": number, "status": "approved" | "retired"}`。
+- 状态只能往前走:草稿→通过 / 停用,通过→停用。不允许的变更返回 `409`(`detail` 里写着
+  现在的状态),通常是别人刚处理过,刷新列表即可。
+- 其他错误:`409` 没启用;`404` 没有这条题型;`503` 审计服务不可用,**状态没有改动**,可以
+  重试;`422` `decision` 不是那两个取值;`403` 没有权限。
+
+人审时要看的是:题型文字里还有没有能认出具体候选人或具体项目的东西(项目名、人名、学校、
+数字)。代码的闸只拦得住网址、文件名、路径、手机号这类有形状的东西。
+
 **展示上要注意的两点**
 
 - P2 是只标注:题目一道不少,前端不要默认按意见隐藏或过滤题目。
 - 要不要默认展示给面试官还没有定(§12 第 3 条)——展示会影响选题,进而污染对审题者的检验。
   建议把这层展示做成可以整体关掉的。
+
+### 5.2 给周期复盘的数据出口
+
+只读、纯代码、只出聚合计数。复盘线直接调函数,不经 HTTP:
+
+```python
+from official_agent.state.qbank import pick_type_summary
+
+def pick_type_summary(cycle_id: int) -> dict[str, Any]: ...
+```
+
+同步函数,读 `qbank_pick_log` 与 `qbank_exemplar`(在 async 上下文里用 `asyncio.to_thread` 调)。
+返回值里**没有题文,也没有任何面试官或简历的 id**:
+
+```jsonc
+{
+  "cycle_id": 2026,
+  "total_picks": 37,      // 去重后的选择次数:同一位面试官重复勾同一道题只算一次
+  "resumes": 12,          // 被选过题的简历数
+  "interviewers": 4,      // 选过题的面试官人数
+  // 以下四个切面各自按 picks 降序;每行都有 picks / resumes / interviewers 三个计数
+  "by_category":       [{"category": "C4_实现细节拷打", "picks": 9, "resumes": 6, "interviewers": 3}],
+  "by_role":           [{"role": "chain", "picks": 20, "resumes": 10, "interviewers": 4}],
+  "by_group_kind":     [{"group_kind": "repo", "picks": 28, "resumes": 9, "interviewers": 4}],
+  "by_review_verdict": [{"verdict": "unreviewed", "picks": 30, "resumes": 11, "interviewers": 4}],
+  // 该周期归纳出的题型及其计数;题型文字只有已通过人审的才给,草稿与停用的为 null
+  "exemplars": [
+    {"exemplar_id": 7, "category": "C2_技术选型与权衡", "status": "approved",
+     "pattern": "让候选人说明某次更换实现方案的触发条件", "picks": 5, "resumes": 3, "interviewers": 2}
+  ]
+}
+```
+
+- `by_category` 的取值:仓线与简历线的题是十个题类;评测线、奖项线、兜底线的题是它们自己的
+  锚点名(如 `guided`)。`by_review_verdict` 是题被选时带着的审题结论(`keep` / `revise` /
+  `drop`),没审过的记 `unreviewed`——拿选题数据检验审题者准不准,看的就是这一项。
+- 题型范例没启用、或题型表读不到时,`exemplars` 是空列表,其余照常返回。这个函数不受任何
+  开关控制:选题记录一直在记。
+- 聚合的纯函数是 `summarize_picks(picks: list[dict[str, Any]]) -> dict[str, Any]`(同一模块),
+  不碰数据库,测试里可以直接喂合成的选题记录。
 
 ## 6. 角色
 
@@ -458,6 +618,11 @@ P2 **不新增接口,不新增权限点**。变化只是两个已有接口的返
 | 探索者(已有) | 受限循环,只读 GitHub 工具 | 一个仓 | 档案 | `evaluation/explore.md`,不变 |
 | 出题者(已有) | 单次调用 | 一条线的档案 | 题组 | `evaluation/grilling.md` 等,增加范例段 |
 | 审题者(新) | 单次调用,无工具 | 一条线的题组与档案 | 逐题意见 | `evaluation/question_review.md` |
+| 题型归纳者(新,P4) | 离线单次调用,无工具,管理员触发 | 一个周期里被选用过的题(已脱敏) | 去标识的题型草稿 | `evaluation/exemplar_induce.md` |
+
+出题者在 P4 多了两段可选的附加 prompt,都接在原 prompt 的后面、原文件不动:打回重写
+(`evaluation/question_revise.md`,只在拦截模式下)和范例段(`evaluation/exemplars.md`,
+只在题型范例打开且有已通过的题型时)。
 
 ## 7. 安全与失败语义
 
@@ -519,6 +684,15 @@ SKIP。它出三个指标:
   「PASS 只代表确定性段」。门槛(通过率 1.0)是初值,3 条用例只够冒烟。
 - 「规划者失败时退回默认」由单测覆盖(`tests/test_plan.py`),不在数据集里。
 
+P4 的两项:
+
+- **拦截模式没有单独的 suite**。改题组的动作(换题、丢题)是确定性的,由单测覆盖;该不该开
+  拦截,看的是 `question_review_probes` 的 `good_keep_rate`——还没有跑过,也还没有定门槛。
+- **`exemplar_probes`**(`evals/datasets/exemplar_probes.yaml`,新):
+  - 确定性段**已经跑过并通过**(10 条):题型文字的闸、计数与选用面门槛。
+  - 模型段**没有跑过**(1 条:归纳结果里不能留着原题埋的项目名、文件名、人名、学校名和数字,
+    每条都要过闸,且至少归纳出一条够门槛的题型)。素材是合成的,不是真实选题记录。
+
 ## 9. 成本与预算闸
 
 - P1 不增加调用,只缩短墙钟。例外是 D1 记下的那一种:多条仓线同时回退到简历深挖时,多出来的
@@ -530,6 +704,9 @@ SKIP。它出三个指标:
   前缀,可以命中缓存」,落地时发现做不到(D5)。审题在线内排在出题之后,所以抬高的是总量,
   不是并发峰值;它的用量与探索、出题一起计入 `explore_usage_total`。
 - 题目索引每份题库多一次批量 embedding 调用和几十条短查询,不调对话模型。
+- 拦截模式(P4)下,有题被打回的线再多一次出题调用和一次审题调用。
+- 题型归纳(P4)是管理员手动触发的离线调用,一个周期一次到几次;范例段让每次出题的输入多
+  几百个字,不增加调用次数。
 - 整包预算硬上限写在配置里(`QBANK_EXPLORE_MAX_TOTAL_TURNS` /
   `QBANK_EXPLORE_MAX_TOTAL_WALL_SECONDS`),规划者、候选人都改不了。缺省值不比今天紧(D2)。
 
@@ -542,7 +719,7 @@ SKIP。它出三个指标:
 | P3 | 规划者与分档预算 | `plan_probes` 通过;探索总轮数下降而 judge 评分不降 |
 | P4 | 审题拦截模式;选用题型范例 | 需要至少一个周期的选题数据;误杀率达标后才开拦截 |
 
-**进度**:P1 已实现;P2、P3 的机制已实现、默认关闭、**验收未完成**;P4 未开工。三期的
+**进度**:P1 已实现;P2、P3、P4 的机制已实现、默认关闭、**验收未完成**。四期的
 `ruff check` 与全量单测都通过。
 
 P1 没有做完的验收与留下的尾巴:
@@ -576,6 +753,19 @@ P3 **不能算验收通过**,原因和打开之前要做的事:
 - `normal` / `low` 的预算数值没有校准。规划者关着的这段时间,信封里已经在记每条线实际用了
   多少轮,够一个周期之后按分布重定(§12 第 1 条)。
 
+P4 做了什么:审题拦截模式(打回的题由出题者改一次并复审,建议丢弃的题在不破坏结构时丢弃)、
+题型范例(归纳、人审、取用,以及管理面的三个接口)、给周期复盘的选题汇总函数(§5.2)、
+`exemplar_probes` 数据集与执行器。
+
+P4 **验收不了,两项都不能打开**——用户知道这一点,要的是机制先做好:
+
+- 拦截模式的启用条件是审题者的误杀率达标。`question_review_probes` 还没有跑过,门槛也还
+  没有定。在那之前不要把 `QBANK_REVIEW_ENFORCE_READY` 置真。
+- 题型范例的启用条件是至少一个完整周期的选题数据。现在没有:归纳、人审、取用都只用合成
+  数据测过机制;归纳用的 prompt 没有在真实模型上跑过(`exemplar_probes` 的模型段没跑)。
+- 题型范例对出题质量有没有帮助,完全没有验证过,也没有设计对照实验。
+- 管理面的题型审核页还没有(前端,契约见 §5.1)。
+
 ## 11. 代码落位
 
 - `evaluation/bundle.py`:串行循环改并发,汇合处去重(P1 已落地);`evaluation/explore.py` 的
@@ -589,10 +779,16 @@ P3 **不能算验收通过**,原因和打开之前要做的事:
 - `state/qbank.py`:可挑题视图并入审题意见与相似度标注(P2 已落地;信封没有升 v3,见 §5);
   `state/qbank_index.py`(P2 已落地):题目索引。题型表留给 P4。
 - `evaluation/llm_common.py`:评估域模型并发闸 `model_gate` / `gated_ainvoke`(P2 已落地)。
+- 拦截模式(P4 已落地):改题组的两个纯函数在 `evaluation/question_review.py`;重写与复审的
+  编排在 `investigate_graph._enforce`。
+- `evaluation/exemplar.py`(P4 已落地,原稿没有列):题型的归纳、入库前的闸、取用;
+  `state/qbank_exemplar.py`(P4 已落地):题型表;`web/evaluation_admin.py`:题型管理的三个接口。
+- `state/qbank.py`:`pick_type_summary` / `summarize_picks`,给周期复盘的只读数据出口(P4 已落地)。
 - `evaluation/github_client.py`:请求并发上限(P1 已落地)。
 - `prompts/evaluation/plan.md`、`prompts/evaluation/question_review.md`,以及对应的 eval 执行器
   (`question_review.md` 与 `evals/question_review_probes.py` P2 已落地;`plan.md` 与
-  `evals/plan_probes.py` P3 已落地)。
+  `evals/plan_probes.py` P3 已落地;`question_revise.md`、`exemplar_induce.md`、`exemplars.md`
+  与 `evals/exemplar_probes.py` P4 已落地)。
 
 ## 12. 开放问题
 
@@ -600,7 +796,8 @@ P3 **不能算验收通过**,原因和打开之前要做的事:
    数据从 P3 起记在信封的 `plan.lines[]` 里(`turns_used` / `seconds_used`),规划者关着也记。
 2. 包内查重与通用题检测的相似度门槛,要先用现有题库离线量一遍分布。
 3. 审题标注要不要展示给面试官,还是只进数据——展示会影响选题,进而污染对审题者的检验。
-4. 题型归纳放在本提案还是并入[周期复盘](cycle-retrospective.md)统一做。
+4. (已定)题型归纳在本提案里做;周期复盘通过只读函数 `pick_type_summary` 取聚合计数(§5.2),
+   不自己读选题记录,也不调归纳模型。
 5. 通用题检测跨不跨周期:跨周期能发现「年年都问」的题,但要长期保留题目索引。
 6. 仓线并发度 3 与 GitHub 请求闸 4 都是按「峰值不比并发前高太多」拍的,要用上线后的限流与
    降级日志校准(`bundle_cv_dive_dedup`、探索降级原因、模型侧 429)。

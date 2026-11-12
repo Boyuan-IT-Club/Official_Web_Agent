@@ -1599,3 +1599,268 @@ async def test_review_node_passes_through_what_it_does_not_review(monkeypatch, p
 
     assert update == {}
     assert calls == []
+
+
+# ── 审题拦截:打回的题改一次并复审,建议丢弃的题能丢则丢 ───────
+
+_STATEMENT = "我做了 https://github.com/me/demo 报名页重构"
+
+
+def _install_scripted_generator(monkeypatch, *payloads: str) -> list[str]:
+    """出题模型按顺序吐出预置回复;返回的列表记下每次收到的 prompt。"""
+    _install_fake_explore(monkeypatch)
+    monkeypatch.setattr(ig, "GitHubClient", _FakeGH)
+    replies = list(payloads)
+    prompts: list[str] = []
+
+    class _Model:
+        async def ainvoke(self, messages):
+            prompts.append(messages[0].content)
+            reply = replies.pop(0)
+
+            class _Msg:
+                content = reply
+                usage_metadata = {"input_tokens": 1000, "output_tokens": 100}
+
+            return _Msg()
+
+    class _Settings:
+        model_strong = "test-strong"
+
+    monkeypatch.setattr(ig, "build_model", lambda *a, **k: _Model())
+    monkeypatch.setattr(ig, "get_effective_settings", _Settings)
+    return prompts
+
+
+def _install_scripted_reviewer(monkeypatch, *rounds, mode: str = "enforce", ready: bool = True):
+    """审题者按轮给意见:每轮一个 {编号: (结论, 理由)},没提到的题放行;None 表示这轮不可用。"""
+    from official_agent.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "qbank_review_mode", mode)
+    monkeypatch.setattr(get_settings(), "qbank_review_enforce_ready", ready)
+    remaining = list(rounds)
+    seen: list[list[str]] = []
+
+    async def _review(targets, *, material, statement=""):
+        seen.append([t.question for t in targets])
+        opinions = remaining.pop(0)
+        if opinions is None:
+            return {"status": "unavailable", "items": [], "prompt_version": "r/v1", "usage": None}
+        return {
+            "status": "reviewed",
+            "items": [
+                {
+                    "key": t.key,
+                    "verdict": opinions.get(t.key, ("keep", []))[0],
+                    "reasons": opinions.get(t.key, ("keep", []))[1],
+                    "revised": False,
+                }
+                for t in targets
+            ],
+            "prompt_version": "r/v1",
+            "usage": {"input_tokens": 700, "output_tokens": 30},
+        }
+
+    monkeypatch.setattr(ig, "review_line", _review)
+    return seen
+
+
+def _rewritten_payload(**reserve_zero) -> str:
+    """出题者的重写:改了第一道备选;还顺手改了入口题(不该被采用)。"""
+    payload = json.loads(_v2_payload())
+    payload["reserves"][0]["question"] = reserve_zero.get(
+        "question", "README.md 里写的排查过程,第一步为什么先看日志?"
+    )
+    payload["entry"]["question"] = "顺手改掉的入口题?"
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_enforce_rewrites_flagged_question_rereviews_and_drops(monkeypatch) -> None:
+    """拦截的完整一轮:被打回的题由出题者改一次、整组复审;建议丢弃的备选丢掉。
+
+    只有被打回的那道题换成了重写后的版本;最终意见说的是最终题组里的题。
+    """
+    prompts = _install_scripted_generator(monkeypatch, _v2_payload(), _rewritten_payload())
+    rounds = _install_scripted_reviewer(
+        monkeypatch,
+        {"reserve:0": ("revise", ["recitable"]), "reserve:1": ("drop", ["searchable"])},
+        {"reserve:1": ("drop", ["searchable"])},
+    )
+
+    qs = await ig.run_investigation(_STATEMENT)
+
+    group, review = qs["group"], qs["review"]
+    assert [r["question"] for r in group["reserves"]] == [
+        "README.md 里写的排查过程,第一步为什么先看日志?"
+    ]
+    assert group["entry"]["question"] == "为什么做这个项目?"  # 没被打回的题原样
+    assert review["mode"] == "enforce" and review["status"] == "reviewed"
+    assert {i["key"]: (i["verdict"], i["revised"]) for i in review["items"]}["reserve:0"] == (
+        "keep",
+        True,
+    )
+    assert [i["key"] for i in review["items"] if i["key"].startswith("reserve")] == ["reserve:0"]
+    assert review["dropped"] == [
+        {"key": "reserve:1", "question": "流量 ×10 哪里先坏?", "reasons": ["searchable"]}
+    ]
+    # 打回重写:第二次出题调用带着上次的题组与被打回的题;复审看到的是重写后的题
+    assert len(prompts) == 2
+    assert "questions-to-revise" in prompts[1] and "最大的难点是什么,怎么排查的?" in prompts[1]
+    assert "README.md 里写的排查过程,第一步为什么先看日志?" in rounds[1]
+    assert review["revise_prompt_version"] == "evaluation_question_revise/v1"
+    assert review["usage"]["input_tokens"] == 1400  # 两次审题
+    assert review["revise_usage"]["input_tokens"] == 1000  # 重写那一次出题
+
+
+@pytest.mark.asyncio
+async def test_enforce_discards_rewrite_that_nobody_reviewed(monkeypatch) -> None:
+    """复审拿不到结果:改过的题没人再审,这次重写不采用,题组与意见都回到重写之前。"""
+    _install_scripted_generator(monkeypatch, _v2_payload(), _rewritten_payload())
+    _install_scripted_reviewer(monkeypatch, {"reserve:0": ("revise", ["recitable"])}, None)
+
+    qs = await ig.run_investigation(_STATEMENT)
+
+    assert qs["group"]["reserves"][0]["question"] == "最大的难点是什么,怎么排查的?"
+    opinion = next(i for i in qs["review"]["items"] if i["key"] == "reserve:0")
+    assert (opinion["verdict"], opinion["revised"]) == ("revise", False)
+    assert qs["review"]["mode"] == "enforce"
+
+
+@pytest.mark.asyncio
+async def test_enforce_keeps_original_when_rewrite_is_invalid(monkeypatch) -> None:
+    """重写两次都不合规:保留原题,意见照旧挂着;丢弃照常进行。"""
+    prompts = _install_scripted_generator(monkeypatch, _v2_payload(), "不是 JSON", "还不是 JSON")
+    _install_scripted_reviewer(
+        monkeypatch,
+        {"reserve:0": ("revise", ["recitable"]), "reserve:1": ("drop", ["generic"])},
+    )
+
+    qs = await ig.run_investigation(_STATEMENT)
+
+    assert len(prompts) == 3  # 出题一次 + 重写与它的一次纠错重试
+    assert [r["question"] for r in qs["group"]["reserves"]] == ["最大的难点是什么,怎么排查的?"]
+    assert [d["key"] for d in qs["review"]["dropped"]] == ["reserve:1"]
+    assert not any(i["revised"] for i in qs["review"]["items"])
+
+
+@pytest.mark.asyncio
+async def test_enforce_keeps_questions_the_group_cannot_lose(monkeypatch) -> None:
+    """丢了就不满足题组结构的题留着:链不能少于三层,入口题不能没有。"""
+    prompts = _install_scripted_generator(monkeypatch, _v2_payload())
+    _install_scripted_reviewer(
+        monkeypatch,
+        {"entry": ("drop", ["tone"]), "chain:0:2": ("drop", ["recitable"])},
+    )
+    unenforced = json.loads(_v2_payload())
+
+    qs = await ig.run_investigation(_STATEMENT)
+
+    assert len(prompts) == 1  # 没有被打回的题,不重写
+    assert qs["group"]["entry"]["question"] == unenforced["entry"]["question"]
+    assert len(qs["group"]["chains"][0]["layers"]) == 3
+    assert qs["review"]["dropped"] == []
+    assert {i["key"] for i in qs["review"]["items"] if i["verdict"] == "drop"} == {
+        "entry",
+        "chain:0:2",
+    }
+    assert qs["review"]["revise_prompt_version"] == ""
+
+
+@pytest.mark.asyncio
+async def test_enforce_without_the_ready_flag_only_annotates(monkeypatch) -> None:
+    """只把模式写成 enforce、没有第二道确认:按标注处理,题组一个字不动。"""
+    prompts = _install_scripted_generator(monkeypatch, _v2_payload(), _rewritten_payload())
+    _install_scripted_reviewer(
+        monkeypatch,
+        {"reserve:0": ("revise", ["recitable"]), "reserve:1": ("drop", ["searchable"])},
+        ready=False,
+    )
+
+    qs = await ig.run_investigation(_STATEMENT)
+
+    assert len(prompts) == 1
+    assert [r["question"] for r in qs["group"]["reserves"]] == [
+        "最大的难点是什么,怎么排查的?",
+        "流量 ×10 哪里先坏?",
+    ]
+    assert "mode" not in qs["review"] or qs["review"]["mode"] == "annotate"
+    assert qs["review"].get("dropped", []) == []
+
+
+# ── 题型范例:接在出题 prompt 后面,用到的范例随题库落库 ─────────
+
+
+def _install_exemplars(monkeypatch, section) -> None:
+    async def _section():
+        return section
+
+    monkeypatch.setattr(ig, "exemplar_prompt_section", _section)
+
+
+def _exemplar_section():
+    from official_agent.evaluation.exemplar import ExemplarSection
+
+    return ExemplarSection(
+        text=(
+            "\n\n---\n\n## 提问方式的范例\n"
+            '<data source="question-exemplars">\n- 范例一\n</data>'
+        ),
+        exemplar_ids=(7, 9),
+        prompt_version="evaluation_exemplars/v1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_generation_without_exemplars_leaves_prompt_and_envelope_alone(monkeypatch) -> None:
+    """没有范例(默认):出题 prompt 末尾没有范例段,信封的 exemplars 为空。"""
+    prompts = _install_scripted_generator(monkeypatch, _v2_payload())
+
+    qs = await ig.run_investigation(_STATEMENT)
+
+    assert "question-exemplars" not in prompts[0]
+    assert prompts[0].rstrip().endswith("材料体量=充足。")
+    assert qs["exemplars"] is None
+
+
+@pytest.mark.asyncio
+async def test_exemplar_section_is_appended_and_recorded(monkeypatch) -> None:
+    """有范例时:范例段接在出题 prompt 的最后,用到的题型 id 与范例段版本进信封。"""
+    prompts = _install_scripted_generator(monkeypatch, _v2_payload())
+    _install_exemplars(monkeypatch, _exemplar_section())
+
+    qs = await ig.run_investigation(_STATEMENT)
+
+    assert prompts[0].endswith(_exemplar_section().text)
+    assert qs["exemplars"] == {"prompt_version": "evaluation_exemplars/v1", "exemplar_ids": [7, 9]}
+
+
+@pytest.mark.asyncio
+async def test_rewrite_pass_sees_the_same_exemplar_section(monkeypatch) -> None:
+    """打回重写用的是出题时的同一份 prompt:范例段只取一次,重写时还在。"""
+    prompts = _install_scripted_generator(monkeypatch, _v2_payload(), _rewritten_payload())
+    _install_exemplars(monkeypatch, _exemplar_section())
+    _install_scripted_reviewer(monkeypatch, {"reserve:0": ("revise", ["recitable"])}, {})
+
+    await ig.run_investigation(_STATEMENT)
+
+    assert len(prompts) == 2
+    assert _exemplar_section().text in prompts[1]
+    assert prompts[1].index("question-exemplars") < prompts[1].index("questions-to-revise")
+
+
+@pytest.mark.asyncio
+async def test_enforce_does_nothing_when_the_review_is_unavailable(monkeypatch) -> None:
+    """审题模型没给出可用结果:拦截无从谈起,题组原样放行,结果如实标不可用。"""
+    prompts = _install_scripted_generator(monkeypatch, _v2_payload(), _rewritten_payload())
+    _install_scripted_reviewer(monkeypatch, None)
+    unreviewed = json.loads(_v2_payload())
+
+    qs = await ig.run_investigation(_STATEMENT)
+
+    assert len(prompts) == 1  # 没有打回重写
+    assert [r["question"] for r in qs["group"]["reserves"]] == [
+        r["question"] for r in unreviewed["reserves"]
+    ]
+    assert qs["review"]["status"] == "unavailable"
+    assert qs["review"].get("mode", "annotate") == "annotate"

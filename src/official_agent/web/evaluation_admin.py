@@ -8,17 +8,18 @@ agent:monitor 一样走 JWT permission_codes 自校)。
 import asyncio
 import logging
 import secrets
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from official_agent.config import get_settings
+from official_agent.evaluation import exemplar as exemplar_mod
 from official_agent.evaluation import runner as eval_runner
 from official_agent.evaluation.grading import CardGrades, GradingPolicy, PoolEntry, grade_pool
 from official_agent.evaluation.graph import CARD_SCHEMA_VERSION
 from official_agent.graphs.identity import ResolvedIdentity
-from official_agent.state import audit, evaluation
+from official_agent.state import audit, evaluation, qbank_exemplar
 from official_agent.state import qbank as qbank_store
 from official_agent.web.auth import require_any as _require_any
 
@@ -563,3 +564,129 @@ async def reject_scorecard(
         "version": version,
         "status": "rejected",
     }
+
+
+# ── 选用题型:归纳草稿、列表、人审 ─────────────────────────
+# 题型会进以后每一位候选人的出题 prompt,所以两个写接口要的是初筛执行权
+# (evaluation:run),不是查看权;题型范例没打开时写接口一律拒绝。
+
+
+class ExemplarProposeBody(BaseModel):
+    cycle_id: int = Field(ge=1)
+
+
+class ExemplarReviewBody(BaseModel):
+    decision: Literal["approve", "retire"]
+
+
+_EXEMPLARS_DISABLED_DETAIL = (
+    "题型范例未启用(QBANK_EXEMPLARS_ENABLED)。启用的前提是已有至少一个完整周期的选题记录"
+)
+
+
+@router.get("/admin/evaluation/exemplars")
+async def list_exemplars(
+    _: Annotated[ResolvedIdentity, Depends(_require_resume_audit)],
+    status: Literal["proposed", "approved", "retired"] | None = None,
+    cycle_id: int | None = None,
+) -> dict[str, Any]:
+    """题型列表(草稿、已通过、已停用),选用面广的在前。
+
+    没启用时也能读:enabled=false 告诉管理面写接口现在不可用。
+    """
+    try:
+        items = await asyncio.to_thread(
+            qbank_exemplar.list_exemplars, status=status, cycle_id=cycle_id
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail="查询题型失败,请稍后重试") from exc
+    return {"enabled": exemplar_mod.exemplars_enabled(), "items": items, "total": len(items)}
+
+
+@router.post("/admin/evaluation/exemplars/propose", status_code=201)
+async def propose_exemplars(
+    body: ExemplarProposeBody,
+    identity: Annotated[ResolvedIdentity, Depends(_require_evaluation_run)],
+) -> dict[str, Any]:
+    """从一个周期的选题记录归纳题型,写成草稿(替换该周期原有的草稿)。
+
+    草稿不会被任何 prompt 用到,要逐条人审通过才生效。先写审计再归纳:审计写不了
+    就不执行。
+    """
+    if not exemplar_mod.exemplars_enabled():
+        raise HTTPException(status_code=409, detail=_EXEMPLARS_DISABLED_DETAIL)
+    try:
+        await asyncio.to_thread(
+            audit.write_audit,
+            thread_id=f"exemplar:{body.cycle_id}:{secrets.token_hex(4)}",
+            acting_user_id=int(identity.get("user_id") or 0),
+            channel="evaluation",
+            agent="exemplar-inducer",
+            action={"op": "exemplar_propose", "cycle_id": body.cycle_id},
+            decision=f"u{identity.get('user_id')}:approve",
+            result="题型归纳受理(先审计后执行;产出是草稿,人审通过后才生效)",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail="审计服务不可用,题型归纳未执行,请稍后重试"
+        ) from exc
+    try:
+        return await exemplar_mod.propose_exemplars(body.cycle_id)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            "题型归纳失败 cycle_id=%s", body.cycle_id, exc_info=True
+        )
+        raise HTTPException(
+            status_code=502, detail="题型归纳失败,原有草稿未变动,请稍后重试"
+        ) from exc
+
+
+@router.post("/admin/evaluation/exemplars/{exemplar_id}/review")
+async def review_exemplar(
+    exemplar_id: int,
+    body: ExemplarReviewBody,
+    identity: Annotated[ResolvedIdentity, Depends(_require_evaluation_run)],
+) -> dict[str, Any]:
+    """人审一条题型:approve 让它开始被出题段用作范例,retire 停用。
+
+    状态只能往前走(草稿→通过 / 停用,通过→停用)。先写审计再改状态:审计写不了
+    就不执行。
+    """
+    if not exemplar_mod.exemplars_enabled():
+        raise HTTPException(status_code=409, detail=_EXEMPLARS_DISABLED_DETAIL)
+    row = await asyncio.to_thread(qbank_exemplar.get_exemplar, exemplar_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="题型不存在")
+    new_status = "approved" if body.decision == "approve" else "retired"
+    try:
+        await asyncio.to_thread(
+            audit.write_audit,
+            thread_id=f"exemplar:{row['cycle_id']}:{secrets.token_hex(4)}",
+            acting_user_id=int(identity.get("user_id") or 0),
+            channel="evaluation",
+            agent="exemplar-reviewer",
+            action={
+                "op": "exemplar_review",
+                "exemplar_id": exemplar_id,
+                "from": row["status"],
+                "to": new_status,
+            },
+            decision=f"u{identity.get('user_id')}:{body.decision}",
+            result="题型人审受理(先审计后改状态)",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail="审计服务不可用,题型状态未改动,请稍后重试"
+        ) from exc
+    changed = await asyncio.to_thread(
+        qbank_exemplar.set_status,
+        exemplar_id,
+        new_status,
+        reviewed_by=int(identity.get("user_id") or 0),
+    )
+    if not changed:
+        raise HTTPException(
+            status_code=409,
+            detail=f"这条题型现在是「{row['status']}」,不能改成「{new_status}」;请刷新后重试",
+        )
+    return {"exemplar_id": exemplar_id, "status": new_status}
