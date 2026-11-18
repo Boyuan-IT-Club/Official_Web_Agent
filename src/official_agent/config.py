@@ -114,6 +114,15 @@ class Settings(BaseSettings):
     context_compress_threshold_tokens: int = 24000
     context_recent_keep_messages: int = 12
 
+    # 官网对话的逐轮意图提示(graphs/assistant/intent.py),三档:
+    #   off    = 不计算(基线);
+    #   shadow = 计算并记进对话日志与 trace,不交给模型;
+    #   hint   = 计算、记录,并把一段固定模板的提示拼在 system prompt 末尾。
+    # 缺省 off:要在同一份数据上跑过 off 与 hint 的对照(evals 的 tool_selection 加
+    # --intent-mode,见 docs/proposals/turn-intent-hint.md 的启用条件)才能打开 hint。
+    # 不在 HOT_KEYS:切档是对照实验的边界,改了要重启,免得一段日志里混着两种模式
+    assistant_intent_mode: Literal["off", "shadow", "hint"] = "off"
+
     # 长期记忆(memory/):管理员与社员跨会话记住偏好与事实。每隔几轮从用户本人的
     # 发言里提取一次;召回条数;保质期(天)。memory_enabled=False 整体关闭
     memory_enabled: bool = True

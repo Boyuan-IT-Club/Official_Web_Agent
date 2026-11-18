@@ -36,13 +36,15 @@ def log_conversation(
     prefix_hash: str | None = None,
     compress_event: str | None = None,
     guard_verdict: str | None = None,
+    intent: dict[str, Any] | None = None,
 ) -> None:
     """落一行 conversation_log(fail-open,非阻塞)。
 
     fire-and-forget:psycopg 是同步驱动,写入经 to_thread 进线程池,
     不占事件循环、不阻塞 SSE 流尾(ADR-0005 fail-open)。
     guard_verdict 是本轮回复出口各守卫的判定(已编码成一列文本,见
-    security/guard_verdict.py),没跑任何守卫传 None。
+    security/guard_verdict.py),没跑任何守卫传 None。intent 是本轮意图判断的记录
+    (意图提示关闭或确认续跑时传 None)。
     """
     from official_agent.observability import turn_trace_id
     from official_agent.state.conversation import write_conversation
@@ -65,6 +67,7 @@ def log_conversation(
                 compress_event=compress_event,
                 trace_id=trace_id,
                 guard_verdict=guard_verdict,
+                intent=intent,
                 **(usage or {}),
             )
         except Exception:  # noqa: BLE001 — 观测写入失败不拖垮对话(ADR-0005)

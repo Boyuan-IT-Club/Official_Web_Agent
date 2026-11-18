@@ -51,6 +51,9 @@ class ConversationRecord:
     #: 本轮回复出口各守卫的判定,`守卫名=判定` 用分号连接(格式见 security/guard_verdict.py);
     #: 没跑任何守卫的轮次为 None
     guard_verdict: str | None = None
+    #: 本轮意图判断的记录(版本/模式/标签/标记/是否出了提示,见 graphs/assistant/intent.py);
+    #: 意图提示关闭、确认续跑或判断失败的轮次为 None
+    intent: dict[str, Any] | None = None
 
 
 def _conn() -> psycopg.Connection[dict[str, Any]]:
@@ -79,6 +82,7 @@ def ensure_conversation_table() -> None:
                 compress_event   text,
                 trace_id         text,
                 guard_verdict    text,
+                intent           jsonb,
                 created_at       timestamptz NOT NULL DEFAULT now()
             );
             CREATE INDEX IF NOT EXISTS idx_conversation_user
@@ -87,7 +91,7 @@ def ensure_conversation_table() -> None:
                 ON agent_conversation_log (thread_id, created_at DESC);
             """
         )
-        # prefix_hash、compress_event、trace_id、guard_verdict 为增量加列,老库幂等补齐
+        # prefix_hash、compress_event、trace_id、guard_verdict、intent 为增量加列,老库幂等补齐
         # (存量表缺列 → INSERT 全失败且被 fail-open 吞掉 = 整表静默停写,
         # 必须随建表一起补)
         conn.execute("ALTER TABLE agent_conversation_log ADD COLUMN IF NOT EXISTS prefix_hash text")
@@ -98,6 +102,7 @@ def ensure_conversation_table() -> None:
         conn.execute(
             "ALTER TABLE agent_conversation_log ADD COLUMN IF NOT EXISTS guard_verdict text"
         )
+        conn.execute("ALTER TABLE agent_conversation_log ADD COLUMN IF NOT EXISTS intent jsonb")
         # 从一条检索日志(kb_query_log)反查它所在的那一轮对话
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_conversation_trace "
@@ -193,6 +198,7 @@ def write_conversation(
     compress_event: str | None = None,
     trace_id: str | None = None,
     guard_verdict: str | None = None,
+    intent: dict[str, Any] | None = None,
 ) -> ConversationRecord:
     """落一行对话运营数据(SSE 每轮结束调用)。
 
@@ -201,7 +207,8 @@ def write_conversation(
     tools 序列化为 jsonb;usage 列由调用方传 extract_usage 结果;
     prefix_hash 为缓存前缀稳定性证据;compress_event 为压缩事件留痕;
     trace_id 为轮级入口 id(关联 kb_query_log);guard_verdict 为回复出口守卫的判定,
-    没跑守卫的轮次留空。
+    没跑守卫的轮次留空;intent 为本轮意图判断的记录(只含枚举值与 ID,错误行照样保留,
+    对照报告要看失败轮次当时判成了什么)。
     """
     if error_code:
         # 异常/错误行不存对话内容
@@ -218,12 +225,12 @@ def write_conversation(
                 (thread_id, user_id, channel, user_message, reply_summary,
                 tools, duration_ms, error_code, input_tokens, output_tokens,
                 cache_hit_tokens, cache_miss_tokens, prefix_hash, compress_event,
-                trace_id, guard_verdict)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                trace_id, guard_verdict, intent)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id, thread_id, user_id, channel, user_message, reply_summary,
                       tools, duration_ms, error_code, input_tokens, output_tokens,
                       cache_hit_tokens, cache_miss_tokens, prefix_hash,
-                      compress_event, trace_id, guard_verdict, created_at
+                      compress_event, trace_id, guard_verdict, intent, created_at
             """,
             (
                 thread_id,
@@ -242,6 +249,7 @@ def write_conversation(
                 compress_event,
                 trace_id,
                 guard_verdict,
+                Jsonb(intent) if intent is not None else None,
             ),
         ).fetchone()
     if row is None:
@@ -271,6 +279,7 @@ def _record(row: dict[str, Any]) -> ConversationRecord:
         created_at=row["created_at"],
         trace_id=row.get("trace_id"),
         guard_verdict=row.get("guard_verdict"),
+        intent=row.get("intent"),
     )
 
 
@@ -323,7 +332,7 @@ def get_conversation(conversation_id: int) -> dict[str, Any] | None:
             SELECT id, thread_id, user_id, channel, user_message, reply_summary,
                    tools, duration_ms, error_code, input_tokens, output_tokens,
                    cache_hit_tokens, cache_miss_tokens, prefix_hash, trace_id,
-                   guard_verdict, created_at
+                   guard_verdict, intent, created_at
             FROM agent_conversation_log
             WHERE id = %s
             """,

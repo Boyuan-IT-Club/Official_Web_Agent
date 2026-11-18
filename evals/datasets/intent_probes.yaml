@@ -1,0 +1,202 @@
+# 官网对话逐轮意图提示的确定性门禁(graphs/assistant/intent.py)。不调模型、不连后端:
+#   uv run python evals/run_evals.py --suite intent_probes
+#
+# 切分:dev 用来调规则与提示模板;holdout 是独立验收,**只看不调**——规则改动以后
+# holdout 掉了,要先想清楚是规则错还是期望错,不许为了把 holdout 跑绿而加针对性规则。
+# 同一句话的改写放在同一个 group,一个 group 只能出现在一个 split 里(runner 会检查)。
+#
+# 每条用例:
+#   role            当前身份(admin / member / candidate);决定提示里允许点名哪些工具
+#   permission_codes 缺省取 defaults.admin_permission_codes(只对 admin 生效)
+#   prior_options   上一轮工具结果里列出的选项 {kind: session | reschedule_request, count: N},
+#                   runner 合成 id 为 5、6、7… 的选项
+#   cancelled_pending 本轮开始前是否刚取消了一张待确认卡片
+#   expect.label    期望标签;expect.flags 期望标记集合(精确相等,缺省为空)
+#   expect.uncertain 是否判为不确定(缺省 false)
+#   expect.tools    建议工具必须包含的工具(子集)
+#   expect.chosen_option 承接上轮选择时选中的是第几项(1 起)
+# 每条用例另有一个不写在 expect 里的不变量:提示文本只点名该身份已装配的工具。
+#
+# 样本都是合成对话;拿到有授权、已匿名化的真实用语后补进 holdout 的新 group。
+
+runner: intent_probes
+
+defaults:
+  admin_permission_codes: [interview:schedule, resume:audit]
+  # 独立验收的通过率门槛:写数据集时定下,不随规则调整
+  holdout_min_pass_rate: 0.8
+
+cases:
+  # ───────────────────────────── dev(20 条)─────────────────────────────
+  # 候选人问改期规则:「改期」不等于要求改期
+  - { id: dev-01a, group: g01, split: dev, role: candidate, input: "面试改期要走什么流程?",
+      expect: { label: rules_inquiry, tools: [search_knowledge] } }
+  - { id: dev-01b, group: g01, split: dev, role: candidate, input: "想改面试时间的话需要怎么申请?",
+      expect: { label: rules_inquiry, tools: [search_knowledge] } }
+  - { id: dev-01c, group: g01, split: dev, role: candidate, input: "改期有什么规则吗",
+      expect: { label: rules_inquiry, tools: [search_knowledge] } }
+
+  # 候选人查本人安排:问句里的「改」「排」不代表要写入
+  - { id: dev-02a, group: g02, split: dev, role: candidate, input: "我的面试改到几点了?",
+      expect: { label: self_lookup, tools: [get_my_interview] } }
+  - { id: dev-02b, group: g02, split: dev, role: candidate, input: "我的面试安排在什么时候?",
+      expect: { label: self_lookup, tools: [get_my_interview] } }
+  - { id: dev-02c, group: g02, split: dev, role: candidate, input: "我被排到哪个场次了",
+      expect: { label: self_lookup, tools: [get_my_interview] } }
+
+  # 管理员查场次
+  - { id: dev-03a, group: g03, split: dev, role: admin, input: "周六下午还有空位吗?",
+      expect: { label: admin_lookup, tools: [get_open_cycle, find_available_sessions] } }
+  - { id: dev-03b, group: g03, split: dev, role: admin, input: "9 月 11 日还有哪些面试场次有余量?",
+      expect: { label: admin_lookup, tools: [find_available_sessions] } }
+  - { id: dev-03c, group: g03, split: dev, role: admin, input: "明天的场次还剩多少名额",
+      expect: { label: admin_lookup, tools: [find_available_sessions] } }
+
+  # 管理员明确要求排期(查场次是它的前置步骤,不算复合请求)
+  - { id: dev-04a, group: g04, split: dev, role: admin, input: "把 11 号简历排到周六下午还有空位的场次",
+      expect: { label: schedule_interview, tools: [find_available_sessions, assign_interview] } }
+  - { id: dev-04b, group: g04, split: dev, role: admin, input: "把简历 11 安排到 9 月 11 日下午的场次",
+      expect: { label: schedule_interview, tools: [assign_interview] } }
+  - { id: dev-04c, group: g04, split: dev, role: admin, input: "帮我把候选人 11 分配到明天上午的面试",
+      expect: { label: schedule_interview, tools: [assign_interview] } }
+
+  # 改口:放弃写操作,转为查询
+  - { id: dev-05a, group: g05, split: dev, role: admin, input: "先别改,帮我看看周六",
+      cancelled_pending: true,
+      expect: { label: admin_lookup, flags: [negation], tools: [find_available_sessions] } }
+  - { id: dev-05b, group: g05, split: dev, role: admin, input: "算了不排了,先看看周六还有什么场次",
+      expect: { label: admin_lookup, flags: [negation], tools: [find_available_sessions] } }
+  - { id: dev-05c, group: g05, split: dev, role: admin, input: "不要分配了,查一下周六的空位",
+      expect: { label: admin_lookup, flags: [negation], tools: [find_available_sessions] } }
+
+  # 承接上轮列出的场次
+  - { id: dev-06a, group: g06, split: dev, role: admin, input: "那就第二个",
+      prior_options: { kind: session, count: 3 },
+      expect: { label: schedule_interview, flags: [prior_reference], chosen_option: 2 } }
+  - { id: dev-06b, group: g06, split: dev, role: admin, input: "就第二个吧",
+      prior_options: { kind: session, count: 3 },
+      expect: { label: schedule_interview, flags: [prior_reference], chosen_option: 2 } }
+  - { id: dev-06c, group: g06, split: dev, role: admin, input: "选第2个",
+      prior_options: { kind: session, count: 3 },
+      expect: { label: schedule_interview, flags: [prior_reference], chosen_option: 2 } }
+
+  # 审批改期申请
+  - { id: dev-07a, group: g07, split: dev, role: admin, input: "同意 27 号改期申请",
+      expect: { label: handle_reschedule, tools: [handle_reschedule] } }
+  - { id: dev-07b, group: g07, split: dev, role: admin, input: "批准改期申请 #27",
+      expect: { label: handle_reschedule, tools: [handle_reschedule] } }
+
+  # ─────────────────────────── holdout(40 条)───────────────────────────
+  # 候选人要求改期:标签与管理员相同,能不能办由装配决定(提示里不得出现写工具)
+  - { id: ho-08a, group: g08, split: holdout, role: candidate, input: "帮我把面试改到周六",
+      expect: { label: schedule_interview } }
+  - { id: ho-08b, group: g08, split: holdout, role: candidate, input: "能帮我把面试时间换到周日上午吗",
+      expect: { label: schedule_interview } }
+  - { id: ho-08c, group: g08, split: holdout, role: candidate, input: "我想把面试调到下周一",
+      expect: { label: schedule_interview } }
+
+  # 评分不在对话可提供范围
+  - { id: ho-09a, group: g09, split: holdout, role: admin, input: "分数是多少?",
+      expect: { label: other, flags: [restricted_score] } }
+  - { id: ho-09b, group: g09, split: holdout, role: admin, input: "简历 9002 的 AI 评分是多少分?",
+      expect: { label: other, flags: [restricted_score] } }
+  - { id: ho-09c, group: g09, split: holdout, role: candidate, input: "我的初筛等级是什么",
+      expect: { label: other, flags: [restricted_score] } }
+
+  # 只有指代、没有可承接的选项
+  - { id: ho-10a, group: g10, split: holdout, role: admin, input: "看看那个",
+      expect: { label: other, flags: [prior_reference, missing_target] } }
+  - { id: ho-10c, group: g10, split: holdout, role: admin, input: "就那个吧",
+      expect: { label: other, flags: [prior_reference, missing_target] } }
+
+  # 序数指代,但上一轮没有列出选项
+  - { id: ho-11a, group: g11, split: holdout, role: admin, input: "那就第二个",
+      expect: { label: other, flags: [prior_reference, missing_target] } }
+  - { id: ho-11b, group: g11, split: holdout, role: admin, input: "第三个吧",
+      expect: { label: other, flags: [prior_reference, missing_target] } }
+  - { id: ho-11c, group: g11, split: holdout, role: admin, input: "选第一个",
+      expect: { label: other, flags: [prior_reference, missing_target] } }
+
+  # 上一轮列了多个场次,这轮只说「那个」
+  - { id: ho-12a, group: g12, split: holdout, role: admin, input: "就那个",
+      prior_options: { kind: session, count: 3 },
+      expect: { label: schedule_interview, flags: [prior_reference, multiple_targets] } }
+  - { id: ho-12b, group: g12, split: holdout, role: admin, input: "这个吧",
+      prior_options: { kind: session, count: 2 },
+      expect: { label: schedule_interview, flags: [prior_reference, multiple_targets] } }
+  - { id: ho-12c, group: g12, split: holdout, role: admin, input: "那就最后一个",
+      prior_options: { kind: session, count: 3 },
+      expect: { label: schedule_interview, flags: [prior_reference], chosen_option: 3 } }
+
+  # 复合请求:主标签取最需要谨慎的那一项
+  - { id: ho-13a, group: g13, split: holdout, role: admin, input: "改期要走什么流程?顺便帮我看看周六还有空位吗",
+      expect: { label: admin_lookup, flags: [compound], tools: [search_knowledge, find_available_sessions] } }
+  - { id: ho-13b, group: g13, split: holdout, role: admin, input: "先查一下未分配的候选人,然后把 11 号简历排到周六",
+      expect: { label: schedule_interview, flags: [compound], tools: [list_unassigned, assign_interview] } }
+  - { id: ho-13c, group: g13, split: holdout, role: admin, input: "统计一下投递人数,另外看看有哪些待处理的改期申请",
+      expect: { label: admin_lookup, flags: [compound], tools: [get_recruit_statistics, list_reschedule_requests] } }
+
+  # 要排期但没说排谁
+  - { id: ho-14a, group: g14, split: holdout, role: admin, input: "帮我排一下面试",
+      expect: { label: schedule_interview, flags: [missing_target] } }
+  - { id: ho-14b, group: g14, split: holdout, role: admin, input: "把他排到周六下午",
+      expect: { label: schedule_interview, flags: [missing_target] } }
+  - { id: ho-14c, group: g14, split: holdout, role: admin, input: "安排到明天上午的场次",
+      expect: { label: schedule_interview, flags: [missing_target] } }
+
+  # 一次要排多个人
+  - { id: ho-15a, group: g15, split: holdout, role: admin, input: "把 11 和 12 号简历都排到周六",
+      expect: { label: schedule_interview, flags: [multiple_targets] } }
+  - { id: ho-15b, group: g15, split: holdout, role: admin, input: "简历 11、简历 12 分配到明天上午",
+      expect: { label: schedule_interview, flags: [multiple_targets] } }
+  - { id: ho-15c, group: g15, split: holdout, role: admin, input: "把候选人 11 和 15 安排到周日",
+      expect: { label: schedule_interview, flags: [multiple_targets] } }
+
+  # 审批改期但没说哪一条
+  - { id: ho-16a, group: g16, split: holdout, role: admin, input: "同意那条改期申请",
+      expect: { label: handle_reschedule, flags: [missing_target] } }
+  - { id: ho-16b, group: g16, split: holdout, role: admin, input: "帮我处理一下改期申请",
+      expect: { label: handle_reschedule, flags: [missing_target] } }
+  - { id: ho-16c, group: g16, split: holdout, role: admin, input: "拒绝改期",
+      expect: { label: handle_reschedule, flags: [missing_target] } }
+
+  # 查改期申请列表:是查询,不是审批
+  - { id: ho-17a, group: g17, split: holdout, role: admin, input: "有哪些待处理的改期申请?",
+      expect: { label: admin_lookup, tools: [list_reschedule_requests] } }
+  - { id: ho-17b, group: g17, split: holdout, role: admin, input: "改期申请有几条",
+      expect: { label: admin_lookup, tools: [list_reschedule_requests] } }
+  - { id: ho-17c, group: g17, split: holdout, role: admin, input: "看看最近的改期申请",
+      expect: { label: admin_lookup, tools: [list_reschedule_requests] } }
+
+  # 简历 / 统计 / 未分配
+  - { id: ho-18a, group: g18, split: holdout, role: admin, input: "技术部还有多少简历没筛?",
+      expect: { label: admin_lookup, tools: [search_resumes] } }
+  - { id: ho-18b, group: g18, split: holdout, role: member, input: "这期一共收到多少份简历?",
+      expect: { label: admin_lookup, tools: [get_recruit_statistics] } }
+  - { id: ho-18c, group: g18, split: holdout, role: admin, input: "还有哪些候选人没分配面试?",
+      expect: { label: admin_lookup, tools: [list_unassigned] } }
+
+  # 「怎么」+「改到」:问做法还是要执行,规则说不准 → 不确定,不出提示
+  - { id: ho-20a, group: g20, split: holdout, role: admin, input: "怎么把面试改到周六?",
+      expect: { label: other, uncertain: true } }
+  - { id: ho-20b, group: g20, split: holdout, role: admin, input: "如何把 11 号简历调到周日",
+      expect: { label: other, uncertain: true } }
+  - { id: ho-20c, group: g20, split: holdout, role: candidate, input: "改到周六要怎么弄",
+      expect: { label: other, uncertain: true } }
+
+  # 只是放弃
+  - { id: ho-21a, group: g21, split: holdout, role: admin, input: "算了",
+      expect: { label: other, flags: [negation] } }
+  - { id: ho-21b, group: g21, split: holdout, role: admin, input: "不用了,谢谢",
+      expect: { label: other, flags: [negation] } }
+  - { id: ho-21c, group: g21, split: holdout, role: admin, input: "先别执行",
+      cancelled_pending: true,
+      expect: { label: other, flags: [negation] } }
+
+  # 没有排期权限的管理员:标签不变,提示里不得出现写工具
+  - { id: ho-22a, group: g22, split: holdout, role: admin, permission_codes: [kb:manage],
+      input: "把 11 号简历排到周六", expect: { label: schedule_interview } }
+
+  # 寒暄
+  - { id: ho-19a, group: g19, split: holdout, role: candidate, input: "你好",
+      expect: { label: other } }

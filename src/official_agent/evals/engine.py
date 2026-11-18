@@ -116,6 +116,7 @@ def default_registry() -> dict[str, SuiteSpec]:
         critic_probes,
         cv_dive_report,
         injection_probes,
+        intent_probes,
         kb_ops_faithfulness,
         kb_ops_injection,
         kb_ops_probes,
@@ -141,6 +142,9 @@ def default_registry() -> dict[str, SuiteSpec]:
         ),
         "injection_probes": SuiteSpec(
             run=injection_probes.run_suite, env_blocker=injection_probes.env_blocker
+        ),
+        "intent_probes": SuiteSpec(
+            run=intent_probes.run_suite, env_blocker=intent_probes.env_blocker
         ),
         "qbank_probes": SuiteSpec(run=qbank_probes.run_suite, env_blocker=qbank_probes.env_blocker),
         "qbank_judge": SuiteSpec(run=qbank_judge.run_suite, env_blocker=qbank_judge.env_blocker),

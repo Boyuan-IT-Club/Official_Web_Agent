@@ -73,6 +73,7 @@ def test_ensure_conversation_table_creates_table() -> None:
     assert any("ADD COLUMN IF NOT EXISTS compress_event" in c for c in calls)
     assert any("ADD COLUMN IF NOT EXISTS trace_id" in c for c in calls)
     assert any("ADD COLUMN IF NOT EXISTS guard_verdict" in c for c in calls)
+    assert any("ADD COLUMN IF NOT EXISTS intent jsonb" in c for c in calls)
     assert any("idx_conversation_trace" in c for c in calls)
 
 
@@ -134,7 +135,7 @@ def test_write_conversation_records_trace_id_and_guard_verdict() -> None:
         )
     sql, params = conn.execute.call_args.args
     assert "trace_id, guard_verdict" in str(sql)
-    assert params[-2:] == ("ab" * 16, "triggered:查询结果")
+    assert params[-3:-1] == ("ab" * 16, "triggered:查询结果")
     assert str(sql).count("%s") == len(params)  # 占位符与参数个数对齐
     assert rec.trace_id == "ab" * 16
     assert rec.guard_verdict == "triggered:查询结果"
@@ -148,8 +149,25 @@ def test_write_conversation_without_guard_leaves_verdict_null() -> None:
             thread_id="web:u7:8f3a9c2b", user_id=7, user_message="hi"
         )
     params = conn.execute.call_args.args[1]
-    assert params[-2:] == (None, None)
-    assert rec.trace_id is None and rec.guard_verdict is None
+    assert params[-3:] == (None, None, None)
+    assert rec.trace_id is None and rec.guard_verdict is None and rec.intent is None
+
+
+def test_write_conversation_records_intent_as_jsonb() -> None:
+    """意图判断记录随轮落 jsonb 列;错误行照样保留(要看失败轮次当时判成了什么)。"""
+    intent = {"version": "intent_rules/v1", "mode": "shadow", "label": "admin_lookup"}
+    row = _conversation_row()
+    row["intent"] = intent
+    conn = _mock_conn(row)
+    with patch.object(conversation, "_conn", return_value=conn):
+        rec = conversation.write_conversation(
+            thread_id="web:u7:8f3a9c2b", user_id=7, error_code="timeout", intent=intent
+        )
+    sql, params = conn.execute.call_args.args
+    assert "guard_verdict, intent)" in str(sql)
+    assert str(sql).count("%s") == len(params)
+    assert params[-1].obj == intent
+    assert rec.intent == intent
 
 
 def test_write_conversation_masks_pii_before_insert() -> None:
