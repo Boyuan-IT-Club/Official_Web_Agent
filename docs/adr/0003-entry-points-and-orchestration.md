@@ -42,3 +42,7 @@ B 恰好是可确定性分解的工作流,A 恰好是需动态决策的自主循
   结论可能收缩 INF 模块范围,届时更新本 ADR。
 - 单循环的写操作安全不依赖意图分类,由三层承担:工具装配(读不到)+ interrupt
   确认(执行不了)+ 令牌校验(绕不过,见 ADR-0005)。
+- 补记(2026-11-18):上面「只作软路由提示」的位置已按本 ADR 的约束落地为官网聊天的
+  逐轮意图提示(`graphs/assistant/intent.py`,开关 `assistant_intent_mode`,缺省 off)。
+  它只往 system prompt 末尾追加一段固定模板的参考,不预裁剪工具、不做硬闸;是否启用
+  以 `docs/proposals/turn-intent-hint.md` 的对照评测为准。

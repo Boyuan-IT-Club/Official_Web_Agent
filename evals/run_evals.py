@@ -8,6 +8,9 @@
   uv run python evals/run_evals.py --baseline evals/baselines.json      # 对比基线,低于即 FAIL
   uv run python evals/run_evals.py --write-baseline evals/baselines.json # 落当前指标为新基线
   uv run python evals/run_evals.py --json evals/last_run.json           # 机器可读报告
+  uv run python evals/run_evals.py --suite tool_selection --intent-mode hint --json evals/hint.json
+                                                        # 意图提示对照:off 与 hint 各跑一次,
+                                                        # 再用 evals/compare_reports.py 比两份报告
 
 退出码:0 全过 | 1 有 FAIL | 2 全部 SKIP(环境未配置)。
 """
@@ -17,6 +20,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,7 +39,22 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--baseline", type=Path, help="基线文件:指标低于基线即 FAIL")
     parser.add_argument("--write-baseline", type=Path, help="把本次指标写入基线文件")
     parser.add_argument("--json", type=Path, help="机器可读报告输出路径")
+    parser.add_argument(
+        "--intent-mode",
+        choices=["off", "shadow", "hint"],
+        help="本次运行的意图提示档位(覆盖 ASSISTANT_INTENT_MODE;对照评测用)",
+    )
     return parser.parse_args(argv)
+
+
+def _apply_intent_mode(mode: str | None) -> None:
+    """把 --intent-mode 写进环境变量并让配置重读:执行器统一从配置取档位。"""
+    if not mode:
+        return
+    from official_agent.config import invalidate_settings_cache
+
+    os.environ["ASSISTANT_INTENT_MODE"] = mode
+    invalidate_settings_cache()
 
 
 def _baseline_entry(result: Any) -> dict[str, Any]:
@@ -69,6 +88,7 @@ async def _run(
     evals_dir: Path = EVALS_DIR,
     registry: dict[str, Any] | None = None,
 ) -> int:
+    _apply_intent_mode(getattr(args, "intent_mode", None))
     baseline = None
     if args.baseline:
         loaded = json.loads(args.baseline.read_text(encoding="utf-8"))

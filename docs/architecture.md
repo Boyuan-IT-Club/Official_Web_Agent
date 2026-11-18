@@ -92,7 +92,7 @@ src/official_agent/
 │   ├── retrospective_admin.py # /admin/retrospective/*:指标快照采集与读取;报告生成/审阅/发布
 │   └── org_memory_admin.py #   /admin/org-memory*:组织记忆的勾选/退役/续期/列表
 ├── graphs/                 # 编排层:LangGraph 图
-│   ├── assistant/          #   A:build_assistant_agent(create_agent ReAct)+ 会话压缩
+│   ├── assistant/          #   A:build_assistant_agent(create_agent ReAct)+ 会话压缩 + 逐轮意图提示(intent.py,缺省关)
 │   ├── identity.py         #   JWT → ResolvedIdentity(权限码/角色/属主)
 │   ├── router.py           #   统一路由图(预留,未接入)
 │   └── copilot/            #   C:面试官 Copilot(预留)
@@ -224,6 +224,7 @@ sequenceDiagram
     W->>AF: 配置指纹比对(变则重建 agent)
     W-->>C: event: session(created)
     W->>W: 模型并发闸 + 墙钟超时
+    W->>W: 新消息取消旧确认卡 → 记忆召回 → 意图判断(off/shadow/hint;确认续跑不判断,fail-open)
     loop 流式消费(astream 双模式)
         A->>TL: 工具调用(只读直连/写操作 interrupt)
         Note right of TL: search_knowledge 每查一次<br/>后台落一行 kb_query_log(fail-open)
@@ -414,7 +415,7 @@ flowchart TD
 | 表 | 内容 | 关键约束 |
 |---|---|---|
 | `agent_threads` | 会话档案(thread_id/属主/状态) | thread_id 全局唯一;软删+保留期清理 |
-| `agent_conversation_log` | 对话日志(问题摘要/工具/耗时/usage/轮级 trace_id/守卫判定) | fail-open 写入;`guard_verdict` 是 `守卫名=判定` 用分号连接 |
+| `agent_conversation_log` | 对话日志(问题摘要/工具/耗时/usage/轮级 trace_id/守卫判定/意图判断) | fail-open 写入;`guard_verdict` 是 `守卫名=判定` 用分号连接;`intent` 是 jsonb,只含版本/模式/标签/标记/建议工具,不含原文 |
 | `evaluation_scorecard` | AI 参考分卡(card JSONB/total/hard_zero;critic / panel 模式的卡带 `panel` 块:模式/置信度/注入片段/分歧) | UNIQUE(resume,cycle,card_version);状态机 CHECK |
 | `evaluation_job` | 执行 job(状态机/attempts/qbank_status) | 部分唯一索引:活跃 job 每 (resume,cycle) 一条 |
 | `evaluation_calibration_case` | 初筛校准案例(条目级判例 + 向量 real[],记 embed_model) | 案例不可改,只能停用;同一张卡的同一判定项只入库一次;按周期用案例号水位冻结 |

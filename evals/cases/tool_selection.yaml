@@ -70,3 +70,73 @@ cases:
     allow_write: true
     input: "帮我把面试改到周六上午"
     forbidden_tools: [assign_interview, handle_reschedule]
+
+  # ── 意图提示对照用例(同一份用例以 --intent-mode off / hint 各跑一次)──
+  # 候选人问改期规则:要查知识库,不是查本人安排
+  - id: ts-intent-rules-candidate
+    role: candidate
+    input: "面试改期要走什么流程?"
+    expected_tools: [search_knowledge]
+
+  # 问句里有「改」,仍是查本人安排
+  - id: ts-intent-self-lookup-candidate
+    role: candidate
+    input: "我的面试改到几点了?"
+    expected_tools: [get_my_interview]
+
+  # 改口:不排了,只查场次
+  - id: ts-intent-negation-lookup
+    role: admin
+    allow_write: true
+    permission_codes: [interview:schedule]
+    input: "先别改,帮我看看 9 月 11 日还有没有空位"
+    expected_tools: [find_available_sessions]
+    forbidden_tools: [assign_interview, handle_reschedule]
+
+  # 多轮指代:上一轮列了三个场次,这一轮按序号选第二个
+  - id: ts-intent-pick-second
+    role: admin
+    allow_write: true
+    permission_codes: [interview:schedule]
+    sessions:
+      - { sessionId: 5, interviewDate: "2026-09-11", startTime: "14:00", endTime: "15:00", deptName: "技术部", location: "线上", capacity: 8, remaining: 3 }
+      - { sessionId: 6, interviewDate: "2026-09-11", startTime: "15:00", endTime: "16:00", deptName: "技术部", location: "线上", capacity: 8, remaining: 2 }
+      - { sessionId: 7, interviewDate: "2026-09-11", startTime: "16:00", endTime: "17:00", deptName: "技术部", location: "线上", capacity: 8, remaining: 5 }
+    history: ["9 月 11 日下午还有哪些面试场次有空位?"]
+    input: "把简历 11 排到第二个"
+    expected_tools: [assign_interview]
+    expected_params:
+      assign_interview: { resume_id: 11, target_session_id: 6 }
+
+  # 没有可承接的选项:「第二个」指什么说不清,不许擅自写
+  - id: ts-intent-pick-without-options
+    role: admin
+    allow_write: true
+    permission_codes: [interview:schedule]
+    input: "那就第二个"
+    forbidden_tools: [assign_interview, handle_reschedule]
+
+  # 审批改期:同意 = status 1
+  - id: ts-intent-approve-reschedule
+    role: admin
+    allow_write: true
+    permission_codes: [interview:schedule]
+    input: "同意 27 号改期申请"
+    expected_tools: [handle_reschedule]
+    expected_params:
+      handle_reschedule: { request_id: 27, status: 1 }
+
+  # 对象不明的分数问题:评分不出对话面,也不为它去查数据
+  - id: ts-intent-score-vague
+    role: admin
+    input: "分数是多少?"
+    forbidden_tools: [search_resumes, get_resume_detail, get_candidate_card, list_unassigned, get_recruit_statistics]
+
+  # 复合查询:两件事都要查,都不是写
+  - id: ts-intent-compound-lookup
+    role: admin
+    allow_write: true
+    permission_codes: [interview:schedule]
+    input: "统计一下投递人数,另外看看有哪些待处理的改期申请"
+    expected_tools: [get_recruit_statistics, list_reschedule_requests]
+    forbidden_tools: [assign_interview, handle_reschedule]

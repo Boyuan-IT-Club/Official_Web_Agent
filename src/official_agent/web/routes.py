@@ -496,18 +496,23 @@ async def _consume_model_stream(
     acc: _TurnAccum,
     memories: list[str] | None = None,
     org_memories: list[str] | None = None,
+    intent_hint: str = "",
 ) -> AsyncIterator[str]:
     """消费 astream 双模式流:吐 SSE 事件,就地更新 acc(回复/工具/引用/usage)。
 
     graph_input:新一轮是 {"messages": [...]};确认续跑是 Command(resume=...)。
-    memories / org_memories:本轮召回的用户长期记忆与组织记忆,经运行时上下文进
-    system prompt(不进 checkpoint)。
+    memories / org_memories:本轮召回的用户长期记忆与组织记忆;intent_hint:本轮意图
+    提示段。三者都经运行时上下文进 system prompt(不进 checkpoint)。
     """
     last_usage: dict[str, int | None] | None = None
     async for mode, payload in agent.astream(
         graph_input,
         config=config,
-        context={"memories": memories or [], "org_memories": org_memories or []},
+        context={
+            "memories": memories or [],
+            "org_memories": org_memories or [],
+            "intent_hint": intent_hint,
+        },
         stream_mode=["messages", "updates"],
     ):
         if mode == "messages":
@@ -672,6 +677,55 @@ async def _cancel_pending_confirmation(agent: Any, config: dict) -> bool:
     return True
 
 
+async def _turn_intent(
+    session: session_store.SessionState,
+    config: dict,
+    message: str,
+    *,
+    mode: str,
+    cancelled_pending: bool,
+    checkpointer: Any,
+) -> tuple[dict[str, Any] | None, str]:
+    """本轮意图判断 → (落库记录, 交给模型的提示段)。off 档与任何失败都是 (None, "")。
+
+    只在普通新消息上调用,且在旧的待确认操作处理完之后:确认续跑不是新问题;聊天里
+    发「好的」「第二个」也只是普通消息,判断结果不会被当作确认。shadow 档只记录,
+    提示段恒为空。判断出错按观测面 fail-open(ADR-0005),本轮照原循环推理。
+    """
+    if mode == "off":
+        return None, ""
+    from official_agent.graphs.assistant import intent as turn_intent
+
+    started = time.monotonic()
+    writable = checkpointer is not None
+    try:
+        messages: list = []
+        if writable:
+            state = await session.agent.aget_state(config)
+            messages = (getattr(state, "values", None) or {}).get("messages") or []
+        result = turn_intent.classify_turn(
+            message,
+            prior_options=turn_intent.prior_options_from_messages(messages),
+            cancelled_pending=cancelled_pending,
+        )
+        hint = (
+            turn_intent.render_hint(result, tool_roster(session.identity, allow_write=writable))
+            if mode == "hint"
+            else ""
+        )
+    except Exception:  # noqa: BLE001 — 意图提示是增值面,判断失败不拖垮对话
+        logger.warning("意图判断失败(已忽略,本轮按原循环)", exc_info=True)
+        return None, ""
+    record = {
+        **result.as_record(),
+        "mode": mode,
+        "hinted": bool(hint),
+        "hint_prompt": turn_intent.hint_prompt_version() if hint else None,
+        "elapsed_ms": _elapsed_ms(started),
+    }
+    return record, hint
+
+
 async def _stream_turn(
     session: session_store.SessionState,
     message: str,
@@ -736,6 +790,7 @@ async def _stream_turn(
         # 流式 delta 逐块过 PII 掩码器(尾部缓冲抗跨块)
         masker = None if toolless else ReplyPiiMasker()
         error_code: str | None = None
+        intent_record: dict[str, Any] | None = None
         # 只读查询以来问者本人 JWT 执行(ADR-0006「社团官网层问答助手」):
         # 本轮内 readonly 查询经 _read 走 get_as_user,后端按本人权限判+归因
         async with asker_scope(session.user_token):
@@ -767,14 +822,32 @@ async def _stream_turn(
                     )
                 else:
                     async with asyncio.timeout(max(int(_settings.turn_wall_clock_timeout), 1)):
+                        cancelled = False
                         if resume is None and checkpointer is not None:
-                            await _cancel_pending_confirmation(session.agent, config)
+                            cancelled = await _cancel_pending_confirmation(session.agent, config)
                         # 记忆按本轮问题召回(确认续跑不是新问题,不召回);fail-open
                         memories, org_memories = (
                             await memory_recall.recall_both(session.identity, message)
                             if resume is None
                             else ([], [])
                         )
+                        intent_hint = ""
+                        if resume is None:
+                            intent_record, intent_hint = await _turn_intent(
+                                session,
+                                config,
+                                message,
+                                mode=_settings.assistant_intent_mode,
+                                cancelled_pending=cancelled,
+                                checkpointer=checkpointer,
+                            )
+                        if intent_record:
+                            # trace 上按标签筛轮次;版本与模式一起带上,两次运行才分得开
+                            config["metadata"].update(
+                                intent_label=intent_record["label"],
+                                intent_mode=intent_record["mode"],
+                                intent_version=intent_record["version"],
+                            )
                         async for event in _consume_model_stream(
                             session.agent,
                             graph_input,
@@ -783,6 +856,7 @@ async def _stream_turn(
                             acc=acc,
                             memories=memories,
                             org_memories=org_memories,
+                            intent_hint=intent_hint,
                         ):
                             yield event
             except asyncio.CancelledError:
@@ -850,6 +924,7 @@ async def _stream_turn(
             prefix_hash=p_hash,
             compress_event=compress_event,
             guard_verdict=format_verdicts(acc.guard_verdicts),
+            intent=intent_record,
         )
         # 记忆提取放在落账之后、done 之前触发(后台任务,不阻塞本轮收尾)
         if error_code is None and acc.confirm is None and resume is None:

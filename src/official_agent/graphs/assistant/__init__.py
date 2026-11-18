@@ -1,6 +1,7 @@
 """A 模块 ReAct 单循环:按身份装配只读工具集 → create_agent。
 
-形态(ADR-0003):无意图分类,「意图」由模型在循环内选工具隐式表达。
+形态(ADR-0003):无意图分类,「意图」由模型在循环内选工具隐式表达。官网通道可开
+逐轮意图提示(intent.py,缺省关闭):只是拼进 system prompt 末尾的一段参考,不改装配。
 装配须与后端 RBAC 对齐(ADR-0006「社团官网层问答助手」):不能只按粗粒度
 role 给工具,否则会把后端 V22 已从社员角色撤下(如 resume:view)的越权面
 经 query tool 原样露出。**目标装配(本文件底部
@@ -286,18 +287,21 @@ def build_model(
 class AssistantContext(TypedDict, total=False):
     """每轮随调用传入的运行时上下文(不进 checkpoint)。
 
-    memories:本轮召回的用户长期记忆;org_memories:本轮召回的组织记忆。
+    memories:本轮召回的用户长期记忆;org_memories:本轮召回的组织记忆;
+    intent_hint:本轮意图提示段(intent.render_hint 的产物,意图提示未开到 hint 档时为空)。
     """
 
     memories: list[str]
     org_memories: list[str]
+    intent_hint: str
 
 
 def _with_memories(base_prompt: str, *, allow_org_memories: bool = False) -> Any:
-    """system prompt 中间件:静态 prompt 末尾拼上本轮召回的记忆(没有则原样)。
+    """system prompt 中间件:静态 prompt 末尾拼上本轮召回的记忆与意图提示(没有则原样)。
 
     allow_org_memories 缺省为假:组织记忆这一段只在装配时明确放行的助理里才有。
     候选人的助理不放行——即使上下文里被塞进了组织记忆,也拼不进它的 system prompt。
+    意图提示排在最后:它每轮都可能变,放末尾不破坏前面各段的提示词缓存前缀。
     """
     from official_agent.memory.recall import memory_section, org_memory_section
 
@@ -307,7 +311,7 @@ def _with_memories(base_prompt: str, *, allow_org_memories: bool = False) -> Any
         prompt = base_prompt + memory_section(list(context.get("memories") or []))
         if allow_org_memories:
             prompt += org_memory_section(list(context.get("org_memories") or []))
-        return prompt
+        return prompt + str(context.get("intent_hint") or "")
 
     return _prompt
 
@@ -333,7 +337,8 @@ def build_assistant_agent(
     写操作要挂起等确认,挂不住就不该让模型看见写工具。
     长期记忆经运行时上下文 context={"memories": [...], "org_memories": [...]} 传入,
     由中间件拼在 system prompt 末尾(memory/recall.py);不传则与无记忆时完全一致。
-    组织记忆这一段按身份装配:只有管理员与社员的助理有,候选人的没有。"""
+    组织记忆这一段按身份装配:只有管理员与社员的助理有,候选人的没有。
+    意图提示同走运行时上下文(context["intent_hint"]),由调用方逐轮算好传入。"""
     from official_agent.memory.recall import ORG_MEMORY_ROLES
 
     settings = get_effective_settings()

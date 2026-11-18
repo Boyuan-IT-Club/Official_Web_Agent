@@ -10,6 +10,16 @@
 - ``exact: true``    :调用集合必须与 expected_tools 完全相等(默认不要求)
 - ``allow_write`` / ``permission_codes``:写工具用例——按官网通道装配写工具,
   运行停在确认挂起处,写操作不会执行
+- ``history``:先在同一会话里依次发这些消息,断言只看最后一条 ``input`` 那一轮的调用
+  (多轮指代,如上一轮列场次、这一轮说「第二个」);history 里不要放写请求——停在
+  确认处的会话再发新消息,需要 web 入口的取消逻辑,这里不模拟
+- ``sessions``:覆盖假后端的可用场次(缺省一个场次 #5)
+
+意图提示:``run_suite(intent_mode=...)`` 缺省取 config.assistant_intent_mode(命令行
+``--intent-mode`` 覆盖)。shadow/hint 档逐轮按 web 入口同一套函数算意图,hint 档把提示
+经运行时上下文交给图;同一份用例分别以 off 与 hint 跑两次,即是对照评测。
+每条用例的明细带上意图标签;observations 记最后一轮的耗时分位、模型调用数与 token,
+不设门(方向不是「越高越好」)。
 
 确定性边界:LLM 非零温,断言用集合/子集而非轨迹全文以抗抖动;个别 case
 仍可复现性差时应在 case 上加约束或改写输入,不在 runner 里加随机重试。
@@ -17,6 +27,8 @@
 
 from __future__ import annotations
 
+import secrets
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, cast
@@ -29,9 +41,10 @@ from official_agent.graphs.identity import ResolvedIdentity
 from official_agent.tools import readonly
 from official_agent.tools.client import BackendClient
 
-#: build_agent 注入形状:(identity, user_token) → 可 ainvoke 的图(同步工厂)
-AgentFactory = Callable[[Any, str], Any]
-AgentRunner = Callable[[Any, str], Awaitable[Any]]
+#: build_agent 注入形状:(identity, user_token, **装配选项) → 可 ainvoke 的图(同步工厂)
+AgentFactory = Callable[..., Any]
+#: ainvoke 注入形状:(agent, 本轮文本, *, config, context) → 图的最终状态
+AgentRunner = Callable[..., Awaitable[Any]]
 
 
 def env_blocker() -> str | None:
@@ -48,15 +61,18 @@ def env_blocker() -> str | None:
     return None
 
 
-def _default_factory(identity: Any, user_token: str, *, allow_write: bool = False) -> Any:
+def _default_factory(
+    identity: Any, user_token: str, *, allow_write: bool = False, multi_turn: bool = False
+) -> Any:
     """真实装配路径:与产品同一构建函数,仅后端 HTTP 被 fake 顶替。
 
     非流式 ainvoke,stream_usage 必须 False(openai-compatible 端点约束)。
     allow_write:写工具用例。配内存 checkpointer 让写工具能挂起——运行停在
-    确认处,写操作永远不会真正执行,评测只看模型有没有选对工具、参数对不对。"""
+    确认处,写操作永远不会真正执行,评测只看模型有没有选对工具、参数对不对。
+    multi_turn:带 history 的用例,同样要内存 checkpointer 才能跨轮记住上下文。"""
     from official_agent.graphs.assistant import build_assistant_agent
 
-    if not allow_write:
+    if not allow_write and not multi_turn:
         return build_assistant_agent(identity, user_token=user_token, stream_usage=False)
     from langgraph.checkpoint.memory import MemorySaver
 
@@ -65,7 +81,7 @@ def _default_factory(identity: Any, user_token: str, *, allow_write: bool = Fals
         user_token=user_token,
         stream_usage=False,
         checkpointer=MemorySaver(),
-        allow_write=True,
+        allow_write=allow_write,
     )
 
 
@@ -77,9 +93,10 @@ class _FakeBackend(BackendClient):
     透传即可)。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, sessions: list[dict[str, Any]] | None = None) -> None:
         self._token: str | None = "eval-service-token"
         self.calls: list[tuple[str, dict[str, Any] | None]] = []
+        self._sessions = sessions
 
     def _route(self, path: str, params: dict[str, Any] | None) -> Any:
         self.calls.append((path, params))
@@ -101,6 +118,8 @@ class _FakeBackend(BackendClient):
                 "totalElements": 2,
             }
         if path.endswith("/available-sessions"):
+            if self._sessions is not None:
+                return self._sessions
             # 字段与后端 InterviewSessionDTO 一致(工具层按真实字段投影)
             return [
                 {
@@ -116,6 +135,20 @@ class _FakeBackend(BackendClient):
             ]
         if path == "/api/interview/schedule/my":
             return {"scheduleId": 9, "interviewTime": "2026-09-11 14:00", "location": "线上"}
+        if path == "/api/interview/reschedule/admin/list":
+            return [
+                {
+                    "requestId": 27,
+                    "requestType": "RESCHEDULE",
+                    "reason": "与考试时间冲突",
+                    "currentInterviewTime": "2026-09-11 14:00",
+                    "currentLocation": "线上",
+                    "preferredSlots": [{"label": "9 月 13 日上午"}],
+                    "submittedAt": "2026-09-08 20:00",
+                    "status": 0,
+                    "awaitingReassign": False,
+                }
+            ]
         return {"evalFixture": True, "path": path}
 
     async def get(
@@ -142,6 +175,14 @@ def _identity_of(role: str, permission_codes: list[str] | None = None) -> Resolv
             "source": "eval",
         },
     )
+
+
+def _current_turn(messages: list[Any]) -> list[Any]:
+    """最后一条用户消息之后的消息,即被断言的那一轮。"""
+    last_human = max(
+        (i for i, m in enumerate(messages) if isinstance(m, HumanMessage)), default=-1
+    )
+    return messages[last_human + 1 :]
 
 
 def _extract_tool_calls(messages: list[Any]) -> list[tuple[str, dict[str, Any]]]:
@@ -187,54 +228,138 @@ def _load_yaml(path: Path) -> Any:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
+def _turn_context(
+    text: str, prior: list[Any], *, mode: str, tool_names: list[str]
+) -> tuple[dict[str, Any], str | None]:
+    """按 web 入口同一套函数算本轮意图 → (运行时上下文, 意图标签);off 档标签为 None。"""
+    if mode == "off":
+        return {}, None
+    from official_agent.graphs.assistant import intent as turn_intent
+
+    result = turn_intent.classify_turn(
+        text, prior_options=turn_intent.prior_options_from_messages(prior)
+    )
+    hint = turn_intent.render_hint(result, tool_names) if mode == "hint" else ""
+    return {"intent_hint": hint}, result.label
+
+
+def _turn_cost(messages: list[Any]) -> tuple[int, int | None]:
+    """一轮的 (模型调用数, 总 token);没有任何 usage 时 token 为 None。"""
+    replies = [m for m in messages if isinstance(m, AIMessage)]
+    usages = [m.usage_metadata for m in replies if getattr(m, "usage_metadata", None)]
+    tokens = sum(int(u.get("total_tokens") or 0) for u in usages) if usages else None
+    return len(replies), tokens
+
+
+def _percentile(values: list[float], q: float) -> float:
+    """最近秩分位数:小样本下不插值,报出来的就是某一条真实耗时。"""
+    ordered = sorted(values)
+    rank = max(1, -(-len(ordered) * q // 100))  # ceil(n*q/100)
+    return ordered[int(rank) - 1]
+
+
+def _observations(latencies: list[float], calls: list[int], tokens: list[int]) -> dict:
+    if not latencies:
+        return {}
+    observed = {
+        "latency_p50_ms": round(_percentile(latencies, 50)),
+        "latency_p95_ms": round(_percentile(latencies, 95)),
+        "model_calls_mean": round(sum(calls) / len(calls), 2),
+    }
+    if tokens:
+        observed["tokens_mean"] = round(sum(tokens) / len(tokens), 1)
+    return observed
+
+
 async def run_suite(
     path: Path,
     *,
     build_agent: AgentFactory | None = None,
     ainvoke: AgentRunner | None = None,
     distribution: bool = False,
+    intent_mode: str | None = None,
 ) -> SuiteResult:
     """逐 case 构图执行。build_agent/ainvoke 可注入 fake(单测不花 API 费)。"""
+    from official_agent.config import get_settings
+    from official_agent.graphs.assistant import intent as turn_intent
+    from official_agent.graphs.assistant import tool_roster
+
     if build_agent is None:
         build_agent = _default_factory
     if ainvoke is None:
         ainvoke = _default_ainvoke
+    settings = get_settings()
+    mode = intent_mode or settings.assistant_intent_mode
 
     data = _load_yaml(path)
     # 显式格式 {runner, cases:[...]};裸列表为早期格式兼容
     cases_yaml = data["cases"] if isinstance(data, dict) else data
     results: list[CaseResult] = []
+    latencies: list[float] = []
+    model_calls: list[int] = []
+    tokens: list[int] = []
     for case in cases_yaml:
         role = str(case["role"])
         user_token = "eval-user-token" if role == "candidate" else ""
-        backend = _FakeBackend()
+        backend = _FakeBackend(sessions=case.get("sessions"))
         readonly.set_backend_client(backend)
+        history = [str(h) for h in case.get("history") or []]
         try:
             identity = _identity_of(role, case.get("permission_codes"))
-            # 写工具用例:用例显式声明 allow_write 才走写装配(注入的假工厂不受影响)
-            write_kwargs = {"allow_write": True} if case.get("allow_write") else {}
-            agent = build_agent(identity, user_token, **write_kwargs)
-            result = await ainvoke(agent, str(case["input"]))
-            calls = _extract_tool_calls(result.get("messages", []))
+            # 用例显式声明才走写装配/多轮(注入的假工厂不受影响)
+            build_kwargs: dict[str, Any] = {}
+            if case.get("allow_write"):
+                build_kwargs["allow_write"] = True
+            if history:
+                build_kwargs["multi_turn"] = True
+            agent = build_agent(identity, user_token, **build_kwargs)
+            tool_names = tool_roster(identity, allow_write=bool(case.get("allow_write")))
+            config = {"configurable": {"thread_id": f"eval:{secrets.token_hex(4)}"}}
+            messages: list[Any] = []
+            label: str | None = None
+            elapsed_ms = 0.0
+            for text in [*history, str(case["input"])]:
+                context, label = _turn_context(text, messages, mode=mode, tool_names=tool_names)
+                started = time.monotonic()
+                result = await ainvoke(agent, text, config=config, context=context)
+                elapsed_ms = (time.monotonic() - started) * 1000
+                messages = list(result.get("messages", []))
+            turn = _current_turn(messages)
+            calls = _extract_tool_calls(turn)
             passed, detail = _case_passed(case, calls)
+            if label is not None:
+                detail = f"[intent={label}] {detail}"
+            latencies.append(elapsed_ms)
+            n_calls, n_tokens = _turn_cost(turn)
+            model_calls.append(n_calls)
+            if n_tokens is not None:
+                tokens.append(n_tokens)
         except Exception as exc:  # noqa: BLE001 - 单 case 炸不拖垮整 suite
             passed, detail = False, f"执行异常: {type(exc).__name__}: {exc}"
         finally:
             readonly.set_backend_client(None)
         results.append(CaseResult(id=str(case["id"]), passed=passed, detail=detail))
 
+    context: dict[str, Any] = {"intent_mode": mode, "model": settings.model_strong}
+    if mode != "off":
+        context["intent_version"] = turn_intent.INTENT_VERSION
+    if mode == "hint":
+        context["hint_prompt"] = turn_intent.hint_prompt_version()
     return SuiteResult(
         name=path.stem,
         kind="tool_selection",
         source=path.name,
         status="FAIL" if any(not c.passed for c in results) else "PASS",
         cases=results,
+        observations=_observations(latencies, model_calls, tokens),
+        context=context,
     )
 
 
-async def _default_ainvoke(agent: Any, input_text: str) -> dict[str, Any]:
-    # thread_id:写工具用例带 checkpointer,必须指定会话;无 checkpointer 时无副作用
-    import secrets
-
-    config = {"configurable": {"thread_id": f"eval:{secrets.token_hex(4)}"}}
-    return await agent.ainvoke({"messages": [HumanMessage(input_text)]}, config)
+async def _default_ainvoke(
+    agent: Any, input_text: str, *, config: dict[str, Any], context: dict[str, Any]
+) -> dict[str, Any]:
+    # off 档不传上下文:与意图提示上线前的调用形状一致,基线才可比
+    return await agent.ainvoke(
+        {"messages": [HumanMessage(input_text)]}, config, context=context or None
+    )

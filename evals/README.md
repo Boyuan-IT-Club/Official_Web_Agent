@@ -36,6 +36,7 @@ uv run python evals/run_evals.py --write-baseline evals/baselines.json # 落新�
 |---|---|---|---|
 | `cases/tool_selection.yaml` | cases | `tool_selection` | LLM_* 配置 |
 | `cases/injection_probes.yaml` | cases | `injection_probes` | 无(确定性) |
+| `datasets/intent_probes.yaml` | datasets | `intent_probes` | 无(确定性:官网对话逐轮意图提示的标签/标记/提示边界;dev 须全过,holdout 有门槛) |
 | `datasets/kb_probes.yaml` | datasets | `kb_probes` | kb.store 可导入 + EMBED_* + 语料入库 |
 | `datasets/qbank_probes.yaml` | datasets | `qbank_probes` | 无(确定性) |
 | `datasets/qbank_judge.yaml` | datasets | `qbank_judge` | LLM_* 配置 |
@@ -55,6 +56,26 @@ uv run python evals/run_evals.py --write-baseline evals/baselines.json # 落新�
 | `datasets/kb_ops_verify.yaml` | datasets | `kb_ops_verify` | LLM_* 配置(草稿审核:模型 + 代码复核与裁决,不读库不落库);尚无基线 |
 | `datasets/kb_ops_injection.yaml` | datasets | `kb_ops_injection` | 无(确定性:三个角色的输出写死成「已被带偏」,断言代码闸门挡住夹带内容) |
 | `datasets/kb_ops_faithfulness.yaml` | datasets | `kb_ops_faithfulness` | LLM_* 配置(回复忠实度核对:模型 + 代码复核与计数,不读库不落库);尚无基线 |
+
+## 意图提示对照
+
+官网对话的逐轮意图提示(`graphs/assistant/intent.py`,设计见
+`docs/proposals/turn-intent-hint.md`)分两层验:
+
+- `intent_probes`:规则本身。确定性,随 pytest 进 PR 检查(`tests/test_turn_intent.py`)。
+  dev 20 条用来调规则,holdout 40 条只看不调;同一句话的改写不许跨两边。
+- `tool_selection` 的 off / hint 对照:提示有没有让模型把事办对。同一份用例、同一个模型各跑一次,
+  再逐条比:
+
+```bash
+uv run python evals/run_evals.py --suite tool_selection --intent-mode off  --json evals/reports/ts_off.json
+uv run python evals/run_evals.py --suite tool_selection --intent-mode hint --json evals/reports/ts_hint.json
+uv run python evals/compare_reports.py --before evals/reports/ts_off.json --after evals/reports/ts_hint.json
+```
+
+结果不稳的用例每侧重复跑三次,把三份报告都传给 `--before` / `--after`(逐条按多数定结论,
+平票单列)。报告的 `context` 带着 `intent_mode` 与规则、模板版本;`observations` 带最后一轮的
+耗时 P50/P95、平均模型调用数与 token。样本小,P95 只作参考。
 
 ## 初筛评分基线
 
